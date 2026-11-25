@@ -62,6 +62,9 @@ class StateStore extends EventEmitter {
     this.stateFile = path.join(this.dataDir, 'sessions-state.json');
     this.sessions = new Map();
     this.commandQueues = new Map();
+    this.saveDebounceMs = options.saveDebounceMs ?? 400;
+    this._saveTimer = null;
+    this._dirty = false;
     this._ensureDataDir();
     this._loadFromDisk();
   }
@@ -310,23 +313,44 @@ class StateStore extends EventEmitter {
     }
   }
 
+  /**
+   * Writes the state atomically (temp file + rename) so a crash mid-write
+   * can never leave a truncated sessions-state.json behind.
+   */
   _saveToDisk() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    this._dirty = false;
     try {
       const payload = {
         updatedAt: new Date().toISOString(),
         sessions: Array.from(this.sessions.values()),
       };
-      fs.writeFileSync(this.stateFile, JSON.stringify(payload, null, 2), 'utf8');
+      const tmpFile = `${this.stateFile}.${process.pid}.tmp`;
+      fs.writeFileSync(tmpFile, JSON.stringify(payload), 'utf8');
+      fs.renameSync(tmpFile, this.stateFile);
     } catch {}
   }
 
+  /** Coalesces bursts of changes into a single disk write. */
+  _scheduleSave() {
+    this._dirty = true;
+    if (this._saveTimer) return;
+    this._saveTimer = setTimeout(() => this._saveToDisk(), this.saveDebounceMs);
+    if (this._saveTimer.unref) this._saveTimer.unref();
+  }
+
+  /** Persists any pending changes immediately (call on shutdown). */
+  flush() {
+    if (this._dirty) this._saveToDisk();
+  }
+
   _emitChange(eventType = 'state_updated', detail = {}) {
-    this._saveToDisk();
-    this.emit('change', {
-      type: eventType,
-      detail,
-      snapshot: this.getSnapshot(),
-    });
+    this._scheduleSave();
+    // Listeners build the snapshot themselves when (and if) they need it.
+    this.emit('change', { type: eventType, detail });
   }
 
   _inferProjectMeta(cwd) {

@@ -1,44 +1,86 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 
+const GIT_CACHE_TTL_MS = 5000;
+const TRANSCRIPT_LIST_TTL_MS = 2000;
+const MAX_CACHE_ENTRIES = 200;
+
+const GIT_OPTS = { stdio: ['ignore', 'pipe', 'ignore'], timeout: 1200, windowsHide: true };
+
+function toGitMeta(branchOut, statusOut) {
+  const branch = String(branchOut || '').trim();
+  const status = String(statusOut || '').trim();
+  return {
+    branch: branch || 'main',
+    dirtyFiles: status ? status.split(/\r?\n/).filter(Boolean).length : 0,
+  };
+}
+
+function readGitMetadataSync(cwd) {
+  try {
+    return toGitMeta(
+      execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { ...GIT_OPTS, cwd }),
+      execFileSync('git', ['status', '--porcelain'], { ...GIT_OPTS, cwd })
+    );
+  } catch {
+    return { branch: 'local', dirtyFiles: 0 };
+  }
+}
+
+function readGitMetadataAsync(cwd) {
+  const run = (args) =>
+    new Promise((resolve, reject) =>
+      execFile('git', args, { ...GIT_OPTS, cwd }, (err, stdout) =>
+        err ? reject(err) : resolve(stdout)
+      )
+    );
+  return Promise.all([run(['rev-parse', '--abbrev-ref', 'HEAD']), run(['status', '--porcelain'])])
+    .then(([branchOut, statusOut]) => toGitMeta(branchOut, statusOut))
+    .catch(() => ({ branch: 'local', dirtyFiles: 0 }));
+}
+
+function boundCache(map) {
+  if (map.size > MAX_CACHE_ENTRIES) {
+    map.delete(map.keys().next().value);
+  }
+}
+
+const gitCache = new Map(); // cwd -> { at, value, refreshing }
+
+/**
+ * Git branch + dirty file count for a folder. Hook events arrive many times per second,
+ * so only the very first lookup per folder is synchronous; afterwards the cached value is
+ * returned immediately and refreshed in the background once it is older than 5s.
+ */
 function getGitMetadata(cwd) {
   if (!cwd || !fs.existsSync(cwd)) {
     return { branch: 'main', dirtyFiles: 0 };
   }
-  try {
-    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
-      cwd,
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 1200,
-    })
-      .toString()
-      .trim();
-
-    const statusOutput = execSync('git status --porcelain', {
-      cwd,
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 1200,
-    })
-      .toString()
-      .trim();
-
-    const dirtyFiles = statusOutput
-      ? statusOutput.split(/\r?\n/).filter(Boolean).length
-      : 0;
-
-    return { branch: branch || 'main', dirtyFiles };
-  } catch {
-    return { branch: 'local', dirtyFiles: 0 };
+  const hit = gitCache.get(cwd);
+  if (!hit) {
+    const value = readGitMetadataSync(cwd);
+    gitCache.set(cwd, { at: Date.now(), value, refreshing: false });
+    boundCache(gitCache);
+    return { ...value };
   }
+  if (Date.now() - hit.at > GIT_CACHE_TTL_MS && !hit.refreshing) {
+    hit.refreshing = true;
+    readGitMetadataAsync(cwd).then((value) => {
+      hit.value = value;
+      hit.at = Date.now();
+      hit.refreshing = false;
+    });
+  }
+  return { ...hit.value };
 }
 
 /**
  * Finds all Claude Code UTF-8 `.jsonl` transcript files for a workspace `cwd`
  * inside `~/.claude/projects/<project-slug>/*.jsonl`, sorted newest first.
  */
-function findTranscriptsForCwd(cwd) {
+function scanTranscriptsForCwd(cwd) {
   if (!cwd) return [];
   try {
     const projectsDir = path.join(os.homedir(), '.claude', 'projects');
@@ -88,6 +130,69 @@ function findTranscriptsForCwd(cwd) {
   }
 }
 
+const transcriptListCache = new Map(); // cwd -> { at, list }
+
+/**
+ * Cached wrapper around the directory scan of ~/.claude/projects, which stats every
+ * transcript on disk. New transcript files show up within TRANSCRIPT_LIST_TTL_MS.
+ */
+function findTranscriptsForCwd(cwd) {
+  if (!cwd) return [];
+  const key = String(cwd);
+  const hit = transcriptListCache.get(key);
+  if (hit && Date.now() - hit.at < TRANSCRIPT_LIST_TTL_MS) {
+    return hit.list;
+  }
+  const list = scanTranscriptsForCwd(cwd);
+  transcriptListCache.set(key, { at: Date.now(), list });
+  boundCache(transcriptListCache);
+  return list;
+}
+
+const parseCache = new Map(); // "transcriptPath\0cwd" -> { signature, result }
+
+function fileSignature(paths) {
+  return paths
+    .map((p) => {
+      try {
+        const st = fs.statSync(p);
+        return `${p}:${st.mtimeMs}:${st.size}`;
+      } catch {
+        return `${p}:missing`;
+      }
+    })
+    .join('|');
+}
+
+/**
+ * Same as parseTranscriptTailUncached, but re-reads and re-parses transcripts only when one
+ * of the candidate files actually changed (mtime/size). Callers get their own copy.
+ */
+function parseTranscriptTail(transcriptPath, cwd = null) {
+  const candidates = findTranscriptsForCwd(cwd)
+    .slice(0, 3)
+    .map((item) => item.path);
+  if (transcriptPath) candidates.push(transcriptPath);
+
+  const key = `${transcriptPath || ''}\u0000${cwd || ''}`;
+  const signature = fileSignature(candidates);
+  const hit = parseCache.get(key);
+  if (hit && hit.signature === signature) {
+    return hit.result && structuredClone(hit.result);
+  }
+
+  const result = parseTranscriptTailUncached(transcriptPath, cwd);
+  parseCache.set(key, { signature, result });
+  boundCache(parseCache);
+  return result && structuredClone(result);
+}
+
+function clearCaches() {
+  gitCache.clear();
+  transcriptListCache.clear();
+  parseCache.clear();
+}
+
 function findLatestTranscriptForCwd(cwd) {
   const list = findTranscriptsForCwd(cwd);
   return list.length > 0 ? list[0].path : null;
@@ -101,7 +206,7 @@ function findLatestTranscriptForCwd(cwd) {
  * - Clean UTF-8 conversation log (`utf8Preview`)
  * - Active or completed Task (sub-agent) invocations
  */
-function parseTranscriptTail(transcriptPath, cwd = null) {
+function parseTranscriptTailUncached(transcriptPath, cwd = null) {
   const allTranscripts = findTranscriptsForCwd(cwd);
   const targetPath =
     transcriptPath && fs.existsSync(transcriptPath)
@@ -391,6 +496,8 @@ module.exports = {
   findTranscriptsForCwd,
   findLatestTranscriptForCwd,
   parseTranscriptTail,
+  parseTranscriptTailUncached,
+  clearCaches,
   summarizeText,
   inferWorkflowFromTool,
 };

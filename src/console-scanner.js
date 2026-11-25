@@ -1,4 +1,4 @@
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -177,6 +177,12 @@ function parseConsoleScreen(rawScreen) {
   };
 }
 
+const POWERSHELL_ARGS = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', BRIDGE_SCRIPT];
+
+/**
+ * One-shot fallback: starts a fresh PowerShell (and recompiles the C# bridge) per call.
+ * Only used when the persistent bridge cannot be started.
+ */
 function invokeWinConsoleBridge(args = [], timeoutMs = 4500) {
   return new Promise((resolve) => {
     if (process.platform !== 'win32' || !fs.existsSync(BRIDGE_SCRIPT)) {
@@ -188,33 +194,173 @@ function invokeWinConsoleBridge(args = [], timeoutMs = 4500) {
       `amc-bridge-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`
     );
 
-    const psArgs = [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
-      BRIDGE_SCRIPT,
-      ...args,
-      '-OutputFile',
-      tmpFile,
-    ];
-
-    execFile('powershell.exe', psArgs, { timeout: timeoutMs }, () => {
-      try {
-        if (fs.existsSync(tmpFile)) {
-          const raw = fs.readFileSync(tmpFile, 'utf8');
-          fs.unlinkSync(tmpFile);
-          const parsed = JSON.parse(raw);
-          return resolve(parsed);
-        }
-      } catch {
+    execFile(
+      'powershell.exe',
+      [...POWERSHELL_ARGS, ...args, '-OutputFile', tmpFile],
+      { timeout: timeoutMs, windowsHide: true },
+      () => {
         try {
-          if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
-        } catch {}
+          const raw = fs.readFileSync(tmpFile, 'utf8');
+          return resolve(JSON.parse(raw));
+        } catch {
+          resolve({ ok: false, items: [] });
+        } finally {
+          fs.rm(tmpFile, { force: true }, () => {});
+        }
       }
-      resolve({ ok: false, items: [] });
-    });
+    );
   });
+}
+
+/** Maps a request object to the one-shot script's command-line parameters. */
+function toBridgeArgs(request) {
+  const args = ['-Action', request.action];
+  if (request.targetPid) args.push('-TargetPid', String(request.targetPid));
+  if (request.currentIndex) args.push('-CurrentIndex', String(request.currentIndex));
+  if (request.targetIndex) args.push('-TargetIndex', String(request.targetIndex));
+  // `-Value:<text>` binds the value even when the text itself starts with "-".
+  if (request.value !== undefined) args.push(`-Value:${request.value}`);
+  return args;
+}
+
+/**
+ * Keeps a single PowerShell process alive in `-Action serve` mode so the C# console bridge is
+ * compiled once instead of on every scan (PowerShell 5.1 start-up + Add-Type costs ~1s of CPU).
+ * Requests are newline-delimited JSON and answered strictly in order.
+ */
+class PersistentBridge {
+  constructor(options = {}) {
+    this.requestTimeoutMs = options.requestTimeoutMs || 8000;
+    this.child = null;
+    this.ready = null;
+    this.nextId = 1;
+    this.pending = new Map();
+    this.buffer = '';
+    this.failures = 0;
+    this.disabledUntil = 0;
+  }
+
+  _start() {
+    if (this.ready) return this.ready;
+
+    this.ready = new Promise((resolve, reject) => {
+      let child;
+      try {
+        child = spawn('powershell.exe', [...POWERSHELL_ARGS, '-Action', 'serve'], {
+          stdio: ['pipe', 'pipe', 'ignore'],
+          windowsHide: true,
+        });
+      } catch (err) {
+        return reject(err);
+      }
+      this.child = child;
+      this.buffer = '';
+
+      const startTimer = setTimeout(() => {
+        reject(new Error('Bridge start-up timed out'));
+        if (this.child === child) this._teardown(new Error('Bridge start-up timed out'));
+      }, 20000);
+
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        this.buffer += chunk;
+        let newline;
+        while ((newline = this.buffer.indexOf('\n')) !== -1) {
+          const line = this.buffer.slice(0, newline).trim();
+          this.buffer = this.buffer.slice(newline + 1);
+          if (!line) continue;
+          let msg;
+          try {
+            msg = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (msg.ready) {
+            clearTimeout(startTimer);
+            this.failures = 0;
+            resolve();
+            continue;
+          }
+          const entry = this.pending.get(msg.id);
+          if (entry) {
+            this.pending.delete(msg.id);
+            clearTimeout(entry.timer);
+            entry.resolve(msg);
+          }
+        }
+      });
+
+      child.stdin.on('error', () => {});
+      child.on('error', (err) => {
+        clearTimeout(startTimer);
+        reject(err);
+        if (this.child === child) this._teardown(err);
+      });
+      child.on('exit', () => {
+        clearTimeout(startTimer);
+        reject(new Error('Bridge exited'));
+        if (this.child === child) this._teardown(new Error('Bridge exited'));
+      });
+    });
+
+    // Avoid unhandled rejections when nobody is awaiting the start-up promise.
+    this.ready.catch(() => {});
+    return this.ready;
+  }
+
+  _teardown(err) {
+    const child = this.child;
+    this.child = null;
+    this.ready = null;
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timer);
+      entry.resolve({ ok: false, error: err.message, items: [] });
+    }
+    this.pending.clear();
+    if (child && child.exitCode === null) {
+      try {
+        child.kill();
+      } catch {}
+    }
+    // Back off after repeated crashes so a broken environment does not respawn PowerShell forever.
+    this.failures += 1;
+    if (this.failures >= 3) {
+      this.disabledUntil = Date.now() + 60000;
+      this.failures = 0;
+    }
+  }
+
+  get available() {
+    return Date.now() >= this.disabledUntil;
+  }
+
+  async request(request) {
+    await this._start();
+    const child = this.child;
+    if (!child) throw new Error('Bridge not running');
+    const id = this.nextId++;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        resolve({ ok: false, error: 'Bridge request timed out', items: [] });
+        // A hung request (e.g. stuck AttachConsole) poisons the ordered stream: restart.
+        this._teardown(new Error('Bridge request timed out'));
+      }, this.requestTimeoutMs);
+      this.pending.set(id, { resolve, timer });
+      child.stdin.write(`${JSON.stringify({ id, ...request })}\n`, 'utf8');
+    });
+  }
+
+  stop() {
+    if (this.child) {
+      try {
+        this.child.stdin.end();
+      } catch {}
+    }
+    this._teardown(new Error('Bridge stopped'));
+    this.failures = 0;
+    this.disabledUntil = 0;
+  }
 }
 
 class ConsoleScanner {
@@ -223,6 +369,22 @@ class ConsoleScanner {
     this.intervalMs = options.intervalMs || 1800;
     this.timer = null;
     this.scanning = false;
+    this.bridge = options.bridge || new PersistentBridge();
+  }
+
+  /** Sends a request through the persistent bridge, falling back to a one-shot process. */
+  async _call(request) {
+    if (process.platform !== 'win32' || !fs.existsSync(BRIDGE_SCRIPT)) {
+      return { ok: false, items: [] };
+    }
+    if (this.bridge.available) {
+      try {
+        return await this.bridge.request(request);
+      } catch {
+        // fall through to the one-shot path
+      }
+    }
+    return invokeWinConsoleBridge(toBridgeArgs(request));
   }
 
   start() {
@@ -231,6 +393,7 @@ class ConsoleScanner {
     this.timer = setInterval(() => {
       this.scanOnce();
     }, this.intervalMs);
+    if (this.timer.unref) this.timer.unref();
   }
 
   stop() {
@@ -238,13 +401,14 @@ class ConsoleScanner {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.bridge.stop();
   }
 
   async scanOnce() {
     if (this.scanning) return;
     this.scanning = true;
     try {
-      const result = await invokeWinConsoleBridge(['-Action', 'scan']);
+      const result = await this._call({ action: 'scan' });
       if (result && result.ok && Array.isArray(result.items)) {
         this.store.ingestConsoleScan(result.items);
       }
@@ -255,46 +419,39 @@ class ConsoleScanner {
     }
   }
 
+  _rescanSoon(delayMs) {
+    setTimeout(() => this.scanOnce(), delayMs);
+  }
+
   async selectOption(pid, currentIndex, targetIndex, numberValue) {
-    const res = await invokeWinConsoleBridge([
-      '-Action',
-      'select-option',
-      '-TargetPid',
-      String(pid),
-      '-CurrentIndex',
-      String(currentIndex || 1),
-      '-TargetIndex',
-      String(targetIndex || 1),
-      '-Value',
-      String(numberValue || targetIndex || '1'),
-    ]);
-    setTimeout(() => this.scanOnce(), 250);
+    const res = await this._call({
+      action: 'select-option',
+      targetPid: Number(pid),
+      currentIndex: currentIndex || 1,
+      targetIndex: targetIndex || 1,
+      value: String(numberValue || targetIndex || '1'),
+    });
+    this._rescanSoon(250);
     return res;
   }
 
   async sendKey(pid, keyName) {
-    const res = await invokeWinConsoleBridge([
-      '-Action',
-      'send-key',
-      '-TargetPid',
-      String(pid),
-      '-Value',
-      String(keyName),
-    ]);
-    setTimeout(() => this.scanOnce(), 250);
+    const res = await this._call({
+      action: 'send-key',
+      targetPid: Number(pid),
+      value: String(keyName),
+    });
+    this._rescanSoon(250);
     return res;
   }
 
   async sendText(pid, text) {
-    const res = await invokeWinConsoleBridge([
-      '-Action',
-      'send-text',
-      '-TargetPid',
-      String(pid),
-      '-Value',
-      String(text),
-    ]);
-    setTimeout(() => this.scanOnce(), 300);
+    const res = await this._call({
+      action: 'send-text',
+      targetPid: Number(pid),
+      value: String(text),
+    });
+    this._rescanSoon(300);
     return res;
   }
 }
@@ -303,5 +460,6 @@ module.exports = {
   extractValidDirectory,
   parseConsoleScreen,
   invokeWinConsoleBridge,
+  PersistentBridge,
   ConsoleScanner,
 };

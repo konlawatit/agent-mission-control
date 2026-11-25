@@ -942,36 +942,26 @@ function buildFullInspectorMountHtml(s) {
         ${buildInspectorHeaderHtml(s)}
       </div>
 
-      <div id="inspector-dynamic-region" style="display:flex; flex-direction:column; gap:15px;">
-        ${buildInspectorBodyDynamicHtml(s)}
-      </div>
-
-      <!-- Persistent Terminal Preview Node (Never destroyed on SSE updates so mouse scroll never resets!) -->
-      <div class="section-box" id="inspector-terminal-box" style="display:${s.screenPreview ? 'block' : 'none'};">
+      <!-- 1. Chat & Command Input Box AT THE VERY TOP so you can chat and see output immediately! -->
+      <div class="section-box" style="background:var(--surface-elevated); border-color: rgba(59, 130, 246, 0.45);" id="inspector-command-box">
         <div class="section-title">
-          <span id="terminal-box-title">🖥️ หน้าจอ Terminal ล่าสุด</span>
-          <div style="display:flex; gap:6px;">
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">↑</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">↓</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">↵ Enter</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">Esc</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="scanTerminalsNow()">🔄 รีเฟรชจอ</button>
-          </div>
-        </div>
-        <div class="terminal-preview" id="terminal-preview-content"></div>
-      </div>
-
-      <!-- Persistent Command Input Box (Never destroyed on SSE updates so typing focus is NEVER lost!) -->
-      <div class="section-box" style="background:var(--surface-elevated);" id="inspector-command-box">
-        <div class="section-title">
-          <span>⌨️ สั่งการไปยัง ${escapeHtml(s.room)} โดยตรง</span>
+          <span>💬 แชท & สั่งการไปยัง ${escapeHtml(s.room)} โดยตรง</span>
           <label style="display:flex; align-items:center; gap:6px; text-transform:none; font-weight:500; cursor:pointer;">
             <input type="checkbox" id="headless-toggle" />
             <span>รันผ่าน Claude Headless Resume (--resume)</span>
           </label>
         </div>
 
-        <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px;">
+        <div class="cmd-bar" style="margin-bottom:10px;">
+          <input id="cmd-input" class="input-text"
+                 placeholder="พิมพ์ข้อความแชท คำสั่ง หรือหมายเลขตัวเลือก ส่งเข้า ${escapeHtml(s.room)} แล้วกด Enter..."
+                 onkeydown="if(event.key==='Enter') submitCommand('${escapeJsAttr(s.id)}')" />
+          <button class="btn btn-primary" onclick="submitCommand('${escapeJsAttr(s.id)}')">
+            ส่งข้อความ ↵
+          </button>
+        </div>
+
+        <div style="display:flex; flex-wrap:wrap; gap:6px;">
           <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', '1', true)">
             1️⃣ เลือกข้อ 1
           </button>
@@ -988,15 +978,26 @@ function buildFullInspectorMountHtml(s) {
             📝 ขอสรุปงานที่ทำเสร็จแล้ว
           </button>
         </div>
+      </div>
 
-        <div class="cmd-bar">
-          <input id="cmd-input" class="input-text"
-                 placeholder="พิมพ์คำสั่งหรือหมายเลขตัวเลือก ส่งเข้า ${escapeHtml(s.room)} แล้วกด Enter..."
-                 onkeydown="if(event.key==='Enter') submitCommand('${escapeJsAttr(s.id)}')" />
-          <button class="btn btn-primary" onclick="submitCommand('${escapeJsAttr(s.id)}')">
-            ส่งคำสั่ง ↵
-          </button>
+      <!-- 2. Live Chat / Terminal Screen Output right under the chat input box -->
+      <div class="section-box" id="inspector-terminal-box" style="display:${s.screenPreview ? 'block' : 'none'};">
+        <div class="section-title">
+          <span id="terminal-box-title">🖥️ หน้าจอแชท & Terminal ล่าสุด</span>
+          <div style="display:flex; gap:6px;">
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">↑</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">↓</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">↵ Enter</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">Esc</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="scanTerminalsNow()">🔄 รีเฟรชจอ</button>
+          </div>
         </div>
+        <div class="terminal-preview" id="terminal-preview-content"></div>
+      </div>
+
+      <!-- 3. Workflow Pipeline, Latest TL;DR, Turn History, Sub-Agents, Modified Files -->
+      <div id="inspector-dynamic-region" style="display:flex; flex-direction:column; gap:15px;">
+        ${buildInspectorBodyDynamicHtml(s)}
       </div>
     </div>
   `;

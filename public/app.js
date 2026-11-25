@@ -30,7 +30,8 @@ let searchQuery = '';
 let selectedProject = 'ALL';
 let selectedCategory = 'ALL';
 let isChatFullscreen = false;
-let terminalFontSize = 13;
+let terminalFontSize = 13.5;
+let isMarkdownMode = true;
 
 // Persist user scroll state per session so scrolling never jumps back to top
 const terminalScrollState = new Map(); // sessionId -> { scrollTop, stickToBottom }
@@ -120,6 +121,232 @@ function formatRelativeTime(isoStr) {
   if (diffHr < 24) return `${diffHr} ชั่วโมงที่แล้ว`;
   const diffDay = Math.floor(diffHr / 24);
   return `${diffDay} วันที่แล้ว`;
+}
+
+/**
+ * 100% XSS-Safe Inline Markdown Formatter.
+ * Input MUST already be passed through `escapeHtml()`.
+ */
+function formatInlineMarkdownEscaped(escapedLine) {
+  const codeTokens = [];
+  // 1. Protect inline code `...` first so asterisks/urls inside backticks aren't touched
+  let out = escapedLine.replace(/`([^`]+)`/g, (_, codeContent) => {
+    const token = `\u0000CODE${codeTokens.length}\u0000`;
+    codeTokens.push(`<code class="md-inline-code">${codeContent}</code>`);
+    return token;
+  });
+
+  // 2. Bold + Italic ***text***
+  out = out.replace(
+    /\*\*\*([^*]+)\*\*\*/g,
+    '<strong class="md-bold"><em>$1</em></strong>'
+  );
+
+  // 3. Bold **text**
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong class="md-bold">$1</strong>');
+
+  // 4. Markdown links [label](https://...)
+  out = out.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a class="md-link" href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
+  );
+
+  // 5. Bare URLs https://... (not already inside href="...")
+  out = out.replace(
+    /(^|[\s(])(https?:\/\/[^\s)<]+)/g,
+    '$1<a class="md-link" href="$2" target="_blank" rel="noopener noreferrer">$2</a>'
+  );
+
+  // 6. Restore inline code tokens
+  out = out.replace(/\u0000CODE(\d+)\u0000/g, (_, idx) => codeTokens[Number(idx)] || '');
+  return out;
+}
+
+/**
+ * 100% XSS-Safe Block & Inline Markdown Renderer for Chat, Terminal, and TL;DR.
+ */
+function renderMarkdownSafe(rawText) {
+  if (!rawText) return '';
+  const lines = String(rawText).replace(/\r\n/g, '\n').split('\n');
+  const htmlBlocks = [];
+  let inCodeFence = false;
+  let codeLang = '';
+  let codeLines = [];
+  let tableRows = [];
+
+  const flushTable = () => {
+    if (tableRows.length === 0) return;
+    if (tableRows.length === 1) {
+      htmlBlocks.push(
+        `<p class="md-p">${formatInlineMarkdownEscaped(escapeHtml(tableRows[0]))}</p>`
+      );
+      tableRows = [];
+      return;
+    }
+    let tableHtml = '<table class="md-table">';
+    tableRows.forEach((rowStr, rIdx) => {
+      const cells = rowStr
+        .trim()
+        .replace(/^\||\|$/g, '')
+        .split('|')
+        .map((c) => c.trim());
+      // Skip separator row like |---|---|
+      if (rIdx === 1 && cells.every((c) => /^[:\-]+$/.test(c))) {
+        return;
+      }
+      const tag = rIdx === 0 ? 'th' : 'td';
+      tableHtml +=
+        '<tr>' +
+        cells
+          .map(
+            (c) => `<${tag}>${formatInlineMarkdownEscaped(escapeHtml(c))}</${tag}>`
+          )
+          .join('') +
+        '</tr>';
+    });
+    tableHtml += '</table>';
+    htmlBlocks.push(tableHtml);
+    tableRows = [];
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+
+    // Fenced code blocks ```lang
+    if (trimmed.startsWith('```')) {
+      flushTable();
+      if (!inCodeFence) {
+        inCodeFence = true;
+        codeLang = trimmed.slice(3).trim();
+        codeLines = [];
+      } else {
+        const langHeader = codeLang
+          ? `<div class="md-code-lang">${escapeHtml(codeLang)}</div>`
+          : '';
+        htmlBlocks.push(
+          `<div class="md-code-block">${langHeader}<pre><code>${escapeHtml(
+            codeLines.join('\n')
+          )}</code></pre></div>`
+        );
+        inCodeFence = false;
+        codeLang = '';
+        codeLines = [];
+      }
+      continue;
+    }
+
+    if (inCodeFence) {
+      codeLines.push(rawLine);
+      continue;
+    }
+
+    // Markdown Table row `| col1 | col2 |`
+    if (/^\|.+\|$/.test(trimmed)) {
+      tableRows.push(trimmed);
+      continue;
+    } else if (tableRows.length > 0) {
+      flushTable();
+    }
+
+    if (!trimmed) {
+      continue;
+    }
+
+    // Chat Turn & Tool Prefixes
+    if (trimmed.startsWith('🧑 คุณ:')) {
+      htmlBlocks.push(
+        `<div class="md-user-turn">${formatInlineMarkdownEscaped(escapeHtml(trimmed))}</div>`
+      );
+      continue;
+    }
+    if (trimmed.startsWith('🤖 Claude:')) {
+      const rest = trimmed.slice('🤖 Claude:'.length).trim();
+      htmlBlocks.push(`<div class="md-claude-turn">🤖 Claude:</div>`);
+      if (rest) {
+        htmlBlocks.push(
+          `<p class="md-p">${formatInlineMarkdownEscaped(escapeHtml(rest))}</p>`
+        );
+      }
+      continue;
+    }
+    if (trimmed.startsWith('🔧 [Tool:')) {
+      htmlBlocks.push(
+        `<div class="md-tool-line">${formatInlineMarkdownEscaped(escapeHtml(trimmed))}</div>`
+      );
+      continue;
+    }
+
+    // Horizontal rules
+    if (/^([-*_]{3,}|[─━═]{6,})$/.test(trimmed)) {
+      htmlBlocks.push('<hr class="md-hr" />');
+      continue;
+    }
+
+    // Headings #, ##, ###
+    const hMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (hMatch) {
+      const level = Math.min(3, hMatch[1].length);
+      htmlBlocks.push(
+        `<div class="md-h${level}">${formatInlineMarkdownEscaped(
+          escapeHtml(hMatch[2])
+        )}</div>`
+      );
+      continue;
+    }
+
+    // Bullet lists `- `, `* `, `· `
+    const ulMatch = rawLine.match(/^(\s*)([-*•·])\s+(.+)$/);
+    if (ulMatch) {
+      const indentPx = Math.min(48, Math.floor(ulMatch[1].length / 2) * 14);
+      htmlBlocks.push(
+        `<div class="md-li" style="margin-left:${indentPx}px;"><span class="md-li-bullet">•</span><div>${formatInlineMarkdownEscaped(
+          escapeHtml(ulMatch[3])
+        )}</div></div>`
+      );
+      continue;
+    }
+
+    // Numbered lists `1. `, `2) `
+    const olMatch = rawLine.match(/^(\s*)([❯>]?\s*\d+[\.\)])\s+(.+)$/);
+    if (olMatch) {
+      const indentPx = Math.min(48, Math.floor(olMatch[1].length / 2) * 14);
+      htmlBlocks.push(
+        `<div class="md-li" style="margin-left:${indentPx}px;"><span class="md-li-bullet">${escapeHtml(
+          olMatch[2].trim()
+        )}</span><div>${formatInlineMarkdownEscaped(
+          escapeHtml(olMatch[3])
+        )}</div></div>`
+      );
+      continue;
+    }
+
+    // Blockquotes `> `
+    if (trimmed.startsWith('> ')) {
+      htmlBlocks.push(
+        `<div class="md-quote">${formatInlineMarkdownEscaped(
+          escapeHtml(trimmed.slice(2))
+        )}</div>`
+      );
+      continue;
+    }
+
+    // Normal paragraph line
+    htmlBlocks.push(
+      `<p class="md-p">${formatInlineMarkdownEscaped(escapeHtml(rawLine))}</p>`
+    );
+  }
+
+  flushTable();
+  if (inCodeFence && codeLines.length > 0) {
+    htmlBlocks.push(
+      `<div class="md-code-block"><pre><code>${escapeHtml(
+        codeLines.join('\n')
+      )}</code></pre></div>`
+    );
+  }
+
+  return `<div class="md-content">${htmlBlocks.join('')}</div>`;
 }
 
 function showToast(msg) {
@@ -700,7 +927,7 @@ function buildRoomCardHtml(s) {
 
       <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:9px 11px; font-size:12.5px; color:var(--text-muted);">
         <strong style="color:var(--text);">📌 สรุปล่าสุด (TL;DR):</strong>
-        ${escapeHtml(s.tldr)}
+        <span>${formatInlineMarkdownEscaped(escapeHtml(s.tldr))}</span>
       </div>
 
       ${historyActionHtml}
@@ -850,7 +1077,7 @@ function buildInspectorBodyDynamicHtml(s) {
                   </span>
                 </div>
                 <div style="font-size:12.5px; color:var(--text-muted); line-height:1.5;">
-                  ${escapeHtml(turn.tldr || 'กำลังประมวลผล...')}
+                  ${formatInlineMarkdownEscaped(escapeHtml(turn.tldr || 'กำลังประมวลผล...'))}
                 </div>
                 ${
                   Array.isArray(turn.tools) && turn.tools.length > 0
@@ -890,7 +1117,7 @@ function buildInspectorBodyDynamicHtml(s) {
         <span>🎯 คำสั่งล่าสุด: ${escapeHtml(s.goal)}</span>
       </div>
       <div style="font-size:14px; color:var(--text); line-height:1.6;">
-        ${escapeHtml(s.tldr)}
+        ${renderMarkdownSafe(s.tldr)}
       </div>
     </div>
 
@@ -961,12 +1188,20 @@ function syncTerminalPreviewDom(s) {
   }
 
   const prevText = pre.dataset.rawText || '';
-  if (prevText !== s.screenPreview) {
-    const saved = terminalScrollState.get(s.id);
-    pre.textContent = s.screenPreview;
-    pre.dataset.rawText = s.screenPreview;
+  const prevMode = pre.dataset.mdMode || '';
+  const modeKey = isMarkdownMode ? 'md' : 'raw';
 
-    // If user hasn't scrolled up manually, or first time viewing, scroll to bottom
+  if (prevText !== s.screenPreview || prevMode !== modeKey) {
+    const saved = terminalScrollState.get(s.id);
+    pre.classList.toggle('raw-mode', !isMarkdownMode);
+    if (isMarkdownMode) {
+      pre.innerHTML = renderMarkdownSafe(s.screenPreview);
+    } else {
+      pre.textContent = s.screenPreview;
+    }
+    pre.dataset.rawText = s.screenPreview;
+    pre.dataset.mdMode = modeKey;
+
     if (!saved || saved.stickToBottom) {
       pre.scrollTop = pre.scrollHeight;
     } else {
@@ -1050,6 +1285,9 @@ function buildFullInspectorMountHtml(s) {
           <div class="section-title">
             <span id="terminal-box-title">🖥️ หน้าจอแชท & Terminal ล่าสุด</span>
             <div style="display:flex; flex-wrap:wrap; gap:6px;">
+              <button class="btn" style="padding:3px 8px; font-size:11px;" id="md-mode-btn" onclick="toggleMarkdownMode()" title="สลับโหมดแสดงผล Markdown / Raw Text">
+                ${isMarkdownMode ? '🎨 Markdown: เปิด' : '>_ Raw Text'}
+              </button>
               <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="adjustTerminalFont(-1)" title="ลดขนาดตัวอักษร">A-</button>
               <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="adjustTerminalFont(1)" title="เพิ่มขนาดตัวอักษร">A+</button>
               <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="copyTerminalPreview()" title="คัดลอกข้อความแชททั้งหมด">📋 คัดลอก</button>
@@ -1247,10 +1485,26 @@ window.adjustTerminalFont = function (delta) {
 
 window.copyTerminalPreview = function () {
   const pre = document.getElementById('terminal-preview-content');
-  if (!pre || !pre.textContent) return;
-  navigator.clipboard.writeText(pre.textContent).then(() => {
+  if (!pre) return;
+  const raw = pre.dataset.rawText || pre.textContent || '';
+  if (!raw) return;
+  navigator.clipboard.writeText(raw).then(() => {
     showToast('📋 คัดลอกข้อความหน้าจอแชทเข้า Clipboard เรียบร้อย!');
   });
+};
+
+window.toggleMarkdownMode = function () {
+  isMarkdownMode = !isMarkdownMode;
+  const btn = document.getElementById('md-mode-btn');
+  if (btn) {
+    btn.innerHTML = isMarkdownMode ? '🎨 Markdown: เปิด' : '>_ Raw Text';
+  }
+  const activeSession = appState.sessions.find(
+    (s) => s.id === selectedSessionId
+  );
+  if (activeSession) {
+    syncTerminalPreviewDom(activeSession);
+  }
 };
 
 // Allow pressing Escape key on browser page (when not inside input) to exit fullscreen chat mode

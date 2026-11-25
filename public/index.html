@@ -294,15 +294,152 @@
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 14px 16px;
-      font-family: var(--font-mono);
-      font-size: 13px;
-      line-height: 1.55;
+      font-family: var(--font-sans);
+      font-size: 13.5px;
+      line-height: 1.65;
       color: #e2e8f0;
-      white-space: pre-wrap;
+      white-space: normal;
       overflow-x: auto;
-      max-height: 280px;
+      max-height: 300px;
       overflow-y: auto;
       transition: max-height 0.18s ease;
+    }
+
+    .terminal-preview.raw-mode {
+      font-family: var(--font-mono);
+      white-space: pre-wrap;
+    }
+
+    /* Rich Markdown Styles inside Terminal & TL;DR */
+    .md-content {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .md-p {
+      margin: 0;
+      line-height: 1.65;
+      word-break: break-word;
+    }
+    .md-h1, .md-h2, .md-h3 {
+      font-weight: 700;
+      color: #f8fafc;
+      margin-top: 8px;
+      margin-bottom: 2px;
+    }
+    .md-h1 { font-size: 1.25em; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+    .md-h2 { font-size: 1.14em; color: #93c5fd; }
+    .md-h3 { font-size: 1.05em; color: #cbd5e1; }
+    .md-bold {
+      font-weight: 700;
+      color: #ffffff;
+    }
+    .md-inline-code {
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      background: rgba(59, 130, 246, 0.16);
+      border: 1px solid rgba(59, 130, 246, 0.32);
+      color: #93c5fd;
+      padding: 1px 6px;
+      border-radius: 5px;
+    }
+    .md-code-block {
+      background: #0d131f;
+      border: 1px solid #26344d;
+      border-radius: 8px;
+      margin: 4px 0;
+      overflow: hidden;
+    }
+    .md-code-lang {
+      background: #162033;
+      color: #94a3b8;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 12px;
+      border-bottom: 1px solid #26344d;
+      text-transform: uppercase;
+    }
+    .md-code-block pre {
+      margin: 0;
+      padding: 10px 13px;
+      font-family: var(--font-mono);
+      font-size: 0.92em;
+      line-height: 1.5;
+      color: #e2e8f0;
+      overflow-x: auto;
+      white-space: pre;
+    }
+    .md-li {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding-left: 6px;
+      line-height: 1.6;
+    }
+    .md-li-bullet {
+      color: var(--primary);
+      font-weight: 700;
+      flex-shrink: 0;
+      font-family: var(--font-mono);
+    }
+    .md-quote {
+      border-left: 3px solid var(--primary);
+      background: rgba(59, 130, 246, 0.08);
+      padding: 6px 12px;
+      border-radius: 0 6px 6px 0;
+      color: #cbd5e1;
+    }
+    .md-hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 8px 0;
+    }
+    .md-user-turn {
+      background: rgba(59, 130, 246, 0.14);
+      border: 1px solid rgba(59, 130, 246, 0.4);
+      border-radius: 8px;
+      padding: 8px 12px;
+      margin-top: 8px;
+      font-weight: 600;
+      color: #bfdbfe;
+    }
+    .md-claude-turn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 700;
+      color: #34d399;
+      margin-top: 6px;
+    }
+    .md-tool-line {
+      font-family: var(--font-mono);
+      font-size: 0.88em;
+      background: rgba(139, 92, 246, 0.12);
+      border: 1px solid rgba(139, 92, 246, 0.3);
+      color: #c4b5fd;
+      padding: 4px 10px;
+      border-radius: 6px;
+    }
+    .md-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 6px 0;
+      font-size: 0.92em;
+    }
+    .md-table th, .md-table td {
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      text-align: left;
+    }
+    .md-table th {
+      background: #162033;
+      color: #93c5fd;
+      font-weight: 700;
+    }
+    .md-link {
+      color: #60a5fa;
+      text-decoration: underline;
     }
 
     /* Fullscreen Chat & Terminal Overlay Mode */

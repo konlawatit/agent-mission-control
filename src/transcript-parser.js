@@ -3,9 +3,6 @@ const path = require('path');
 const os = require('os');
 const { execSync } = require('child_process');
 
-/**
- * Extracts git branch and dirty file count for a workspace directory.
- */
 function getGitMetadata(cwd) {
   if (!cwd || !fs.existsSync(cwd)) {
     return { branch: 'main', dirtyFiles: 0 };
@@ -38,32 +35,35 @@ function getGitMetadata(cwd) {
 }
 
 /**
- * Auto-discovers the most recent Claude Code UTF-8 `.jsonl` transcript file for a workspace `cwd`
- * inside `~/.claude/projects/<project-slug>/*.jsonl`.
+ * Finds all Claude Code UTF-8 `.jsonl` transcript files for a workspace `cwd`
+ * inside `~/.claude/projects/<project-slug>/*.jsonl`, sorted newest first.
  */
-function findLatestTranscriptForCwd(cwd) {
-  if (!cwd) return null;
+function findTranscriptsForCwd(cwd) {
+  if (!cwd) return [];
   try {
     const projectsDir = path.join(os.homedir(), '.claude', 'projects');
-    if (!fs.existsSync(projectsDir)) return null;
+    if (!fs.existsSync(projectsDir)) return [];
 
-    // Claude Code converts path like `C:\Job\Application Developer Test\queue-ticket-system`
-    // into a slug folder name by replacing `:` and `\` and spaces with `-`
-    const normCwd = String(cwd).replace(/[\\\/]+$/, '');
+    const normCwd = String(cwd)
+      .split('>')[0]
+      .trim()
+      .replace(/[\\\/]+$/, '');
     const expectedSlug = normCwd.replace(/[:\\\/\s_]+/g, '-').toLowerCase();
-    const folderBase = path.basename(normCwd).toLowerCase();
+    const folderBase = path
+      .basename(normCwd)
+      .replace(/[\s_]+/g, '-')
+      .toLowerCase();
 
     const dirs = fs.readdirSync(projectsDir, { withFileTypes: true });
-    let bestFile = null;
-    let bestMtime = 0;
+    const matchedFiles = [];
 
     for (const d of dirs) {
       if (!d.isDirectory()) continue;
       const dNameLower = d.name.toLowerCase();
       if (
         dNameLower === expectedSlug ||
-        dNameLower.endsWith(folderBase.replace(/[\s_]+/g, '-')) ||
-        dNameLower.includes(folderBase.replace(/[\s_]+/g, '-'))
+        dNameLower.endsWith(folderBase) ||
+        dNameLower.includes(folderBase)
       ) {
         const fullDir = path.join(projectsDir, d.name);
         const files = fs
@@ -72,150 +72,212 @@ function findLatestTranscriptForCwd(cwd) {
         for (const f of files) {
           const fullFile = path.join(fullDir, f);
           const stat = fs.statSync(fullFile);
-          if (stat.mtimeMs > bestMtime) {
-            bestMtime = stat.mtimeMs;
-            bestFile = fullFile;
-          }
+          matchedFiles.push({
+            path: fullFile,
+            mtimeMs: stat.mtimeMs,
+            sessionId: path.basename(f, '.jsonl'),
+          });
         }
       }
     }
 
-    return bestFile;
+    matchedFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return matchedFiles;
   } catch {
-    return null;
+    return [];
   }
 }
 
+function findLatestTranscriptForCwd(cwd) {
+  const list = findTranscriptsForCwd(cwd);
+  return list.length > 0 ? list[0].path : null;
+}
+
 /**
- * Parses the tail of a Claude Code transcript (.jsonl) file in pure UTF-8 to extract:
- * - Latest human-readable assistant response (for Auto-TL;DR)
- * - Clean UTF-8 conversation log (`utf8Preview`) with 100% intact Thai vowels & tone marks!
- * - Latest user prompt
+ * Parses a Claude Code transcript (.jsonl) file (and recent transcripts in the same folder)
+ * to extract:
+ * - Current / latest turn (`lastUserText`, `lastAssistantText`)
+ * - Internal Turn History (`turnHistory`: every past user prompt + assistant summary & tools used inside this room!)
+ * - Clean UTF-8 conversation log (`utf8Preview`)
  * - Active or completed Task (sub-agent) invocations
  */
 function parseTranscriptTail(transcriptPath, cwd = null) {
+  const allTranscripts = findTranscriptsForCwd(cwd);
   const targetPath =
     transcriptPath && fs.existsSync(transcriptPath)
       ? transcriptPath
-      : findLatestTranscriptForCwd(cwd);
+      : allTranscripts.length > 0
+      ? allTranscripts[0].path
+      : null;
 
   if (!targetPath || !fs.existsSync(targetPath)) {
     return null;
   }
 
   try {
-    const stat = fs.statSync(targetPath);
-    const maxBytes = 160 * 1024;
-    const start = Math.max(0, stat.size - maxBytes);
-    const length = stat.size - start;
-    const buffer = Buffer.alloc(length);
+    // Parse up to the 3 most recent transcript files in this project folder so past conversations
+    // in the same room are also preserved inside the room's Internal Turn History!
+    const filesToRead =
+      allTranscripts.length > 0
+        ? allTranscripts.slice(0, 3).map((item) => item.path).reverse()
+        : [targetPath];
 
-    const fd = fs.openSync(targetPath, 'r');
-    fs.readSync(fd, buffer, 0, length, start);
-    fs.closeSync(fd);
-
-    const raw = buffer.toString('utf8');
-    const lines = raw.split(/\r?\n/).filter((line) => line.trim().startsWith('{'));
+    if (!filesToRead.includes(targetPath)) {
+      filesToRead.push(targetPath);
+    }
 
     let lastAssistantFullText = null;
     let lastAssistantText = null;
     let lastUserText = null;
     const conversationLines = [];
     const subAgentsMap = new Map();
+    const turns = [];
+    let currentTurn = null;
 
-    for (const line of lines) {
-      let entry;
-      try {
-        entry = JSON.parse(line);
-      } catch {
-        continue;
-      }
+    for (const filePath of filesToRead) {
+      if (!fs.existsSync(filePath)) continue;
+      const stat = fs.statSync(filePath);
+      const maxBytes = 160 * 1024;
+      const start = Math.max(0, stat.size - maxBytes);
+      const length = stat.size - start;
+      const buffer = Buffer.alloc(length);
 
-      const msg = entry.message || entry;
-      const role = msg.role || entry.type;
-      const content = msg.content;
+      const fd = fs.openSync(filePath, 'r');
+      fs.readSync(fd, buffer, 0, length, start);
+      fs.closeSync(fd);
 
-      if (role === 'user' && typeof content === 'string' && content.trim()) {
-        if (!content.trim().startsWith('<')) {
-          lastUserText = content.trim();
-          conversationLines.push(`🧑 คุณ: ${content.trim()}`);
+      const raw = buffer.toString('utf8');
+      const lines = raw
+        .split(/\r?\n/)
+        .filter((line) => line.trim().startsWith('{'));
+
+      for (const line of lines) {
+        let entry;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue;
         }
-      } else if (role === 'user' && Array.isArray(content)) {
-        for (const block of content) {
-          if (block.type === 'text' && block.text && !block.text.startsWith('<')) {
-            lastUserText = block.text.trim();
-            conversationLines.push(`🧑 คุณ: ${block.text.trim()}`);
+
+        const msg = entry.message || entry;
+        const role = msg.role || entry.type;
+        const content = msg.content;
+        const ts = entry.timestamp || new Date(stat.mtimeMs).toISOString();
+
+        const recordUserPrompt = (text) => {
+          const clean = text.trim();
+          if (!clean || clean.startsWith('<')) return;
+          lastUserText = clean;
+          conversationLines.push(`🧑 คุณ: ${clean}`);
+
+          if (currentTurn && (currentTurn.tldr || currentTurn.tools.length > 0)) {
+            turns.push(currentTurn);
           }
-          if (block.type === 'tool_result' && block.tool_use_id) {
-            if (subAgentsMap.has(block.tool_use_id)) {
-              const sub = subAgentsMap.get(block.tool_use_id);
-              sub.state = block.is_error ? 'failed' : 'done';
-              sub.tool = 'Completed';
-              if (typeof block.content === 'string') {
-                sub.resultSummary = summarizeText(block.content, 140);
-              } else if (Array.isArray(block.content)) {
-                const textBlock = block.content.find((b) => b.type === 'text');
-                if (textBlock && textBlock.text) {
-                  sub.resultSummary = summarizeText(textBlock.text, 140);
+          currentTurn = {
+            id: entry.uuid || `turn-${turns.length + 1}-${Date.now()}`,
+            goal: summarizeText(clean, 180),
+            tldr: '',
+            tools: [],
+            timestamp: ts,
+            sessionId: path.basename(filePath, '.jsonl'),
+          };
+        };
+
+        if (role === 'user' && typeof content === 'string') {
+          recordUserPrompt(content);
+        } else if (role === 'user' && Array.isArray(content)) {
+          for (const block of content) {
+            if (block.type === 'text' && block.text) {
+              recordUserPrompt(block.text);
+            }
+            if (block.type === 'tool_result' && block.tool_use_id) {
+              if (subAgentsMap.has(block.tool_use_id)) {
+                const sub = subAgentsMap.get(block.tool_use_id);
+                sub.state = block.is_error ? 'failed' : 'done';
+                sub.tool = 'Completed';
+                if (typeof block.content === 'string') {
+                  sub.resultSummary = summarizeText(block.content, 140);
+                } else if (Array.isArray(block.content)) {
+                  const textBlock = block.content.find(
+                    (b) => b.type === 'text'
+                  );
+                  if (textBlock && textBlock.text) {
+                    sub.resultSummary = summarizeText(textBlock.text, 140);
+                  }
                 }
               }
             }
           }
         }
-      }
 
-      if (role === 'assistant' && Array.isArray(content)) {
-        for (const block of content) {
-          if (block.type === 'text' && block.text && block.text.trim()) {
-            lastAssistantFullText = block.text.trim();
-            lastAssistantText = block.text.trim();
-            conversationLines.push(`🤖 Claude:\n${block.text.trim()}`);
-          }
-          if (block.type === 'tool_use') {
-            const input = block.input || {};
-            const fileOrCmd =
-              input.command ||
-              input.file_path ||
-              input.path ||
-              input.description ||
-              input.pattern ||
-              '';
-            if (block.name) {
-              conversationLines.push(
-                `🔧 [Tool: ${block.name}] ${summarizeText(fileOrCmd, 100)}`
-              );
+        if (role === 'assistant' && Array.isArray(content)) {
+          for (const block of content) {
+            if (block.type === 'text' && block.text && block.text.trim()) {
+              const clean = block.text.trim();
+              lastAssistantFullText = clean;
+              lastAssistantText = clean;
+              conversationLines.push(`🤖 Claude:\n${clean}`);
+              if (currentTurn) {
+                currentTurn.tldr = summarizeText(clean, 240);
+                currentTurn.timestamp = ts;
+              }
             }
-          }
-          if (
-            block.type === 'tool_use' &&
-            (block.name === 'Task' ||
-              block.name === 'Agent' ||
-              block.name === 'dispatch_agent')
-          ) {
-            const input = block.input || {};
-            const subName =
-              input.description ||
-              input.subagent_type ||
-              input.name ||
-              'Sub-Agent Task';
-            const subRole = input.prompt
-              ? summarizeText(input.prompt, 110)
-              : input.subagent_type || 'Autonomous Sub-task';
-            subAgentsMap.set(block.id, {
-              id: block.id,
-              name: `Sub-Agent: ${subName}`,
-              role: subRole,
-              subagentType: input.subagent_type || 'general',
-              state: 'working',
-              tool: 'Running Task...',
-              startedAt: entry.timestamp || new Date().toISOString(),
-            });
+            if (block.type === 'tool_use') {
+              const input = block.input || {};
+              const fileOrCmd =
+                input.command ||
+                input.file_path ||
+                input.path ||
+                input.description ||
+                input.pattern ||
+                '';
+              if (block.name) {
+                const badge = `${block.name}${
+                  fileOrCmd ? ': ' + summarizeText(path.basename(String(fileOrCmd)), 35) : ''
+                }`;
+                conversationLines.push(
+                  `🔧 [Tool: ${block.name}] ${summarizeText(fileOrCmd, 100)}`
+                );
+                if (currentTurn && !currentTurn.tools.includes(badge)) {
+                  currentTurn.tools.push(badge);
+                }
+              }
+            }
+            if (
+              block.type === 'tool_use' &&
+              (block.name === 'Task' ||
+                block.name === 'Agent' ||
+                block.name === 'dispatch_agent')
+            ) {
+              const input = block.input || {};
+              const subName =
+                input.description ||
+                input.subagent_type ||
+                input.name ||
+                'Sub-Agent Task';
+              const subRole = input.prompt
+                ? summarizeText(input.prompt, 110)
+                : input.subagent_type || 'Autonomous Sub-task';
+              subAgentsMap.set(block.id, {
+                id: block.id,
+                name: `Sub-Agent: ${subName}`,
+                role: subRole,
+                subagentType: input.subagent_type || 'general',
+                state: 'working',
+                tool: 'Running Task...',
+                startedAt: ts,
+              });
+            }
           }
         }
       }
     }
 
-    const recentLog = conversationLines.slice(-8).join('\n\n');
+    if (currentTurn) {
+      turns.push(currentTurn);
+    }
+
+    const recentLog = conversationLines.slice(-10).join('\n\n');
 
     return {
       transcriptPath: targetPath,
@@ -225,6 +287,7 @@ function parseTranscriptTail(transcriptPath, cwd = null) {
         : null,
       lastUserText: lastUserText ? summarizeText(lastUserText, 160) : null,
       utf8Preview: recentLog || lastAssistantFullText || null,
+      turnHistory: turns.reverse().slice(0, 20), // Newest first
       subAgents: Array.from(subAgentsMap.values()),
     };
   } catch {
@@ -242,10 +305,6 @@ function summarizeText(text, maxLen = 200) {
   return cleaned.slice(0, maxLen - 1) + '…';
 }
 
-/**
- * Infers the 4-stage workflow index (0: Plan, 1: Code, 2: Verify, 3: Done)
- * and a human-readable Thai+EN action summary from a Claude tool call.
- */
 function inferWorkflowFromTool(toolName, toolInput = {}) {
   const name = String(toolName || '');
   const filePath =
@@ -329,6 +388,7 @@ function inferWorkflowFromTool(toolName, toolInput = {}) {
 
 module.exports = {
   getGitMetadata,
+  findTranscriptsForCwd,
   findLatestTranscriptForCwd,
   parseTranscriptTail,
   summarizeText,

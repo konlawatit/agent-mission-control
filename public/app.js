@@ -649,7 +649,7 @@ function buildRoomCardHtml(s) {
 
       <div style="display:flex; justify-content:space-between; align-items:center; font-size:11.5px; color:var(--text-muted);" class="mono">
         <span>🌿 ${escapeHtml(s.branch)} ${s.dirtyFiles ? `(${s.dirtyFiles} modified)` : ''}</span>
-        <span>${s.pid ? `🟢 PID ${s.pid} • ` : ''}อัปเดต ${formatRelativeTime(s.updatedAt)}</span>
+        <span>📜 ${(s.taskHistory || []).length} งานในห้องนี้ • ${s.pid ? `🟢 PID ${s.pid}` : formatRelativeTime(s.updatedAt)}</span>
       </div>
     </div>
   `;
@@ -775,26 +775,73 @@ function buildInspectorBodyDynamicHtml(s) {
           .join('')
       : `<div style="color:var(--text-muted); font-size:12px;">ยังไม่มีประวัติ Event</div>`;
 
+  const previousTurns = Array.isArray(s.taskHistory) ? s.taskHistory : [];
+  const taskHistoryHtml =
+    previousTurns.length > 0
+      ? `<div style="display:flex; flex-direction:column; gap:8px; max-height:260px; overflow-y:auto; padding-right:4px;">
+          ${previousTurns
+            .map(
+              (turn, idx) => `
+              <div style="padding:10px 12px; border-radius:8px; background:var(--surface); border:1px solid var(--border); display:flex; flex-direction:column; gap:5px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                  <div style="font-weight:700; font-size:13px; color:${idx === 0 ? '#60a5fa' : 'var(--text)'};">
+                    ${idx === 0 ? '🟢 คำสั่งล่าสุด:' : `🕘 รอบก่อนหน้า #${previousTurns.length - idx}:`} ${escapeHtml(turn.goal)}
+                  </div>
+                  <span class="mono" style="font-size:11px; color:var(--text-muted); flex-shrink:0;">
+                    ${formatRelativeTime(turn.timestamp)}
+                  </span>
+                </div>
+                <div style="font-size:12.5px; color:var(--text-muted); line-height:1.5;">
+                  ${escapeHtml(turn.tldr || 'กำลังประมวลผล...')}
+                </div>
+                ${
+                  Array.isArray(turn.tools) && turn.tools.length > 0
+                    ? `<div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:2px;">
+                        ${turn.tools
+                          .slice(0, 6)
+                          .map(
+                            (t) =>
+                              `<span class="pill mono" style="font-size:10.5px; padding:1px 7px;">🔧 ${escapeHtml(t)}</span>`
+                          )
+                          .join('')}
+                      </div>`
+                    : ''
+                }
+              </div>
+            `
+            )
+            .join('')}
+        </div>`
+      : `<div style="color:var(--text-muted); font-size:12.5px;">ยังไม่มีประวัติคำสั่งก่อนหน้าในห้องนี้</div>`;
+
   return `
     ${recoveryBannerHtml}
     ${!isHistory ? buildInteractiveChoiceBoxHtml(s, false) : ''}
 
     <div>
       <div class="section-title">
-        <span>📊 ขั้นตอนการทำงาน (Workflow Pipeline)</span>
-        <span class="mono" style="color:var(--primary);">Status: ${escapeHtml(s.currentTool || 'Idle')}</span>
+        <span>📊 ขั้นตอนการทำงานปัจจุบัน (Current Interaction Pipeline)</span>
+        <span class="mono" style="color:var(--primary);">Active Tool: ${escapeHtml(s.currentTool || 'Idle')}</span>
       </div>
       ${buildPipelineHtml(s)}
     </div>
 
-    <div class="section-box" style="border-color: rgba(59, 130, 246, 0.4);">
+    <div class="section-box" style="border-color: rgba(59, 130, 246, 0.45);">
       <div class="section-title">
-        <span>📌 Auto-TL;DR (สรุปสถานะล่าสุดโดยไม่ต้องเปิดอ่าน History ใน Tab)</span>
-        <span>🎯 เป้าหมาย: ${escapeHtml(s.goal)}</span>
+        <span>📌 การโต้ตอบล่าสุดที่กำลังทำอยู่ (Latest Active Interaction)</span>
+        <span>🎯 คำสั่งล่าสุด: ${escapeHtml(s.goal)}</span>
       </div>
       <div style="font-size:14px; color:var(--text); line-height:1.6;">
         ${escapeHtml(s.tldr)}
       </div>
+    </div>
+
+    <div class="section-box">
+      <div class="section-title">
+        <span>📜 ประวัติการสั่งงานและบทสนทนาภายในห้องนี้ (${previousTurns.length} รอบคำสั่ง)</span>
+        <span>ไม่สร้างห้องซ้ำ — เก็บประวัติรวมไว้ในห้องเดียว</span>
+      </div>
+      ${taskHistoryHtml}
     </div>
 
     <div class="section-box">

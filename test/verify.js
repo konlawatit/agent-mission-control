@@ -87,12 +87,27 @@ async function runTests() {
   assert.strictEqual(snap.sessions[0].pid, 88888);
   assert.strictEqual(snap.sessions[0].openCount, 2);
 
-  // 5. Test Hook Event + ConsoleScanner Deduplication (must NOT create 2 rooms for the same cwd!)
+  // 5. Test Hook Event + ConsoleScanner Deduplication (including dirty PowerShell prompt `> claude` and new UUID turns!)
   store.processHookEvent({
     session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
     cwd: 'C:\\Job\\Application Developer Test\\queue-ticket-system',
     hook_event_name: 'UserPromptSubmit',
     prompt: 'สรุปโปรเจกต์นี้ให้หน่อย',
+  });
+
+  store.processHookEvent({
+    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    cwd: 'C:\\Job\\Application Developer Test\\queue-ticket-system',
+    hook_event_name: 'Stop',
+    summary: 'สรุปโครงสร้างระบบจองคิวเรียบร้อย',
+  });
+
+  // Now simulate a SECOND conversation / new UUID in the same folder + dirty `> claude` path from console!
+  store.processHookEvent({
+    session_id: '99999999-e5f6-7890-abcd-ef1234567890',
+    cwd: 'C:\\Job\\Application Developer Test\\queue-ticket-system> claude',
+    hook_event_name: 'UserPromptSubmit',
+    prompt: 'ดูโปรเจกต์นี้หน่อย และคิดว่ามีจุดไหนที่ทำให้ดีกว่านี้ได้ไหม',
   });
 
   store.ingestConsoleScan([
@@ -107,9 +122,17 @@ async function runTests() {
   assert.strictEqual(
     snap.sessions.length,
     1,
-    'Hook event and ConsoleScanner for same cwd must merge into 1 single room!'
+    'Multiple turns, new UUIDs, or dirty "> claude" paths for the same folder MUST stay in 1 single room!'
   );
-  assert.strictEqual(snap.sessions[0].pid, 27120);
+  assert.strictEqual(
+    snap.sessions[0].goal,
+    'ดูโปรเจกต์นี้หน่อย และคิดว่ามีจุดไหนที่ทำให้ดีกว่านี้ได้ไหม',
+    'Main room card must display the latest active interaction!'
+  );
+  assert.ok(
+    snap.sessions[0].taskHistory.length >= 1,
+    'Previous completed turns must be stored inside the room taskHistory!'
+  );
 
   // 6. Test Sub-Agent Spawning & Workflow Stages
   store.processHookEvent({

@@ -38,9 +38,20 @@ function isDefaultTldr(text) {
   );
 }
 
+/**
+ * Cleans any raw `cwd` string (stripping PowerShell prompt suffixes like `> claude`)
+ */
+function sanitizeCwd(rawCwd) {
+  if (!rawCwd) return '';
+  return String(rawCwd)
+    .split('>')[0]
+    .trim()
+    .replace(/[\\\/]+$/, '');
+}
+
 function normalizeCwdKey(cwd) {
-  if (!cwd) return '';
-  return String(cwd).toLowerCase().replace(/[\\\/]+$/, '').trim();
+  const clean = sanitizeCwd(cwd);
+  return clean ? clean.toLowerCase() : '';
 }
 
 class StateStore extends EventEmitter {
@@ -69,16 +80,25 @@ class StateStore extends EventEmitter {
           for (const s of raw.sessions) {
             if (DEMO_IDS.has(s.id)) continue;
 
+            // Sanitize any dirty cwd like `C:\Repo\agent-mission-control> claude`
+            if (s.cwd) {
+              s.cwd = sanitizeCwd(s.cwd);
+            }
+            const meta = this._inferProjectMeta(s.cwd);
+            s.project = meta.project;
+            if (!s.category || s.category.includes('>')) {
+              s.category = meta.category;
+            }
+            if (!s.customNamed || (s.room && s.room.includes('>'))) {
+              s.room = meta.project;
+              s.customNamed = false;
+            }
             if (!s.lifecycle) {
               s.lifecycle = s.status === 'closed' ? 'history' : 'live';
             }
-            if (!s.project) {
-              s.project = s.cwd ? path.basename(s.cwd) : 'General';
+            if (!Array.isArray(s.taskHistory)) {
+              s.taskHistory = [];
             }
-            if (!s.category) {
-              s.category = this._inferProjectMeta(s.cwd).category;
-            }
-            // Strip any corrupted U+FFFD screen preview from old Win32 cell reads
             if (s.screenPreview && s.screenPreview.includes('\uFFFD')) {
               s.screenPreview = null;
             }
@@ -95,14 +115,21 @@ class StateStore extends EventEmitter {
   }
 
   /**
-   * Merges duplicate session cards that point to the exact same workspace `cwd`
-   * (e.g., when one card was created by ConsoleScanner `claude-pid-27120` and another by a Hook with `ppid 30996`).
+   * STRICT 1-FOLDER = 1-ROOM GUARANTEE:
+   * Merges any sessions sharing the same normalized `cwd` into a single canonical Room,
+   * preserving previous interactions inside `primary.taskHistory`.
    */
   _deduplicateSessionsByCwd() {
     const byCwd = new Map();
+    const unknownCwdSessions = [];
+
     for (const s of Array.from(this.sessions.values())) {
+      if (s.cwd) s.cwd = sanitizeCwd(s.cwd);
       const key = normalizeCwdKey(s.cwd);
-      if (!key) continue;
+      if (!key) {
+        unknownCwdSessions.push(s);
+        continue;
+      }
       if (!byCwd.has(key)) {
         byCwd.set(key, []);
       }
@@ -112,14 +139,12 @@ class StateStore extends EventEmitter {
     for (const [, group] of byCwd.entries()) {
       if (group.length <= 1) continue;
 
-      // Pick the richest session as primary (prefer one with real claudeSessionId or real goal/tldr)
+      // Sort so the most recently updated / active session is primary
       group.sort((a, b) => {
-        const aHasUuid = Boolean(a.claudeSessionId || /^[0-9a-f]{8}-/i.test(a.id));
-        const bHasUuid = Boolean(b.claudeSessionId || /^[0-9a-f]{8}-/i.test(b.id));
-        if (aHasUuid !== bHasUuid) return aHasUuid ? -1 : 1;
-        const aRich = !isDefaultTldr(a.tldr) ? 1 : 0;
-        const bRich = !isDefaultTldr(b.tldr) ? 1 : 0;
-        return bRich - aRich;
+        if (a.lifecycle !== b.lifecycle) {
+          return a.lifecycle === 'live' ? -1 : 1;
+        }
+        return new Date(b.updatedAt) - new Date(a.updatedAt);
       });
 
       const primary = group[0];
@@ -139,29 +164,39 @@ class StateStore extends EventEmitter {
     if (source.transcriptPath && !target.transcriptPath) {
       target.transcriptPath = source.transcriptPath;
     }
-    if (source.pid) {
+    if (source.pid && !target.pid) {
       target.pid = source.pid;
     }
-    if (source.goal && !DEFAULT_GOALS.has(source.goal) && DEFAULT_GOALS.has(target.goal)) {
-      target.goal = source.goal;
+    // If source had a real goal/tldr and target has a default one, adopt it;
+    // otherwise archive source's goal/tldr into target.taskHistory!
+    if (source.goal && !DEFAULT_GOALS.has(source.goal)) {
+      if (DEFAULT_GOALS.has(target.goal)) {
+        target.goal = source.goal;
+        if (!isDefaultTldr(source.tldr)) target.tldr = source.tldr;
+      } else {
+        this._archiveTurnIntoHistory(target, {
+          goal: source.goal,
+          tldr: source.tldr,
+          timestamp: source.updatedAt || source.createdAt,
+          sessionId: source.claudeSessionId || source.id,
+        });
+      }
     }
     if (source.tldr && !isDefaultTldr(source.tldr) && isDefaultTldr(target.tldr)) {
       target.tldr = source.tldr;
     }
-    if ((source.stageIndex || 0) > (target.stageIndex || 0)) {
+    if ((source.stageIndex || 0) > (target.stageIndex || 0) && target.stageIndex === 0) {
       target.stageIndex = source.stageIndex;
-    }
-    if (source.status === 'done' && target.status === 'idle') {
-      target.status = 'done';
-      target.statusLabel = source.statusLabel || 'เสร็จสิ้น (รอบคำสั่ง)';
     }
     if (source.interactivePrompt && !target.interactivePrompt) {
       target.interactivePrompt = source.interactivePrompt;
       target.status = 'needs_input';
       target.statusLabel = source.statusLabel;
     }
-    if (source.screenPreview && !source.screenPreview.includes('\uFFFD') && !target.screenPreview) {
-      target.screenPreview = source.screenPreview;
+    if (Array.isArray(source.taskHistory)) {
+      for (const th of source.taskHistory) {
+        this._archiveTurnIntoHistory(target, th);
+      }
     }
     if (Array.isArray(source.subAgents)) {
       for (const sub of source.subAgents) {
@@ -191,25 +226,69 @@ class StateStore extends EventEmitter {
   }
 
   /**
-   * Enriches a session with pure UTF-8 Thai text from its Claude `.jsonl` transcript file.
+   * Adds a completed or previous interaction turn into `session.taskHistory` without duplicates.
    */
+  _archiveTurnIntoHistory(session, turnObj) {
+    if (!session || !turnObj || !turnObj.goal || DEFAULT_GOALS.has(turnObj.goal)) {
+      return;
+    }
+    if (!Array.isArray(session.taskHistory)) {
+      session.taskHistory = [];
+    }
+    const existing = session.taskHistory.find(
+      (item) => item.goal === turnObj.goal
+    );
+    if (existing) {
+      if (turnObj.tldr && !isDefaultTldr(turnObj.tldr)) {
+        existing.tldr = turnObj.tldr;
+      }
+      if (turnObj.tools && turnObj.tools.length > 0) {
+        existing.tools = turnObj.tools;
+      }
+      return;
+    }
+    session.taskHistory.unshift({
+      id: turnObj.id || `turn-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      goal: turnObj.goal,
+      tldr:
+        turnObj.tldr && !isDefaultTldr(turnObj.tldr)
+          ? turnObj.tldr
+          : 'ดำเนินการเสร็จสิ้น',
+      tools: Array.isArray(turnObj.tools) ? turnObj.tools : [],
+      timestamp: turnObj.timestamp || new Date().toISOString(),
+      sessionId: turnObj.sessionId || session.claudeSessionId || session.id,
+    });
+    if (session.taskHistory.length > 25) {
+      session.taskHistory.length = 25;
+    }
+  }
+
   _enrichSessionFromTranscript(session) {
     if (!session) return;
     const parsed = parseTranscriptTail(session.transcriptPath, session.cwd);
     if (!parsed) return;
 
-    if (parsed.transcriptPath && !session.transcriptPath) {
+    if (parsed.transcriptPath) {
       session.transcriptPath = parsed.transcriptPath;
     }
-    if (parsed.lastAssistantText && (isDefaultTldr(session.tldr) || session.status === 'done')) {
+    if (
+      parsed.lastAssistantText &&
+      (isDefaultTldr(session.tldr) || session.status === 'done' || session.status === 'idle')
+    ) {
       session.tldr = parsed.lastAssistantText;
     }
     if (parsed.lastUserText && DEFAULT_GOALS.has(session.goal)) {
       session.goal = parsed.lastUserText;
     }
-    // Always prefer the pure UTF-8 transcript preview over Win32 console cell text if Win32 had \uFFFD!
     if (parsed.utf8Preview && !session.interactivePrompt) {
       session.screenPreview = parsed.utf8Preview;
+    }
+    if (Array.isArray(parsed.turnHistory) && parsed.turnHistory.length > 0) {
+      // Populate internal room history from all turns in this project's transcripts!
+      // Keep the newest turn as current goal/tldr if none is active, and list all turns in taskHistory
+      for (const t of [...parsed.turnHistory].reverse()) {
+        this._archiveTurnIntoHistory(session, t);
+      }
     }
     if (parsed.subAgents && parsed.subAgents.length > 0) {
       for (const tSub of parsed.subAgents) {
@@ -238,9 +317,7 @@ class StateStore extends EventEmitter {
         sessions: Array.from(this.sessions.values()),
       };
       fs.writeFileSync(this.stateFile, JSON.stringify(payload, null, 2), 'utf8');
-    } catch {
-      // Non-fatal persistence error
-    }
+    } catch {}
   }
 
   _emitChange(eventType = 'state_updated', detail = {}) {
@@ -253,10 +330,10 @@ class StateStore extends EventEmitter {
   }
 
   _inferProjectMeta(cwd) {
-    if (!cwd) {
+    const clean = sanitizeCwd(cwd);
+    if (!clean) {
       return { project: 'General', category: 'General' };
     }
-    const clean = String(cwd).replace(/[\\\/]+$/, '');
     const parts = clean.split(/[\\\/]+/).filter(Boolean);
     const project = parts[parts.length - 1] || 'Workspace';
     const parent = parts.length >= 2 ? parts[parts.length - 2] : 'Local';
@@ -266,7 +343,21 @@ class StateStore extends EventEmitter {
     };
   }
 
+  /**
+   * IMPORTANT: Always match by normalized `cwd` FIRST!
+   * That way, 1 project folder = 1 Room Card, even across multiple turns or new Claude session UUIDs!
+   */
   _findMatchingSession({ sessionId, pid, cwd }) {
+    if (cwd) {
+      const norm = normalizeCwdKey(cwd);
+      if (norm) {
+        for (const s of this.sessions.values()) {
+          if (normalizeCwdKey(s.cwd) === norm) {
+            return s;
+          }
+        }
+      }
+    }
     if (sessionId && this.sessions.has(String(sessionId))) {
       return this.sessions.get(String(sessionId));
     }
@@ -277,27 +368,6 @@ class StateStore extends EventEmitter {
         }
       }
     }
-    if (cwd) {
-      const norm = normalizeCwdKey(cwd);
-      // Match ANY live session in the same cwd first (unifying Hook events and ConsoleScanner PID!)
-      for (const s of this.sessions.values()) {
-        if (normalizeCwdKey(s.cwd) === norm && s.lifecycle === 'live') {
-          return s;
-        }
-      }
-      // Or revive a history session in the same cwd
-      const historyCandidates = Array.from(this.sessions.values())
-        .filter(
-          (s) => normalizeCwdKey(s.cwd) === norm && s.lifecycle === 'history'
-        )
-        .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-
-      if (historyCandidates.length > 0) {
-        return historyCandidates[0];
-      }
-    }
-    // If ConsoleScanner scanned a `claude.exe` whose top banner scrolled off (`cwd === null`),
-    // and there is exactly 1 live session in the store, match it!
     if (pid && !cwd) {
       const liveSessions = Array.from(this.sessions.values()).filter(
         (s) => s.lifecycle === 'live'
@@ -310,19 +380,20 @@ class StateStore extends EventEmitter {
   }
 
   getOrCreateSession(sessionId, defaults = {}) {
+    const cleanCwd = sanitizeCwd(defaults.cwd);
     const existing = this._findMatchingSession({
       sessionId,
       pid: defaults.pid,
-      cwd: defaults.cwd,
+      cwd: cleanCwd || undefined,
     });
     if (existing) {
       return existing;
     }
 
-    const id = String(sessionId || `session-${Date.now()}`);
-    const cwd = defaults.cwd || process.cwd();
+    const cwd = cleanCwd || sanitizeCwd(process.cwd());
     const { project, category } = this._inferProjectMeta(cwd);
     const gitMeta = getGitMetadata(cwd);
+    const id = String(sessionId || `room-${project.toLowerCase()}-${Date.now()}`);
 
     const created = {
       id,
@@ -330,9 +401,9 @@ class StateStore extends EventEmitter {
         /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(id)
           ? id
           : defaults.claudeSessionId || null,
-      room: defaults.room || `${project}`,
-      project: defaults.project || project,
-      category: defaults.category || category,
+      room: defaults.room ? sanitizeCwd(defaults.room) : `${project}`,
+      project: defaults.project ? sanitizeCwd(defaults.project) : project,
+      category: defaults.category ? sanitizeCwd(defaults.category) : category,
       tags: Array.isArray(defaults.tags) ? defaults.tags : [category],
       pinned: Boolean(defaults.pinned),
       lifecycle: defaults.lifecycle || 'live',
@@ -367,6 +438,9 @@ class StateStore extends EventEmitter {
       recentEvents: Array.isArray(defaults.recentEvents)
         ? defaults.recentEvents
         : [],
+      taskHistory: Array.isArray(defaults.taskHistory)
+        ? defaults.taskHistory
+        : [],
       transcriptPath: defaults.transcriptPath || null,
       openCount: 1,
       createdAt: new Date().toISOString(),
@@ -396,7 +470,16 @@ class StateStore extends EventEmitter {
       const parsed = parseConsoleScreen(item.screen);
       if (!parsed) continue;
 
-      const cwd = parsed.cwd || null;
+      const cwd = sanitizeCwd(parsed.cwd) || null;
+      // If a `claude.exe` child process has no detectable valid directory on screen and doesn't match any known PID,
+      // skip creating a phantom room if we already have at least 1 live room!
+      const knownByPid = Array.from(this.sessions.values()).find(
+        (s) => s.pid && Number(s.pid) === numericPid
+      );
+      if (!cwd && !knownByPid && this.sessions.size > 0) {
+        continue;
+      }
+
       const { project, category } = this._inferProjectMeta(cwd);
       const cliLabel = [
         'claude',
@@ -424,6 +507,7 @@ class StateStore extends EventEmitter {
         prompt: session.interactivePrompt,
         preview: session.screenPreview,
         tldr: session.tldr,
+        historyCount: (session.taskHistory || []).length,
       });
 
       if (session.lifecycle === 'history') {
@@ -437,28 +521,17 @@ class StateStore extends EventEmitter {
       }
 
       session.isProcessAlive = true;
-      // Keep existing alive PID stable if multiple child claude.exe processes share the same console
       if (!session.pid || !activePids.has(Number(session.pid))) {
         session.pid = numericPid;
         session.cli = cliLabel;
       }
 
-      if (
-        cwd &&
-        (!session.cwd ||
-          session.cwd === process.cwd() ||
-          session.room.startsWith('Claude Tab'))
-      ) {
+      if (cwd && (!session.cwd || session.room.startsWith('Claude Tab'))) {
         session.cwd = cwd;
         const meta = this._inferProjectMeta(cwd);
         session.project = meta.project;
         session.category = meta.category;
-        if (
-          !session.customNamed &&
-          (session.room.startsWith('Claude Tab') ||
-            session.room.startsWith('Room •') ||
-            session.room === path.basename(process.cwd()))
-        ) {
+        if (!session.customNamed) {
           session.room = meta.project;
         }
         const gitMeta = getGitMetadata(cwd);
@@ -466,10 +539,8 @@ class StateStore extends EventEmitter {
         session.dirtyFiles = gitMeta.dirtyFiles;
       }
 
-      // Enrich with pure UTF-8 transcript so Thai text is 100% sharp without \uFFFD!
       this._enrichSessionFromTranscript(session);
 
-      // Only use console screenPreview if we don't have a UTF-8 transcript yet or if an ASCII/English startup menu is showing
       if (!session.screenPreview || parsed.interactivePrompt) {
         const cleanConsolePreview = (parsed.screenPreview || '').replace(
           /\uFFFD+/g,
@@ -505,6 +576,7 @@ class StateStore extends EventEmitter {
         prompt: session.interactivePrompt,
         preview: session.screenPreview,
         tldr: session.tldr,
+        historyCount: (session.taskHistory || []).length,
       });
 
       if (prevStateSig !== nextStateSig) {
@@ -552,15 +624,16 @@ class StateStore extends EventEmitter {
     const rawSessionId = payload.session_id || payload.sessionId || null;
     const isUuid =
       rawSessionId && /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(String(rawSessionId));
+    const cleanCwd = sanitizeCwd(payload.cwd);
 
     const lookupId =
       rawSessionId ||
       payload.room_id ||
       (payload.pid ? `claude-pid-${payload.pid}` : null) ||
-      `cwd-${Buffer.from(String(payload.cwd || 'default')).toString('hex').slice(0, 10)}`;
+      `cwd-${Buffer.from(String(cleanCwd || 'default')).toString('hex').slice(0, 10)}`;
 
     const session = this.getOrCreateSession(lookupId, {
-      cwd: payload.cwd,
+      cwd: cleanCwd,
       room: payload.room,
       claudeSessionId: isUuid ? String(rawSessionId) : null,
       cli:
@@ -576,21 +649,17 @@ class StateStore extends EventEmitter {
     if (isUuid) {
       session.claudeSessionId = String(rawSessionId);
     }
-    if (payload.cwd) {
-      session.cwd = payload.cwd;
-      const meta = this._inferProjectMeta(payload.cwd);
+    if (cleanCwd) {
+      session.cwd = cleanCwd;
+      const meta = this._inferProjectMeta(cleanCwd);
       session.project = meta.project;
       session.category = meta.category;
-      if (
-        !session.customNamed &&
-        (session.room.startsWith('Claude Tab') ||
-          session.room.startsWith('Room •'))
-      ) {
+      if (!session.customNamed) {
         session.room = meta.project;
       }
     }
     if (payload.room) {
-      session.room = payload.room;
+      session.room = sanitizeCwd(payload.room);
       session.customNamed = true;
     }
     if (payload.pane_id) session.paneId = payload.pane_id;
@@ -636,7 +705,6 @@ class StateStore extends EventEmitter {
     if (hookEvent === 'SessionStart') {
       session.status = 'idle';
       session.statusLabel = 'เปิดห้องพร้อมใช้งาน';
-      session.tldr = 'เปิด Claude Session พร้อมเริ่มงาน';
       pushTimeline('เริ่มต้น Session ใน ' + session.cwd, 'SessionStart', 'info');
     } else if (hookEvent === 'UserPromptSubmit') {
       const promptText =
@@ -644,14 +712,30 @@ class StateStore extends EventEmitter {
         payload.user_prompt ||
         payload.message ||
         'รับคำสั่งใหม่จากผู้ใช้';
-      session.goal = summarizeText(promptText, 160);
+      const newGoal = summarizeText(promptText, 160);
+
+      // Archive previous completed/active interaction into internal taskHistory before starting the new turn!
+      if (
+        session.goal &&
+        !DEFAULT_GOALS.has(session.goal) &&
+        session.goal !== newGoal
+      ) {
+        this._archiveTurnIntoHistory(session, {
+          goal: session.goal,
+          tldr: session.tldr,
+          timestamp: now,
+          sessionId: session.claudeSessionId || session.id,
+        });
+      }
+
+      session.goal = newGoal;
       session.status = 'working';
       session.statusLabel = 'กำลังวางแผน & ทำงาน';
       session.pendingAction = null;
       session.interactivePrompt = null;
       session.stageIndex = 0;
       session.currentTool = 'Thinking...';
-      session.tldr = `รับคำสั่ง: "${summarizeText(promptText, 120)}" — กำลังวิเคราะห์และวางแผนขั้นตอน`;
+      session.tldr = `รับคำสั่งใหม่: "${summarizeText(promptText, 120)}" — กำลังวิเคราะห์และวางแผนขั้นตอน`;
       pushTimeline(`คำสั่งใหม่: ${summarizeText(promptText, 90)}`, 'Prompt', 'primary');
     } else if (hookEvent === 'PreToolUse') {
       const inferred = inferWorkflowFromTool(toolName, toolInput);
@@ -839,6 +923,12 @@ class StateStore extends EventEmitter {
           220
         );
       }
+      this._archiveTurnIntoHistory(session, {
+        goal: session.goal,
+        tldr: session.tldr,
+        timestamp: now,
+        sessionId: session.claudeSessionId || session.id,
+      });
       pushTimeline('ทำงานครบรอบคำสั่งแล้ว พร้อมรับคำสั่งถัดไป', 'Done', 'success');
     } else if (hookEvent === 'SessionEnd') {
       session.lifecycle = 'history';

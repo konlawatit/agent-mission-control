@@ -6,12 +6,34 @@ const os = require('os');
 const BRIDGE_SCRIPT = path.resolve(__dirname, 'win-console-bridge.ps1');
 
 /**
+ * Sanitizes a raw path candidate extracted from terminal output
+ * (e.g. strips `> claude` from PowerShell prompt `PS C:\Repo\agent-mission-control> claude`)
+ * and verifies that it is a real existing directory on disk.
+ */
+function extractValidDirectory(line) {
+  if (!line || typeof line !== 'string') return null;
+  const pathMatch = line.match(/([A-Za-z]:\\[^\r\n>|]+)/);
+  if (!pathMatch) return null;
+
+  let candidate = pathMatch[1].trim();
+  // Remove trailing punctuation or quotes
+  candidate = candidate.replace(/["'`.,;]+$/, '').trim();
+
+  try {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      return candidate;
+    }
+  } catch {
+    // Ignore invalid path
+  }
+  return null;
+}
+
+/**
  * Parses a raw Windows Console Screen Buffer dump from `claude.exe` to extract:
- * - Workspace directory (`cwd`) from the Claude banner if visible
+ * - Verified workspace directory (`cwd`)
  * - Model / version info (`Claude Code v2.1.332`, `Opus 5.5`)
- * - Interactive multiple-choice TUI prompts (e.g. `❯ 1. Yes, try it` / `2. Not now`,
- *   Permission prompts `1. Yes` / `2. Yes, and don't ask again` / `3. No`,
- *   or AskUserQuestion menus)
+ * - Interactive multiple-choice TUI prompts
  * - Clean last lines for live terminal preview
  */
 function parseConsoleScreen(rawScreen) {
@@ -23,7 +45,6 @@ function parseConsoleScreen(rawScreen) {
     .split(/\r?\n/)
     .map((l) => l.replace(/\s+$/, ''));
 
-  // Trim trailing blank lines
   while (lines.length > 0 && !lines[lines.length - 1].trim()) {
     lines.pop();
   }
@@ -34,8 +55,7 @@ function parseConsoleScreen(rawScreen) {
   let detectedVersion = null;
   let detectedModel = null;
 
-  // Scan top banner lines for Claude Code version, model, and workspace directory
-  for (let i = 0; i < Math.min(lines.length, 15); i++) {
+  for (let i = 0; i < Math.min(lines.length, 20); i++) {
     const line = lines[i];
     const verMatch = line.match(/Claude Code\s+(v[\d\.]+)/i);
     if (verMatch) {
@@ -45,28 +65,17 @@ function parseConsoleScreen(rawScreen) {
     if (modelMatch) {
       detectedModel = modelMatch[0].trim();
     }
-    const pathMatch = line.match(/([A-Za-z]:\\[^\r\n]+)/);
-    if (pathMatch) {
-      const candidate = pathMatch[1].trim();
-      if (fs.existsSync(candidate)) {
-        detectedCwd = candidate;
-      } else {
-        detectedCwd = candidate;
+    if (!detectedCwd) {
+      const validDir = extractValidDirectory(line);
+      if (validDir) {
+        detectedCwd = validDir;
       }
     }
   }
 
-  // Detect interactive choice menu in the bottom 30 lines
   const tailStart = Math.max(0, lines.length - 30);
   const tailLines = lines.slice(tailStart);
 
-  // Look for numbered options like:
-  //   ❯ 1. Yes, try it
-  //     2. Not now
-  // or
-  //   > 1. Yes
-  //     2. Yes, allow all
-  //     3. No
   const optionRegex = /^\s*([❯>●\*])?\s*(\d+)[\.\)]\s+(.+)$/;
   const options = [];
   let firstOptionLineIdx = -1;
@@ -75,16 +84,17 @@ function parseConsoleScreen(rawScreen) {
 
   for (let i = 0; i < tailLines.length; i++) {
     const line = tailLines[i];
-    // Skip lines that are inside markdown numbered lists far above if separated by prompt box
     const m = line.match(optionRegex);
     if (m) {
       const hasCursor = Boolean(m[1]);
       const num = m[2];
       const label = m[3].trim();
 
-      // Ensure sequential option numbers (1, 2, 3...)
       const expectedIndex = options.length + 1;
-      if (Number(num) === expectedIndex || (options.length === 0 && Number(num) === 1)) {
+      if (
+        Number(num) === expectedIndex ||
+        (options.length === 0 && Number(num) === 1)
+      ) {
         if (options.length === 0) {
           firstOptionLineIdx = i;
         }
@@ -100,11 +110,10 @@ function parseConsoleScreen(rawScreen) {
           active: hasCursor,
         });
       } else if (Number(num) === 1) {
-        // Start of a newer menu lower down on the screen
         options.length = 0;
         firstOptionLineIdx = i;
         lastOptionLineIdx = i;
-        currentIndex = hasCursor ? 1 : 1;
+        currentIndex = 1;
         options.push({
           index: 1,
           number: '1',
@@ -117,17 +126,12 @@ function parseConsoleScreen(rawScreen) {
 
   let interactivePrompt = null;
 
-  // Validate that the detected options are an active bottom TUI menu
-  // (i.e. near the bottom of the screen, not followed by a normal prompt input box far below)
   if (options.length >= 2 && tailLines.length - lastOptionLineIdx <= 6) {
-    // If none had an explicit cursor character matched, mark the first option active by default
     if (!options.some((o) => o.active)) {
       options[0].active = true;
       currentIndex = 1;
     }
 
-    // Extract question & context lines above firstOptionLineIdx
-    // Find the last horizontal divider (────) above firstOptionLineIdx
     let sectionStart = 0;
     for (let i = firstOptionLineIdx - 1; i >= 0; i--) {
       if (/[─━═]{8,}/.test(tailLines[i])) {
@@ -173,9 +177,6 @@ function parseConsoleScreen(rawScreen) {
   };
 }
 
-/**
- * Invokes `win-console-bridge.ps1` with a temporary JSON output file.
- */
 function invokeWinConsoleBridge(args = [], timeoutMs = 4500) {
   return new Promise((resolve) => {
     if (process.platform !== 'win32' || !fs.existsSync(BRIDGE_SCRIPT)) {
@@ -267,7 +268,6 @@ class ConsoleScanner {
       '-Value',
       String(numberValue || targetIndex || '1'),
     ]);
-    // Re-scan after 250ms so the UI updates immediately
     setTimeout(() => this.scanOnce(), 250);
     return res;
   }
@@ -300,6 +300,7 @@ class ConsoleScanner {
 }
 
 module.exports = {
+  extractValidDirectory,
   parseConsoleScreen,
   invokeWinConsoleBridge,
   ConsoleScanner,

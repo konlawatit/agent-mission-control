@@ -11,6 +11,16 @@ const os = require('os');
 
 const PORT = Number(process.env.AMC_PORT || 4310);
 const HOST = process.env.AMC_HOST || '127.0.0.1';
+const DATA_DIR = path.join(os.homedir(), '.agent-mission-control');
+
+// The Mission Control server rejects API calls without its per-install token.
+function readToken() {
+  try {
+    return fs.readFileSync(path.join(DATA_DIR, 'token'), 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
 
 let rawInput = '';
 process.stdin.setEncoding('utf8');
@@ -50,6 +60,7 @@ process.stdin.on('end', () => {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body),
+        'X-AMC-Token': readToken(),
       },
       timeout: 1200,
     },
@@ -61,12 +72,11 @@ process.stdin.on('end', () => {
 
   req.on('error', () => {
     try {
-      const dataDir = path.join(os.homedir(), '.agent-mission-control');
-      if (!fs.existsSync(dataDir)) {
-        fs.mkdirSync(dataDir, { recursive: true });
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
       }
       fs.appendFileSync(
-        path.join(dataDir, 'offline-events.jsonl'),
+        path.join(DATA_DIR, 'offline-events.jsonl'),
         body + '\n',
         'utf8'
       );

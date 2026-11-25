@@ -29,6 +29,8 @@ let activeTab = 'live'; // 'live' | 'needs_input' | 'history' | 'by_project' | '
 let searchQuery = '';
 let selectedProject = 'ALL';
 let selectedCategory = 'ALL';
+let isChatFullscreen = false;
+let terminalFontSize = 13;
 
 // Persist user scroll state per session so scrolling never jumps back to top
 const terminalScrollState = new Map(); // sessionId -> { scrollTop, stickToBottom }
@@ -942,57 +944,71 @@ function buildFullInspectorMountHtml(s) {
         ${buildInspectorHeaderHtml(s)}
       </div>
 
-      <!-- 1. Chat & Command Input Box AT THE VERY TOP so you can chat and see output immediately! -->
-      <div class="section-box" style="background:var(--surface-elevated); border-color: rgba(59, 130, 246, 0.45);" id="inspector-command-box">
-        <div class="section-title">
-          <span>💬 แชท & สั่งการไปยัง ${escapeHtml(s.room)} โดยตรง</span>
-          <label style="display:flex; align-items:center; gap:6px; text-transform:none; font-weight:500; cursor:pointer;">
-            <input type="checkbox" id="headless-toggle" />
-            <span>รันผ่าน Claude Headless Resume (--resume)</span>
-          </label>
-        </div>
+      <!-- Unified Chat & Terminal Wrapper (Supports 1-Click Fullscreen Expansion without losing scroll or input focus!) -->
+      <div class="chat-center-wrapper ${isChatFullscreen ? 'fullscreen-mode' : ''}" id="chat-center-wrapper">
+        <!-- 1. Chat & Command Input Box AT THE VERY TOP -->
+        <div class="section-box" style="background:var(--surface-elevated); border-color: rgba(59, 130, 246, 0.45);" id="inspector-command-box">
+          <div class="section-title">
+            <span>💬 แชท & สั่งการไปยัง ${escapeHtml(s.room)} โดยตรง</span>
+            <div style="display:flex; align-items:center; gap:10px;">
+              <label style="display:flex; align-items:center; gap:6px; text-transform:none; font-weight:500; cursor:pointer;">
+                <input type="checkbox" id="headless-toggle" />
+                <span>รันผ่าน Claude Headless Resume (--resume)</span>
+              </label>
+              <button class="btn btn-primary" style="padding:4px 10px; font-size:11.5px;" id="fullscreen-chat-btn" onclick="toggleChatFullscreen()">
+                ${isChatFullscreen ? '🗕 ย่อกลับขนาดปกติ (Esc)' : '⛶ ขยายแชทเต็มจอ (Fullscreen)'}
+              </button>
+            </div>
+          </div>
 
-        <div class="cmd-bar" style="margin-bottom:10px;">
-          <input id="cmd-input" class="input-text"
-                 placeholder="พิมพ์ข้อความแชท คำสั่ง หรือหมายเลขตัวเลือก ส่งเข้า ${escapeHtml(s.room)} แล้วกด Enter..."
-                 onkeydown="if(event.key==='Enter') submitCommand('${escapeJsAttr(s.id)}')" />
-          <button class="btn btn-primary" onclick="submitCommand('${escapeJsAttr(s.id)}')">
-            ส่งข้อความ ↵
-          </button>
-        </div>
+          <div class="cmd-bar" style="margin-bottom:10px;">
+            <input id="cmd-input" class="input-text"
+                   placeholder="พิมพ์ข้อความแชท คำสั่ง หรือหมายเลขตัวเลือก ส่งเข้า ${escapeHtml(s.room)} แล้วกด Enter..."
+                   onkeydown="if(event.key==='Enter') submitCommand('${escapeJsAttr(s.id)}')" />
+            <button class="btn btn-primary" onclick="submitCommand('${escapeJsAttr(s.id)}')">
+              ส่งข้อความ ↵
+            </button>
+          </div>
 
-        <div style="display:flex; flex-wrap:wrap; gap:6px;">
-          <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', '1', true)">
-            1️⃣ เลือกข้อ 1
-          </button>
-          <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', '2', true)">
-            2️⃣ เลือกข้อ 2
-          </button>
-          <button class="btn" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">
-            ↵ ส่งปุ่ม Enter
-          </button>
-          <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', 'รันชุดทดสอบ (test) และสรุปผลสั้นๆ ให้หน่อย')">
-            🧪 สั่งรัน Test & สรุปผล
-          </button>
-          <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', 'สรุปสิ่งที่แก้ไขไปทั้งหมดพร้อมตรวจสอบ git status')">
-            📝 ขอสรุปงานที่ทำเสร็จแล้ว
-          </button>
-        </div>
-      </div>
-
-      <!-- 2. Live Chat / Terminal Screen Output right under the chat input box -->
-      <div class="section-box" id="inspector-terminal-box" style="display:${s.screenPreview ? 'block' : 'none'};">
-        <div class="section-title">
-          <span id="terminal-box-title">🖥️ หน้าจอแชท & Terminal ล่าสุด</span>
-          <div style="display:flex; gap:6px;">
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">↑</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">↓</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">↵ Enter</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">Esc</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="scanTerminalsNow()">🔄 รีเฟรชจอ</button>
+          <div style="display:flex; flex-wrap:wrap; gap:6px;">
+            <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', '1', true)">
+              1️⃣ เลือกข้อ 1
+            </button>
+            <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', '2', true)">
+              2️⃣ เลือกข้อ 2
+            </button>
+            <button class="btn" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">
+              ↵ ส่งปุ่ม Enter
+            </button>
+            <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', 'รันชุดทดสอบ (test) และสรุปผลสั้นๆ ให้หน่อย')">
+              🧪 สั่งรัน Test & สรุปผล
+            </button>
+            <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', 'สรุปสิ่งที่แก้ไขไปทั้งหมดพร้อมตรวจสอบ git status')">
+              📝 ขอสรุปงานที่ทำเสร็จแล้ว
+            </button>
           </div>
         </div>
-        <div class="terminal-preview" id="terminal-preview-content"></div>
+
+        <!-- 2. Live Chat / Terminal Screen Output right under the chat input box -->
+        <div class="section-box" id="inspector-terminal-box" style="display:${s.screenPreview ? 'block' : 'none'};">
+          <div class="section-title">
+            <span id="terminal-box-title">🖥️ หน้าจอแชท & Terminal ล่าสุด</span>
+            <div style="display:flex; flex-wrap:wrap; gap:6px;">
+              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="adjustTerminalFont(-1)" title="ลดขนาดตัวอักษร">A-</button>
+              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="adjustTerminalFont(1)" title="เพิ่มขนาดตัวอักษร">A+</button>
+              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="copyTerminalPreview()" title="คัดลอกข้อความแชททั้งหมด">📋 คัดลอก</button>
+              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">↑</button>
+              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">↓</button>
+              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">↵ Enter</button>
+              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">Esc</button>
+              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="scanTerminalsNow()">🔄 รีเฟรชจอ</button>
+              <button class="btn btn-primary" style="padding:3px 10px; font-size:11px;" id="fullscreen-term-btn" onclick="toggleChatFullscreen()">
+                ${isChatFullscreen ? '🗕 ย่อกลับ (Esc)' : '⛶ ขยายเต็มจอ'}
+              </button>
+            </div>
+          </div>
+          <div class="terminal-preview" id="terminal-preview-content" style="font-size:${terminalFontSize}px;"></div>
+        </div>
       </div>
 
       <!-- 3. Workflow Pipeline, Latest TL;DR, Turn History, Sub-Agents, Modified Files -->
@@ -1146,6 +1162,47 @@ window.toggleViewMode = function () {
   mountedInspectorSessionId = null;
   renderWorkspace();
 };
+
+window.toggleChatFullscreen = function () {
+  isChatFullscreen = !isChatFullscreen;
+  const wrapper = document.getElementById('chat-center-wrapper');
+  if (wrapper) {
+    wrapper.classList.toggle('fullscreen-mode', isChatFullscreen);
+  }
+  const btn1 = document.getElementById('fullscreen-chat-btn');
+  if (btn1) {
+    btn1.innerHTML = isChatFullscreen
+      ? '🗕 ย่อกลับขนาดปกติ (Esc)'
+      : '⛶ ขยายแชทเต็มจอ (Fullscreen)';
+  }
+  const btn2 = document.getElementById('fullscreen-term-btn');
+  if (btn2) {
+    btn2.innerHTML = isChatFullscreen ? '🗕 ย่อกลับ (Esc)' : '⛶ ขยายเต็มจอ';
+  }
+};
+
+window.adjustTerminalFont = function (delta) {
+  terminalFontSize = Math.min(22, Math.max(11, terminalFontSize + delta));
+  const pre = document.getElementById('terminal-preview-content');
+  if (pre) {
+    pre.style.fontSize = `${terminalFontSize}px`;
+  }
+};
+
+window.copyTerminalPreview = function () {
+  const pre = document.getElementById('terminal-preview-content');
+  if (!pre || !pre.textContent) return;
+  navigator.clipboard.writeText(pre.textContent).then(() => {
+    showToast('📋 คัดลอกข้อความหน้าจอแชทเข้า Clipboard เรียบร้อย!');
+  });
+};
+
+// Allow pressing Escape key on browser page (when not inside input) to exit fullscreen chat mode
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && isChatFullscreen) {
+    window.toggleChatFullscreen();
+  }
+});
 
 window.selectChoiceOption = async function (
   sessionId,

@@ -277,7 +277,7 @@ function parseTranscriptTail(transcriptPath, cwd = null) {
       turns.push(currentTurn);
     }
 
-    const recentLog = conversationLines.slice(-10).join('\n\n');
+    const recentLog = conversationLines.slice(-30).join('\n\n');
 
     return {
       transcriptPath: targetPath,

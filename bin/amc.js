@@ -18,6 +18,7 @@ const {
   installClaudeHooks,
   uninstallClaudeHooks,
 } = require('../src/hook-installer');
+const { readToken } = require('../src/security');
 
 const args = process.argv.slice(2);
 const subcommand = args[0] || 'start';
@@ -51,6 +52,7 @@ function postHookPayload(payload) {
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(body),
+          'X-AMC-Token': readToken(),
         },
         timeout: 1200,
       },
@@ -89,11 +91,17 @@ async function runCommand() {
   }
 
   if (subcommand === 'status') {
-    const req = http.get(`http://127.0.0.1:${PORT}/api/state`, (res) => {
+    const statusUrl = `http://127.0.0.1:${PORT}/api/state`;
+    const statusOptions = { headers: { 'X-AMC-Token': readToken() } };
+    const req = http.get(statusUrl, statusOptions, (res) => {
       let raw = '';
       res.on('data', (c) => (raw += c));
       res.on('end', () => {
         const data = JSON.parse(raw);
+        if (!data.ok) {
+          console.log(`❌ Mission Control ตอบกลับ: ${data.error}`);
+          return;
+        }
         console.log('\n🎛️  AGENT MISSION CONTROL — LIVE & HISTORY STATUS');
         console.log('====================================================');
         console.log(
@@ -172,7 +180,15 @@ async function runCommand() {
 
   // Default: `start` (Real sessions only — no demo rooms seeded!)
   const noOpen = args.includes('--no-open');
-  const { server } = createMissionControlServer();
+  const { server, store } = createMissionControlServer();
+
+  // Persist debounced state before exiting on Ctrl+C / service stop.
+  const shutdown = () => {
+    store.flush();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
   const hooksState = checkHooksStatus();
 
   server.listen(PORT, '127.0.0.1', () => {

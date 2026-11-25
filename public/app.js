@@ -36,18 +36,74 @@ let terminalFontSize = 13;
 const terminalScrollState = new Map(); // sessionId -> { scrollTop, stickToBottom }
 
 function escapeHtml(str) {
-  return String(str || '')
+  return String(str ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-function escapeJsAttr(str) {
-  return String(str || '')
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "\\'")
-    .replace(/"/g, '&quot;');
+/**
+ * Renders a click action as data attributes instead of an inline onclick handler.
+ * Arguments are JSON-encoded and HTML-escaped, so untrusted text from the terminal
+ * (option labels, room names, ids) can never break out into executable JS.
+ */
+const ACTIONS = new Set([
+  'switchTab',
+  'quickApprove',
+  'sendTerminalKey',
+  'selectChoiceOption',
+  'selectSession',
+  'resumeSession',
+  'togglePinRoom',
+  'openEditModal',
+  'archiveRoom',
+  'removeRoomPermanent',
+  'sendQuickCommand',
+  'submitCommand',
+]);
+
+function act(name, ...args) {
+  return `data-act="${escapeHtml(name)}" data-args="${escapeHtml(JSON.stringify(args))}"`;
+}
+
+function runAction(el, attr) {
+  const name = el.getAttribute(attr);
+  if (!ACTIONS.has(name) || typeof window[name] !== 'function') return;
+  let args;
+  try {
+    args = JSON.parse(el.getAttribute('data-args') || '[]');
+  } catch {
+    return;
+  }
+  window[name](...args);
+}
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-act]');
+  if (!el) return;
+  // A nested element with its own static onclick handles the click itself.
+  const inner = e.target.closest('[onclick]');
+  if (inner && inner !== el && el.contains(inner)) return;
+  runAction(el, 'data-act');
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || !e.target.closest) return;
+  const el = e.target.closest('[data-enter-act]');
+  if (el) runAction(el, 'data-enter-act');
+});
+
+// Every API call carries the per-install token the server embeds in index.html.
+const AMC_TOKEN =
+  (document.querySelector('meta[name="amc-token"]') || {}).content || '';
+
+function apiFetch(url, init = {}) {
+  return fetch(url, {
+    ...init,
+    headers: { ...(init.headers || {}), 'X-AMC-Token': AMC_TOKEN },
+  });
 }
 
 function formatRelativeTime(isoStr) {
@@ -79,7 +135,7 @@ function showToast(msg) {
 
 async function fetchInitialState() {
   try {
-    const res = await fetch('/api/state');
+    const res = await apiFetch('/api/state');
     const data = await res.json();
     if (data.ok) {
       appState = { ...appState, ...data };
@@ -92,7 +148,7 @@ async function fetchInitialState() {
 }
 
 function connectSSE() {
-  const evtSource = new EventSource('/api/events');
+  const evtSource = new EventSource(`/api/events?token=${encodeURIComponent(AMC_TOKEN)}`);
   const statusEl = document.getElementById('sse-status');
 
   evtSource.onopen = () => {
@@ -193,7 +249,7 @@ function renderHooksButton() {
 
 async function handleInstallHooks() {
   try {
-    const res = await fetch('/api/hooks/install', { method: 'POST' });
+    const res = await apiFetch('/api/hooks/install', { method: 'POST' });
     const data = await res.json();
     if (data.ok) {
       appState.hooks = data;
@@ -209,7 +265,7 @@ async function handleInstallHooks() {
 
 window.scanTerminalsNow = async function () {
   try {
-    const res = await fetch('/api/console/scan', { method: 'POST' });
+    const res = await apiFetch('/api/console/scan', { method: 'POST' });
     const data = await res.json();
     if (data.ok) {
       showToast('🔄 สแกนหน้าจอ Claude Terminal ทุก Tab เรียบร้อย!');
@@ -300,7 +356,7 @@ function renderTabsAndFilters() {
       .map(
         (t) => `
         <button class="tab-btn ${activeTab === t.id ? 'active' : ''}"
-                onclick="switchTab('${t.id}')">
+                ${act('switchTab', t.id)}>
           <span>${t.label}</span>
           <span class="tab-count">${t.count}</span>
         </button>
@@ -378,13 +434,13 @@ function buildInteractiveChoiceBoxHtml(s, compact = false) {
             <span class="mono" style="margin-left:8px;">${escapeHtml(s.pendingAction)}</span>
           </div>
           <div style="display:flex; gap:6px;">
-            <button class="btn btn-warning" onclick="event.stopPropagation(); quickApprove('${escapeJsAttr(s.id)}')">
+            <button class="btn btn-warning" ${act('quickApprove', s.id)}>
               ✓ Approve (y)
             </button>
-            <button class="btn" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">
+            <button class="btn" ${act('sendTerminalKey', s.id, 'enter')}>
               ↵ กด Enter
             </button>
-            <button class="btn" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">
+            <button class="btn" ${act('sendTerminalKey', s.id, 'esc')}>
               Esc ยกเลิก
             </button>
           </div>
@@ -406,7 +462,7 @@ function buildInteractiveChoiceBoxHtml(s, compact = false) {
       const isCursor = opt.active || opt.index === currentIdx;
       return `
         <button class="choice-btn ${isCursor ? 'active-cursor' : ''}"
-                onclick="event.stopPropagation(); selectChoiceOption('${escapeJsAttr(s.id)}', ${opt.index}, ${currentIdx}, '${escapeJsAttr(opt.number)}', '${escapeJsAttr(opt.label)}')">
+                ${act('selectChoiceOption', s.id, opt.index, currentIdx, opt.number, opt.label)}>
           <div style="display:flex; align-items:center;">
             <span class="choice-num">${escapeHtml(opt.number)}</span>
             <span>${escapeHtml(opt.label)}</span>
@@ -426,16 +482,16 @@ function buildInteractiveChoiceBoxHtml(s, compact = false) {
           💡 ${escapeHtml(prompt.footer || 'คลิกตัวเลือกด้านบน หรือใช้ปุ่มควบคุม TUI ด้านขวา')}
         </span>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
-          <button class="btn" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">
+          <button class="btn" ${act('sendTerminalKey', s.id, 'up')}>
             ↑ เลื่อนขึ้น
           </button>
-          <button class="btn" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">
+          <button class="btn" ${act('sendTerminalKey', s.id, 'down')}>
             ↓ เลื่อนลง
           </button>
-          <button class="btn btn-warning" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">
+          <button class="btn btn-warning" ${act('sendTerminalKey', s.id, 'enter')}>
             ↵ กด Enter ยืนยันข้อที่เลือกอยู่
           </button>
-          <button class="btn" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">
+          <button class="btn" ${act('sendTerminalKey', s.id, 'esc')}>
             Esc ยกเลิก
           </button>
         </div>
@@ -488,7 +544,7 @@ function renderAttentionBanner() {
               ⚠️ [${escapeHtml(target.room)}] กำลังรอให้คุณเลือกคำตอบ: "${escapeHtml(p.question)}"
             </strong>
           </div>
-          <button class="btn" onclick="selectSession('${escapeJsAttr(target.id)}')">
+          <button class="btn" ${act('selectSession', target.id)}>
             🔍 เปิดดูห้องนี้
           </button>
         </div>
@@ -497,13 +553,13 @@ function renderAttentionBanner() {
             .map(
               (opt) => `
               <button class="btn ${opt.active ? 'btn-warning' : ''}"
-                      onclick="selectChoiceOption('${escapeJsAttr(target.id)}', ${opt.index}, ${currentIdx}, '${escapeJsAttr(opt.number)}', '${escapeJsAttr(opt.label)}')">
+                      ${act('selectChoiceOption', target.id, opt.index, currentIdx, opt.number, opt.label)}>
                 <b>[${escapeHtml(opt.number)}]</b> ${escapeHtml(opt.label)} ${opt.active ? '❯' : ''}
               </button>
             `
             )
             .join('')}
-          <button class="btn" onclick="sendTerminalKey('${escapeJsAttr(target.id)}', 'esc')">
+          <button class="btn" ${act('sendTerminalKey', target.id, 'esc')}>
             Esc ยกเลิก
           </button>
         </div>
@@ -525,10 +581,10 @@ function renderAttentionBanner() {
           </div>
         </div>
         <div style="display:flex; gap:8px;">
-          <button class="btn btn-warning" onclick="quickApprove('${escapeJsAttr(target.id)}')">
+          <button class="btn btn-warning" ${act('quickApprove', target.id)}>
             ✓ Approve & ให้ทำต่อทันที
           </button>
-          <button class="btn" onclick="selectSession('${escapeJsAttr(target.id)}')">
+          <button class="btn" ${act('selectSession', target.id)}>
             🔍 ดูรายละเอียดห้องนี้
           </button>
         </div>
@@ -589,7 +645,7 @@ function buildRoomCardHtml(s) {
                 (opt) => `
                 <button class="btn ${opt.active ? 'btn-warning' : ''}"
                         style="padding:5px 10px; font-size:12px;"
-                        onclick="event.stopPropagation(); selectChoiceOption('${escapeJsAttr(s.id)}', ${opt.index}, ${s.interactivePrompt.currentIndex || 1}, '${escapeJsAttr(opt.number)}', '${escapeJsAttr(opt.label)}')">
+                        ${act('selectChoiceOption', s.id, opt.index, s.interactivePrompt.currentIndex || 1, opt.number, opt.label)}>
                   <b>${escapeHtml(opt.number)}.</b> ${escapeHtml(opt.label)}
                 </button>
               `
@@ -607,7 +663,7 @@ function buildRoomCardHtml(s) {
           🕘 ปิดเมื่อ ${formatRelativeTime(s.closedAt || s.updatedAt)}
         </span>
         <button class="btn btn-success" style="padding:5px 11px; font-size:12px;"
-                onclick="event.stopPropagation(); resumeSession('${escapeJsAttr(s.id)}')">
+                ${act('resumeSession', s.id)}>
           🔄 กู้คืน / เปิดต่อใน Terminal
         </button>
       </div>
@@ -616,7 +672,7 @@ function buildRoomCardHtml(s) {
 
   return `
     <div class="room-card ${cardBorderClass} ${isSelected ? 'selected' : ''}"
-         onclick="selectSession('${escapeJsAttr(s.id)}')">
+         ${act('selectSession', s.id)}>
       <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
         <div style="display:flex; align-items:center; gap:8px; font-weight:700; font-size:15px;">
           <span class="dot ${dotClass}"></span>
@@ -678,19 +734,19 @@ function buildInspectorHeaderHtml(s) {
         </div>
       </div>
       <div style="display:flex; flex-wrap:wrap; gap:6px;">
-        <button class="btn" onclick="togglePinRoom('${escapeJsAttr(s.id)}', ${!s.pinned})">
+        <button class="btn" ${act('togglePinRoom', s.id, !s.pinned)}>
           ${s.pinned ? '📌 เลิกปักหมุด' : '📌 ปักหมุดกันลืม'}
         </button>
-        <button class="btn" onclick="openEditModal('${escapeJsAttr(s.id)}')">
+        <button class="btn" ${act('openEditModal', s.id)}>
           ✏️ เปลี่ยนชื่อ / หมวดหมู่
         </button>
-        <button class="btn btn-success" onclick="resumeSession('${escapeJsAttr(s.id)}')">
+        <button class="btn btn-success" ${act('resumeSession', s.id)}>
           🔄 เปิดต่อใน Terminal (Resume)
         </button>
         ${
           !isHistory
-            ? `<button class="btn" onclick="archiveRoom('${escapeJsAttr(s.id)}')">📥 เก็บเข้าประวัติ</button>`
-            : `<button class="btn" onclick="removeRoomPermanent('${escapeJsAttr(s.id)}')">🗑️ ลบถาวร</button>`
+            ? `<button class="btn" ${act('archiveRoom', s.id)}>📥 เก็บเข้าประวัติ</button>`
+            : `<button class="btn" ${act('removeRoomPermanent', s.id)}>🗑️ ลบถาวร</button>`
         }
       </div>
     </div>
@@ -713,7 +769,7 @@ function buildInspectorBodyDynamicHtml(s) {
             </div>
           </div>
           <button class="btn btn-success" style="padding:10px 16px; font-size:13.5px;"
-                  onclick="resumeSession('${escapeJsAttr(s.id)}')">
+                  ${act('resumeSession', s.id)}>
             🔄 กู้คืน / เปิดต่อใน Terminal (Resume Session)
           </button>
         </div>
@@ -964,26 +1020,26 @@ function buildFullInspectorMountHtml(s) {
           <div class="cmd-bar" style="margin-bottom:10px;">
             <input id="cmd-input" class="input-text"
                    placeholder="พิมพ์ข้อความแชท คำสั่ง หรือหมายเลขตัวเลือก ส่งเข้า ${escapeHtml(s.room)} แล้วกด Enter..."
-                   onkeydown="if(event.key==='Enter') submitCommand('${escapeJsAttr(s.id)}')" />
-            <button class="btn btn-primary" onclick="submitCommand('${escapeJsAttr(s.id)}')">
+                   data-enter-act="submitCommand" data-args="${escapeHtml(JSON.stringify([s.id]))}" />
+            <button class="btn btn-primary" ${act('submitCommand', s.id)}>
               ส่งข้อความ ↵
             </button>
           </div>
 
           <div style="display:flex; flex-wrap:wrap; gap:6px;">
-            <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', '1', true)">
+            <button class="btn" ${act('sendQuickCommand', s.id, '1', true)}>
               1️⃣ เลือกข้อ 1
             </button>
-            <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', '2', true)">
+            <button class="btn" ${act('sendQuickCommand', s.id, '2', true)}>
               2️⃣ เลือกข้อ 2
             </button>
-            <button class="btn" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">
+            <button class="btn" ${act('sendTerminalKey', s.id, 'enter')}>
               ↵ ส่งปุ่ม Enter
             </button>
-            <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', 'รันชุดทดสอบ (test) และสรุปผลสั้นๆ ให้หน่อย')">
+            <button class="btn" ${act('sendQuickCommand', s.id, 'รันชุดทดสอบ (test) และสรุปผลสั้นๆ ให้หน่อย')}>
               🧪 สั่งรัน Test & สรุปผล
             </button>
-            <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', 'สรุปสิ่งที่แก้ไขไปทั้งหมดพร้อมตรวจสอบ git status')">
+            <button class="btn" ${act('sendQuickCommand', s.id, 'สรุปสิ่งที่แก้ไขไปทั้งหมดพร้อมตรวจสอบ git status')}>
               📝 ขอสรุปงานที่ทำเสร็จแล้ว
             </button>
           </div>
@@ -997,10 +1053,10 @@ function buildFullInspectorMountHtml(s) {
               <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="adjustTerminalFont(-1)" title="ลดขนาดตัวอักษร">A-</button>
               <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="adjustTerminalFont(1)" title="เพิ่มขนาดตัวอักษร">A+</button>
               <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="copyTerminalPreview()" title="คัดลอกข้อความแชททั้งหมด">📋 คัดลอก</button>
-              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">↑</button>
-              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">↓</button>
-              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">↵ Enter</button>
-              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">Esc</button>
+              <button class="btn" style="padding:3px 8px; font-size:11px;" ${act('sendTerminalKey', s.id, 'up')}>↑</button>
+              <button class="btn" style="padding:3px 8px; font-size:11px;" ${act('sendTerminalKey', s.id, 'down')}>↓</button>
+              <button class="btn" style="padding:3px 8px; font-size:11px;" ${act('sendTerminalKey', s.id, 'enter')}>↵ Enter</button>
+              <button class="btn" style="padding:3px 8px; font-size:11px;" ${act('sendTerminalKey', s.id, 'esc')}>Esc</button>
               <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="scanTerminalsNow()">🔄 รีเฟรชจอ</button>
               <button class="btn btn-primary" style="padding:3px 10px; font-size:11px;" id="fullscreen-term-btn" onclick="toggleChatFullscreen()">
                 ${isChatFullscreen ? '🗕 ย่อกลับ (Esc)' : '⛶ ขยายเต็มจอ'}
@@ -1212,7 +1268,7 @@ window.selectChoiceOption = async function (
   labelStr
 ) {
   try {
-    const res = await fetch('/api/session/select-option', {
+    const res = await apiFetch('/api/session/select-option', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1225,7 +1281,7 @@ window.selectChoiceOption = async function (
     });
     const data = await res.json();
     if (data.ok) {
-      showToast(`✅ ${data.message}`);
+      showToast(data.delivered === false ? data.message : `✅ ${data.message}`);
     } else {
       showToast(`⚠️ ${data.error || data.message}`);
     }
@@ -1236,7 +1292,7 @@ window.selectChoiceOption = async function (
 
 window.sendTerminalKey = async function (sessionId, keyName) {
   try {
-    const res = await fetch('/api/session/send-key', {
+    const res = await apiFetch('/api/session/send-key', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1264,7 +1320,7 @@ window.sendQuickCommand = async function (
   const runHeadless = headlessEl ? headlessEl.checked : false;
 
   try {
-    const res = await fetch('/api/session/command', {
+    const res = await apiFetch('/api/session/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1276,7 +1332,7 @@ window.sendQuickCommand = async function (
     });
     const data = await res.json();
     if (data.ok) {
-      showToast(`✅ ${data.message}`);
+      showToast(data.delivered === false ? data.message : `✅ ${data.message}`);
     }
   } catch (err) {
     showToast('❌ ส่งคำสั่งไม่สำเร็จ: ' + err.message);
@@ -1293,7 +1349,7 @@ window.submitCommand = async function (sessionId) {
 
 window.resumeSession = async function (sessionId) {
   try {
-    const res = await fetch('/api/session/resume', {
+    const res = await apiFetch('/api/session/resume', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId, resume: true }),
@@ -1309,7 +1365,7 @@ window.resumeSession = async function (sessionId) {
 };
 
 window.togglePinRoom = async function (sessionId, pinnedState) {
-  await fetch('/api/session/update', {
+  await apiFetch('/api/session/update', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1345,7 +1401,7 @@ window.submitEditRoom = async function () {
     document.getElementById('edit-room-category').value.trim() || 'General';
   const goal = document.getElementById('edit-room-goal').value.trim();
 
-  await fetch('/api/session/update', {
+  await apiFetch('/api/session/update', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1358,7 +1414,7 @@ window.submitEditRoom = async function () {
 };
 
 window.archiveRoom = async function (sessionId) {
-  await fetch('/api/session/update', {
+  await apiFetch('/api/session/update', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'archive', sessionId }),
@@ -1367,7 +1423,7 @@ window.archiveRoom = async function (sessionId) {
 };
 
 window.removeRoomPermanent = async function (sessionId) {
-  await fetch('/api/session/update', {
+  await apiFetch('/api/session/update', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'remove', sessionId }),
@@ -1376,7 +1432,7 @@ window.removeRoomPermanent = async function (sessionId) {
 };
 
 window.clearUnpinnedHistory = async function () {
-  await fetch('/api/session/update', {
+  await apiFetch('/api/session/update', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'clear-history' }),
@@ -1401,7 +1457,7 @@ window.submitSpawnRoom = async function () {
   const openTerminal = document.getElementById('spawn-open-wt').checked;
   const runHeadless = document.getElementById('spawn-headless').checked;
 
-  const res = await fetch('/api/session/spawn', {
+  const res = await apiFetch('/api/session/spawn', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

@@ -18,6 +18,10 @@
 - 🌳 **Live Sub-Agent Tree**: แสดงโครงสร้าง `Main Agent → Sub-Agents` พร้อมสถานะและ Tool ที่กำลังรัน
 - ⚠️ **Attention Queue**: แจ้งเตือนเฉพาะห้องที่รอคุณตัดสินใจ (รอ Approve / ติดปัญหา) ไว้ด้านบนสุด
 - ⌨️ **Bi-Directional Command Center**: สั่งการหรือกด Approve ส่งกลับไปยังแต่ละ Session ได้จากหน้าจอเดียว (ผ่าน WezTerm IPC, CLI Wrapper, หรือ `claude --resume`)
+- 🗂️ **ไฟล์ที่แก้ไข + Web IDE**: กดดูรายการไฟล์ที่เปลี่ยน แล้วเปิดดู Diff / Source แบบเต็มจอ หรือกดเลขบรรทัดเพื่อเปิดไฟล์นั้นใน VS Code ที่บรรทัดนั้นทันที (ผ่าน `vscode://` link ไม่ผ่าน shell)
+- ✦ **เปลี่ยน Model / Effort**: เลือก Opus / Sonnet / Haiku / Fable และ effort `low` ถึง `max` ระบบส่ง `/model` และ `/effort` เข้า terminal ของห้องนั้นให้
+- 📈 **Usage ต่อห้อง + รอบ 5 ชม.**: เห็น token ที่แต่ละห้องใช้ (input / output / cache) ค่าเทียบราคา API และ context window พร้อม % usage จริงของแพลนจาก statusline ของ Claude Code
+- ⏸️ **พักงานอัตโนมัติเมื่อ usage เหลือ < 8%**: บันทึก checkpoint ทุกห้อง ปล่อยให้ step ที่กำลังทำจบก่อน แล้วพักคำสั่งใหม่จนกว่า usage จะ reset จากนั้นสั่งห้องที่งานค้างให้ทำต่อเอง
 
 ---
 
@@ -55,6 +59,8 @@ npm start
 | `npm start` หรือ `amc start` | เปิดเซิร์ฟเวอร์ Mission Control และเปิด Web Dashboard บน `http://127.0.0.1:4310` |
 | `npm run install-hooks` หรือ `amc install-hooks` | ผูก Claude Code Lifecycle Hooks เข้ากับ `~/.claude/settings.json` อัตโนมัติ |
 | `amc uninstall-hooks` | ถอนการติดตั้ง Claude Hooks ออกจาก `~/.claude/settings.json` |
+| `npm run install-statusline` หรือ `amc install-statusline` | เชื่อม statusline ของ Claude Code เพื่อส่ง % usage จริงของรอบ 5 ชม. เข้า Mission Control (ถ้ามี statusline เดิม จะยังแสดงเหมือนเดิม) |
+| `amc uninstall-statusline` | คืน statusline เดิมที่ตั้งไว้ก่อนติดตั้ง |
 | `npm run status` หรือ `amc status` | แสดงตารางสรุปสถานะของทุกห้อง, TL;DR และ Sub-Agents บนหน้าจอ Terminal |
 | `amc run --room "ชื่อห้อง" claude` | เปิดรัน Claude (หรือ Agent ตัวอื่น) ภายใต้ Wrapper ที่เชื่อมกับ Dashboard โดยตรง |
 | `npm test` | รันชุดทดสอบ State Store, Sub-agent Tracker, Hooks และชุดทดสอบความปลอดภัย (token, Host/Origin, command injection, XSS) |
@@ -81,6 +87,14 @@ npm start
 จากหน้าเว็บ Mission Control คุณสามารถพิมพ์คำสั่งหรือกดปุ่มลัด (**Approve**, **สั่งรัน Test**, **ขอสรุปงาน**) เพื่อส่งกลับไปที่ Session ได้ผ่าน:
 - **WezTerm IPC**: หากคุณใช้ WezTerm ระบบจะตรวจจับ `WEZTERM_PANE` อัตโนมัติและส่งคีย์บอร์ดเข้า Tab นั้นทันที
 - **Claude Headless Resume (`--resume`)**: สั่งรันต่อจาก `session_id` เดิมของ Claude CLI ในโฟลเดอร์นั้นโดยไม่ต้องสลับหน้าต่างไปพิมพ์ใน Terminal
+
+---
+
+## ⏸️ พักงานอัตโนมัติเมื่อ Usage ใกล้หมด (Usage Guard)
+
+- **แหล่งข้อมูล**: ใช้ % จริงของรอบ 5 ชม. จาก statusline ของ Claude Code ก่อน (`amc install-statusline` ใช้ได้กับแพลน Pro/Max และตัวเลขจะขึ้นหลัง Claude ตอบครั้งแรก) ถ้ายังไม่มีข้อมูลจริง จะใช้ค่าประมาณจาก token ใหม่ (input + output + cache write) ใน 5 ชม. ล่าสุดเทียบกับงบที่ตั้งไว้ และขึ้นป้ายว่า "ประมาณ"
+- **เมื่อเหลือน้อยกว่าเกณฑ์ (ค่าเริ่มต้น 8%)**: บันทึก checkpoint ทุกห้องไว้ที่ `~/.agent-mission-control/checkpoints/` ห้องที่กำลังทำงานจะได้ทำ step ปัจจุบันให้จบก่อน (checkpoint อัปเดตอีกครั้งเมื่อจบ) จากนั้นพักคำสั่งใหม่ทั้งจาก dashboard และที่พิมพ์ใน terminal (ผ่าน hook `UserPromptSubmit`) ส่วนการกด Approve ยังทำได้
+- **เมื่อถึงเวลา reset**: ปลดพักเอง แล้วส่ง prompt ให้ห้องที่ยังมีงานค้างทำต่อจาก checkpoint ถ้าต้องการปลดพักก่อนเวลา กด "ทำต่อเลย" ใน dashboard หรือปิดสวิตช์พักงานอัตโนมัติในแผง Usage
 
 ---
 

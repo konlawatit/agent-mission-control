@@ -1,0 +1,716 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-25T19:50:38.503Z",
+  "title": "Design System: Agent Mission Control",
+  "extensions": {
+    "colorMeta": {
+      "bg": {
+        "role": "neutral",
+        "displayName": "Night Desk",
+        "canonical": "oklch(0.165 0.012 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.002 255)",
+          "oklch(0.26 0.006 255)",
+          "oklch(0.37 0.009 255)",
+          "oklch(0.48 0.011 255)",
+          "oklch(0.6 0.012 255)",
+          "oklch(0.72 0.012 255)",
+          "oklch(0.84 0.010 255)",
+          "oklch(0.95 0.007 255)"
+        ]
+      },
+      "bg-sunk": {
+        "role": "neutral",
+        "displayName": "Sunk Well",
+        "canonical": "oklch(0.145 0.011 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.002 255)",
+          "oklch(0.26 0.005 255)",
+          "oklch(0.37 0.008 255)",
+          "oklch(0.48 0.010 255)",
+          "oklch(0.6 0.011 255)",
+          "oklch(0.72 0.011 255)",
+          "oklch(0.84 0.009 255)",
+          "oklch(0.95 0.006 255)"
+        ]
+      },
+      "rail": {
+        "role": "neutral",
+        "displayName": "Rail Graphite",
+        "canonical": "oklch(0.185 0.012 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.002 255)",
+          "oklch(0.26 0.006 255)",
+          "oklch(0.37 0.009 255)",
+          "oklch(0.48 0.011 255)",
+          "oklch(0.6 0.012 255)",
+          "oklch(0.72 0.012 255)",
+          "oklch(0.84 0.010 255)",
+          "oklch(0.95 0.007 255)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Surface",
+        "canonical": "oklch(0.205 0.013 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.002 255)",
+          "oklch(0.26 0.006 255)",
+          "oklch(0.37 0.010 255)",
+          "oklch(0.48 0.012 255)",
+          "oklch(0.6 0.013 255)",
+          "oklch(0.72 0.012 255)",
+          "oklch(0.84 0.010 255)",
+          "oklch(0.95 0.007 255)"
+        ]
+      },
+      "surface-2": {
+        "role": "neutral",
+        "displayName": "Surface 2",
+        "canonical": "oklch(0.235 0.014 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.002 255)",
+          "oklch(0.26 0.007 255)",
+          "oklch(0.37 0.011 255)",
+          "oklch(0.48 0.013 255)",
+          "oklch(0.6 0.014 255)",
+          "oklch(0.72 0.013 255)",
+          "oklch(0.84 0.011 255)",
+          "oklch(0.95 0.008 255)"
+        ]
+      },
+      "surface-3": {
+        "role": "neutral",
+        "displayName": "Surface 3",
+        "canonical": "oklch(0.275 0.015 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.002 255)",
+          "oklch(0.26 0.007 255)",
+          "oklch(0.37 0.011 255)",
+          "oklch(0.48 0.014 255)",
+          "oklch(0.6 0.015 255)",
+          "oklch(0.72 0.014 255)",
+          "oklch(0.84 0.012 255)",
+          "oklch(0.95 0.008 255)"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "oklch(0.31 0.014 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.002 255)",
+          "oklch(0.26 0.007 255)",
+          "oklch(0.37 0.011 255)",
+          "oklch(0.48 0.013 255)",
+          "oklch(0.6 0.014 255)",
+          "oklch(0.72 0.013 255)",
+          "oklch(0.84 0.011 255)",
+          "oklch(0.95 0.008 255)"
+        ]
+      },
+      "line-soft": {
+        "role": "neutral",
+        "displayName": "Soft Hairline",
+        "canonical": "oklch(0.255 0.013 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.002 255)",
+          "oklch(0.26 0.006 255)",
+          "oklch(0.37 0.010 255)",
+          "oklch(0.48 0.012 255)",
+          "oklch(0.6 0.013 255)",
+          "oklch(0.72 0.012 255)",
+          "oklch(0.84 0.010 255)",
+          "oklch(0.95 0.007 255)"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Text",
+        "canonical": "oklch(0.95 0.006 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.002 255)",
+          "oklch(0.26 0.006 255)",
+          "oklch(0.37 0.009 255)",
+          "oklch(0.48 0.011 255)",
+          "oklch(0.6 0.012 255)",
+          "oklch(0.72 0.012 255)",
+          "oklch(0.84 0.010 255)",
+          "oklch(0.95 0.007 255)"
+        ]
+      },
+      "text-2": {
+        "role": "neutral",
+        "displayName": "Text 2",
+        "canonical": "oklch(0.80 0.012 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.002 255)",
+          "oklch(0.26 0.006 255)",
+          "oklch(0.37 0.009 255)",
+          "oklch(0.48 0.011 255)",
+          "oklch(0.6 0.012 255)",
+          "oklch(0.72 0.012 255)",
+          "oklch(0.84 0.010 255)",
+          "oklch(0.95 0.007 255)"
+        ]
+      },
+      "text-3": {
+        "role": "neutral",
+        "displayName": "Text 3",
+        "canonical": "oklch(0.67 0.014 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.002 255)",
+          "oklch(0.26 0.007 255)",
+          "oklch(0.37 0.011 255)",
+          "oklch(0.48 0.013 255)",
+          "oklch(0.6 0.014 255)",
+          "oklch(0.72 0.013 255)",
+          "oklch(0.84 0.011 255)",
+          "oklch(0.95 0.008 255)"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Terminal Cyan",
+        "canonical": "oklch(0.80 0.10 205)",
+        "tonalRamp": [
+          "oklch(0.15 0.015 205)",
+          "oklch(0.26 0.048 205)",
+          "oklch(0.37 0.075 205)",
+          "oklch(0.48 0.092 205)",
+          "oklch(0.6 0.100 205)",
+          "oklch(0.72 0.096 205)",
+          "oklch(0.84 0.081 205)",
+          "oklch(0.95 0.056 205)"
+        ]
+      },
+      "accent-ink": {
+        "role": "primary",
+        "displayName": "Deep Ink",
+        "canonical": "oklch(0.20 0.03 220)",
+        "tonalRamp": [
+          "oklch(0.15 0.004 220)",
+          "oklch(0.26 0.014 220)",
+          "oklch(0.37 0.022 220)",
+          "oklch(0.48 0.028 220)",
+          "oklch(0.6 0.030 220)",
+          "oklch(0.72 0.029 220)",
+          "oklch(0.84 0.024 220)",
+          "oklch(0.95 0.017 220)"
+        ]
+      },
+      "accent-soft": {
+        "role": "primary",
+        "displayName": "Terminal Cyan Wash",
+        "canonical": "oklch(0.80 0.10 205 / 0.13)",
+        "tonalRamp": [
+          "oklch(0.15 0.015 205)",
+          "oklch(0.26 0.048 205)",
+          "oklch(0.37 0.075 205)",
+          "oklch(0.48 0.092 205)",
+          "oklch(0.6 0.100 205)",
+          "oklch(0.72 0.096 205)",
+          "oklch(0.84 0.081 205)",
+          "oklch(0.95 0.056 205)"
+        ]
+      },
+      "attn": {
+        "role": "secondary",
+        "displayName": "Lamp Amber",
+        "canonical": "oklch(0.83 0.14 78)",
+        "tonalRamp": [
+          "oklch(0.15 0.021 78)",
+          "oklch(0.26 0.067 78)",
+          "oklch(0.37 0.105 78)",
+          "oklch(0.48 0.129 78)",
+          "oklch(0.6 0.140 78)",
+          "oklch(0.72 0.134 78)",
+          "oklch(0.84 0.113 78)",
+          "oklch(0.95 0.079 78)"
+        ]
+      },
+      "attn-soft": {
+        "role": "secondary",
+        "displayName": "Lamp Amber Wash",
+        "canonical": "oklch(0.83 0.14 78 / 0.11)",
+        "tonalRamp": [
+          "oklch(0.15 0.021 78)",
+          "oklch(0.26 0.067 78)",
+          "oklch(0.37 0.105 78)",
+          "oklch(0.48 0.129 78)",
+          "oklch(0.6 0.140 78)",
+          "oklch(0.72 0.134 78)",
+          "oklch(0.84 0.113 78)",
+          "oklch(0.95 0.079 78)"
+        ]
+      },
+      "attn-line": {
+        "role": "secondary",
+        "displayName": "Lamp Amber Line",
+        "canonical": "oklch(0.83 0.14 78 / 0.42)",
+        "tonalRamp": [
+          "oklch(0.15 0.021 78)",
+          "oklch(0.26 0.067 78)",
+          "oklch(0.37 0.105 78)",
+          "oklch(0.48 0.129 78)",
+          "oklch(0.6 0.140 78)",
+          "oklch(0.72 0.134 78)",
+          "oklch(0.84 0.113 78)",
+          "oklch(0.95 0.079 78)"
+        ]
+      },
+      "work": {
+        "role": "secondary",
+        "displayName": "Working Blue",
+        "canonical": "oklch(0.72 0.13 262)",
+        "tonalRamp": [
+          "oklch(0.15 0.019 262)",
+          "oklch(0.26 0.063 262)",
+          "oklch(0.37 0.098 262)",
+          "oklch(0.48 0.120 262)",
+          "oklch(0.6 0.130 262)",
+          "oklch(0.72 0.125 262)",
+          "oklch(0.84 0.105 262)",
+          "oklch(0.95 0.073 262)"
+        ]
+      },
+      "work-soft": {
+        "role": "secondary",
+        "displayName": "Working Blue Wash",
+        "canonical": "oklch(0.72 0.13 262 / 0.14)",
+        "tonalRamp": [
+          "oklch(0.15 0.019 262)",
+          "oklch(0.26 0.063 262)",
+          "oklch(0.37 0.098 262)",
+          "oklch(0.48 0.120 262)",
+          "oklch(0.6 0.130 262)",
+          "oklch(0.72 0.125 262)",
+          "oklch(0.84 0.105 262)",
+          "oklch(0.95 0.073 262)"
+        ]
+      },
+      "done": {
+        "role": "secondary",
+        "displayName": "Done Green",
+        "canonical": "oklch(0.76 0.13 155)",
+        "tonalRamp": [
+          "oklch(0.15 0.019 155)",
+          "oklch(0.26 0.063 155)",
+          "oklch(0.37 0.098 155)",
+          "oklch(0.48 0.120 155)",
+          "oklch(0.6 0.130 155)",
+          "oklch(0.72 0.125 155)",
+          "oklch(0.84 0.105 155)",
+          "oklch(0.95 0.073 155)"
+        ]
+      },
+      "done-soft": {
+        "role": "secondary",
+        "displayName": "Done Green Wash",
+        "canonical": "oklch(0.76 0.13 155 / 0.12)",
+        "tonalRamp": [
+          "oklch(0.15 0.019 155)",
+          "oklch(0.26 0.063 155)",
+          "oklch(0.37 0.098 155)",
+          "oklch(0.48 0.120 155)",
+          "oklch(0.6 0.130 155)",
+          "oklch(0.72 0.125 155)",
+          "oklch(0.84 0.105 155)",
+          "oklch(0.95 0.073 155)"
+        ]
+      },
+      "hold": {
+        "role": "secondary",
+        "displayName": "Hold Red",
+        "canonical": "oklch(0.70 0.17 25)",
+        "tonalRamp": [
+          "oklch(0.15 0.026 25)",
+          "oklch(0.26 0.082 25)",
+          "oklch(0.37 0.128 25)",
+          "oklch(0.48 0.157 25)",
+          "oklch(0.6 0.170 25)",
+          "oklch(0.72 0.163 25)",
+          "oklch(0.84 0.137 25)",
+          "oklch(0.95 0.096 25)"
+        ]
+      },
+      "hold-soft": {
+        "role": "secondary",
+        "displayName": "Hold Red Wash",
+        "canonical": "oklch(0.70 0.17 25 / 0.12)",
+        "tonalRamp": [
+          "oklch(0.15 0.026 25)",
+          "oklch(0.26 0.082 25)",
+          "oklch(0.37 0.128 25)",
+          "oklch(0.48 0.157 25)",
+          "oklch(0.6 0.170 25)",
+          "oklch(0.72 0.163 25)",
+          "oklch(0.84 0.137 25)",
+          "oklch(0.95 0.096 25)"
+        ]
+      },
+      "hold-line": {
+        "role": "secondary",
+        "displayName": "Hold Red Line",
+        "canonical": "oklch(0.70 0.17 25 / 0.45)",
+        "tonalRamp": [
+          "oklch(0.15 0.026 25)",
+          "oklch(0.26 0.082 25)",
+          "oklch(0.37 0.128 25)",
+          "oklch(0.48 0.157 25)",
+          "oklch(0.6 0.170 25)",
+          "oklch(0.72 0.163 25)",
+          "oklch(0.84 0.137 25)",
+          "oklch(0.95 0.096 25)"
+        ]
+      },
+      "hold-text": {
+        "role": "secondary",
+        "displayName": "Hold Red Text",
+        "canonical": "oklch(0.86 0.09 25)",
+        "tonalRamp": [
+          "oklch(0.15 0.026 25)",
+          "oklch(0.26 0.082 25)",
+          "oklch(0.37 0.128 25)",
+          "oklch(0.48 0.157 25)",
+          "oklch(0.6 0.170 25)",
+          "oklch(0.72 0.163 25)",
+          "oklch(0.84 0.137 25)",
+          "oklch(0.95 0.096 25)"
+        ]
+      },
+      "add": {
+        "role": "secondary",
+        "displayName": "Diff Green",
+        "canonical": "oklch(0.76 0.13 155)",
+        "tonalRamp": [
+          "oklch(0.15 0.019 155)",
+          "oklch(0.26 0.063 155)",
+          "oklch(0.37 0.098 155)",
+          "oklch(0.48 0.120 155)",
+          "oklch(0.6 0.130 155)",
+          "oklch(0.72 0.125 155)",
+          "oklch(0.84 0.105 155)",
+          "oklch(0.95 0.073 155)"
+        ]
+      },
+      "add-bg": {
+        "role": "secondary",
+        "displayName": "Diff Green Wash",
+        "canonical": "oklch(0.76 0.13 155 / 0.10)",
+        "tonalRamp": [
+          "oklch(0.15 0.019 155)",
+          "oklch(0.26 0.063 155)",
+          "oklch(0.37 0.098 155)",
+          "oklch(0.48 0.120 155)",
+          "oklch(0.6 0.130 155)",
+          "oklch(0.72 0.125 155)",
+          "oklch(0.84 0.105 155)",
+          "oklch(0.95 0.073 155)"
+        ]
+      },
+      "del": {
+        "role": "secondary",
+        "displayName": "Diff Red",
+        "canonical": "oklch(0.72 0.15 22)",
+        "tonalRamp": [
+          "oklch(0.15 0.022 22)",
+          "oklch(0.26 0.072 22)",
+          "oklch(0.37 0.112 22)",
+          "oklch(0.48 0.138 22)",
+          "oklch(0.6 0.150 22)",
+          "oklch(0.72 0.144 22)",
+          "oklch(0.84 0.121 22)",
+          "oklch(0.95 0.085 22)"
+        ]
+      },
+      "del-bg": {
+        "role": "secondary",
+        "displayName": "Diff Red Wash",
+        "canonical": "oklch(0.72 0.15 22 / 0.11)",
+        "tonalRamp": [
+          "oklch(0.15 0.022 22)",
+          "oklch(0.26 0.072 22)",
+          "oklch(0.37 0.112 22)",
+          "oklch(0.48 0.138 22)",
+          "oklch(0.6 0.150 22)",
+          "oklch(0.72 0.144 22)",
+          "oklch(0.84 0.121 22)",
+          "oklch(0.95 0.085 22)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "The focused room's name; one per view."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Prompt question, dialog and empty-state headings, panel titles, brand name."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "TL;DR, composer, general copy; output prose at 13.5px/1.6, max 80ch."
+      },
+      "body-sm": {
+        "displayName": "Body Small",
+        "purpose": "List rows, popover items, form fields, toasts."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Rail group heads, stage steps, segments, panel section heads. Sentence case, never tracked."
+      },
+      "meta": {
+        "displayName": "Meta",
+        "purpose": "Timestamps, token counts, paths under names, tile footers; tabular figures."
+      },
+      "figure": {
+        "displayName": "Figure",
+        "purpose": "The one large number: remaining usage in the Usage panel."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Code, diffs, raw output, paths, branches, tool lines, keycaps, file badges, diff deltas."
+      }
+    },
+    "shadows": [
+      {
+        "name": "popover-lift",
+        "value": "0 12px 32px -6px oklch(0.05 0.01 255 / 0.65), 0 2px 6px oklch(0.05 0.01 255 / 0.4)",
+        "purpose": "Model/effort and more popovers."
+      },
+      {
+        "name": "dialog-lift",
+        "value": "0 24px 60px -12px oklch(0.05 0.01 255 / 0.7)",
+        "purpose": "New-room dialog; backdrop oklch(0.1 0.01 255 / 0.6)."
+      },
+      {
+        "name": "toast-lift",
+        "value": "0 12px 28px -8px oklch(0.05 0.01 255 / 0.7)",
+        "purpose": "Transient confirmations."
+      },
+      {
+        "name": "focus-ring",
+        "value": "outline: 2px solid var(--accent); outline-offset: 2px",
+        "purpose": "Every focusable element."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-out",
+        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "The single easing for entrances and the switch knob."
+      },
+      {
+        "name": "color-change",
+        "value": "120ms",
+        "purpose": "Background, border and colour transitions on controls (140ms on the switch)."
+      },
+      {
+        "name": "pop-in",
+        "value": "140ms ease-out, translateY(-4px) + fade",
+        "purpose": "Popovers."
+      },
+      {
+        "name": "ide-in",
+        "value": "160ms ease-out, scale(0.985) + fade",
+        "purpose": "IDE overlay."
+      },
+      {
+        "name": "panel-in",
+        "value": "180ms ease-out, translateX(10px) + fade",
+        "purpose": "Side panels; toasts use 180ms with translateY(-6px)."
+      },
+      {
+        "name": "spin",
+        "value": "1.1s linear infinite",
+        "purpose": "Working status glyph."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "animation/transition 0.01ms",
+        "purpose": "prefers-reduced-motion collapses all motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact",
+        "value": "1180px",
+        "note": "Rail 260px, panel 340px, meter bar 56px."
+      },
+      {
+        "name": "narrow",
+        "value": "900px",
+        "note": "Single scrolling column; strip becomes a 58px bottom bar; panels become 70vh bottom sheets."
+      }
+    ],
+    "layout": {
+      "topbarHeight": "48px",
+      "railWidth": "300px",
+      "panelWidth": "380px",
+      "stripWidth": "60px",
+      "ideFileListWidth": "280px",
+      "overviewTileMin": "250px"
+    },
+    "icons": {
+      "grid": 24,
+      "strokeWidth": 1.75,
+      "linecap": "round",
+      "linejoin": "round",
+      "fill": "none",
+      "color": "currentColor",
+      "renderedSizes": "13-18px",
+      "source": "public/app.js ICON_PATHS"
+    }
+  },
+  "components": [
+    {
+      "name": "Default Button",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "Quiet surface button for ordinary actions.",
+      "html": "<button class=\"ds-btn\">VS Code</button>",
+      "css": ".ds-btn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 11px;border-radius:var(--r-sm);border:1px solid var(--line);background:var(--surface-2);color:var(--text);font:550 13px/1 var(--font-ui);cursor:pointer;transition:background-color 120ms,border-color 120ms,color 120ms}.ds-btn:hover{background:var(--surface-3)}.ds-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one cyan action per region: New room, Send.",
+      "html": "<button class=\"ds-btn-primary\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 5v14M5 12h14\"/></svg>ห้องใหม่</button>",
+      "css": ".ds-btn-primary{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 11px;border-radius:var(--r-sm);border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);font:550 13px/1 var(--font-ui);cursor:pointer;transition:background-color 120ms}.ds-btn-primary:hover{background:oklch(0.86 0.09 205)}.ds-btn-primary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Borderless secondary action inside dense rows.",
+      "html": "<button class=\"ds-btn-ghost\">ยกเลิก</button>",
+      "css": ".ds-btn-ghost{display:inline-flex;align-items:center;height:30px;padding:0 11px;border-radius:var(--r-sm);border:1px solid transparent;background:transparent;color:var(--text-2);font:550 13px/1 var(--font-ui);cursor:pointer;transition:background-color 120ms,color 120ms}.ds-btn-ghost:hover{background:var(--surface-2);color:var(--text)}.ds-btn-ghost:focus-visible{outline:2px solid var(--accent);outline-offset:2px}"
+    },
+    {
+      "name": "Chip",
+      "kind": "chip",
+      "refersTo": "chip",
+      "description": "Room header facts and composer quick actions.",
+      "html": "<button class=\"ds-chip\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m12 4 8.5 4.5L12 13 3.5 8.5z\"/><path d=\"m3.5 12.5 8.5 4.5 8.5-4.5\"/></svg>ctx 59%</button>",
+      "css": ".ds-chip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:999px;border:1px solid var(--line-soft);background:var(--surface);color:var(--text-2);font:400 12.5px/1 var(--font-ui);font-variant-numeric:tabular-nums;cursor:pointer}.ds-chip:hover{border-color:var(--line);background:var(--surface-2);color:var(--text)}.ds-chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}"
+    },
+    {
+      "name": "Search Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Sunk well input; border turns cyan on focus.",
+      "html": "<label class=\"ds-search\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"6.5\"/><path d=\"m20 20-4.2-4.2\"/></svg><input placeholder=\"ค้นหาห้อง, branch, โปรเจกต์\"></label>",
+      "css": ".ds-search{display:flex;align-items:center;gap:7px;width:260px;height:32px;padding:0 9px;border:1px solid var(--line-soft);border-radius:var(--r-sm);background:var(--bg-sunk);color:var(--text-3)}.ds-search:focus-within{border-color:var(--accent)}.ds-search input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--text);font:400 13.5px var(--font-ui);caret-color:var(--accent)}.ds-search input::placeholder{color:var(--text-3)}"
+    },
+    {
+      "name": "Segmented Control",
+      "kind": "nav",
+      "refersTo": "button",
+      "description": "Live / History switch at the top of the rail.",
+      "html": "<div class=\"ds-seg\"><button aria-pressed=\"true\">Live <span>4</span></button><button aria-pressed=\"false\">ประวัติ <span>1</span></button></div>",
+      "css": ".ds-seg{display:inline-flex;padding:2px;gap:2px;border-radius:var(--r-sm);background:var(--bg-sunk);border:1px solid var(--line-soft);width:240px}.ds-seg button{flex:1;height:26px;border:0;border-radius:5px;background:transparent;color:var(--text-3);font:600 12.5px var(--font-ui);cursor:pointer}.ds-seg button span{font-size:11.5px;color:var(--text-3);font-variant-numeric:tabular-nums}.ds-seg button:hover{color:var(--text)}.ds-seg button[aria-pressed=\"true\"]{background:var(--surface-3);color:var(--text)}.ds-seg button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}"
+    },
+    {
+      "name": "Room Row",
+      "kind": "custom",
+      "refersTo": "room-row",
+      "description": "Rail entry: status glyph, name, stage dots, tool, age and tokens.",
+      "html": "<button class=\"ds-room\" aria-current=\"true\"><span class=\"ds-glyph\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 3.3 20.7 12 12 20.7 3.3 12z\"/><path d=\"M12 8.3v4.4\"/><circle cx=\"12\" cy=\"15.6\" r=\"0.6\"/></svg></span><span class=\"ds-room-main\"><b>Auth Refactor</b><span class=\"ds-room-meta\"><span class=\"ds-dots\"><i class=\"on\"></i><i class=\"now\"></i><i></i><i></i></span>รอคุณตอบ</span></span><span class=\"ds-room-side\">1m<br>292k</span></button>",
+      "css": ".ds-room{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:center;column-gap:10px;width:280px;padding:8px;border-radius:var(--r);border:1px solid transparent;background:transparent;color:var(--text);text-align:left;font-family:var(--font-ui);cursor:pointer}.ds-room:hover{background:var(--surface)}.ds-room[aria-current=\"true\"]{background:var(--surface-2);border-color:var(--line)}.ds-room:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.ds-glyph{display:grid;place-items:center;width:20px;height:20px;color:var(--attn)}.ds-room-main{display:flex;flex-direction:column;gap:2px;min-width:0}.ds-room-main b{font-size:13.5px;font-weight:600}.ds-room-meta{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-3)}.ds-dots{display:inline-flex;gap:3px}.ds-dots i{width:5px;height:5px;border-radius:50%;background:var(--surface-3)}.ds-dots i.on{background:var(--done)}.ds-dots i.now{background:var(--attn)}.ds-room-side{font-size:11.5px;color:var(--text-3);text-align:right;font-variant-numeric:tabular-nums}"
+    },
+    {
+      "name": "Prompt Card",
+      "kind": "card",
+      "refersTo": "prompt-card",
+      "description": "The one amber container: a pending permission prompt with keycap options.",
+      "html": "<div class=\"ds-ask\"><div class=\"ds-ask-q\">Do you want to run npm test -- auth?</div><button class=\"ds-opt is-cursor\"><span class=\"ds-key\">1</span><span>Yes</span><em>Enter</em></button><button class=\"ds-opt\"><span class=\"ds-key\">2</span><span>No, tell Claude what to do differently</span><em>เลือก</em></button></div>",
+      "css": ".ds-ask{width:420px;display:flex;flex-direction:column;gap:6px;padding:12px;border:1px solid var(--attn-line);background:var(--attn-soft);border-radius:var(--r-lg);font-family:var(--font-ui);color:var(--text)}.ds-ask-q{font-size:14.5px;font-weight:650;margin-bottom:4px}.ds-opt{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--r-sm);border:1px solid var(--line);background:var(--surface);color:var(--text);font:400 13.5px var(--font-ui);text-align:left;cursor:pointer}.ds-opt span:nth-child(2){flex:1}.ds-opt em{font-style:normal;font-size:12px;color:var(--text-3)}.ds-opt:hover{border-color:var(--attn-line);background:var(--surface-2)}.ds-opt.is-cursor{border-color:var(--attn)}.ds-opt.is-cursor em{color:var(--attn)}.ds-opt:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.ds-key{display:inline-grid;place-items:center;min-width:26px;height:24px;padding:0 6px;border-radius:5px;border:1px solid var(--line);border-bottom-width:2px;background:var(--surface-2);color:var(--text-2);font:600 11.5px var(--font-mono)}"
+    },
+    {
+      "name": "Usage Meter",
+      "kind": "custom",
+      "refersTo": "button",
+      "description": "5-hour quota meter; accent at rest, amber then red near the limit.",
+      "html": "<button class=\"ds-meter\"><span class=\"ds-meter-label\">5h</span><span class=\"ds-bar\"><i style=\"width:66%\"></i></span><b>66%</b> คงเหลือ</button><button class=\"ds-meter\"><span class=\"ds-meter-label\">5h</span><span class=\"ds-bar is-low\"><i style=\"width:6.5%\"></i></span><b>6.5%</b> คงเหลือ</button>",
+      "css": ".ds-meter{display:inline-flex;align-items:center;gap:9px;height:30px;padding:0 10px;margin:0 6px 6px 0;border-radius:var(--r-sm);border:1px solid var(--line-soft);background:var(--surface);color:var(--text-2);font:400 12.5px var(--font-ui);font-variant-numeric:tabular-nums;cursor:pointer}.ds-meter:hover{border-color:var(--line);background:var(--surface-2)}.ds-meter:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.ds-meter b{color:var(--text);font-weight:650}.ds-meter-label{color:var(--text-3);font-weight:600}.ds-bar{position:relative;display:inline-block;width:84px;height:6px;border-radius:6px;background:var(--surface-3);overflow:hidden}.ds-bar i{position:absolute;inset:0 auto 0 0;border-radius:inherit;background:var(--accent)}.ds-bar.is-mid i{background:var(--attn)}.ds-bar.is-low i{background:var(--hold)}"
+    },
+    {
+      "name": "Strip Button",
+      "kind": "nav",
+      "refersTo": "icon-button-on",
+      "description": "Right-edge panel toggle: icon over Thai label, neutral count badge.",
+      "html": "<button class=\"ds-strip\" aria-pressed=\"true\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z\"/><path d=\"M14 3.5V8h4.5\"/></svg>ไฟล์<span class=\"ds-badge\">4</span></button>",
+      "css": ".ds-strip{position:relative;display:flex;flex-direction:column;align-items:center;gap:3px;width:50px;padding:7px 0 6px;border:0;border-radius:var(--r);background:transparent;color:var(--text-3);font:600 10.5px var(--font-ui);cursor:pointer}.ds-strip:hover{color:var(--text);background:var(--surface)}.ds-strip[aria-pressed=\"true\"]{color:var(--accent);background:var(--accent-soft)}.ds-strip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.ds-badge{position:absolute;top:3px;right:6px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--surface-3);color:var(--text);font-size:10px;line-height:16px;font-variant-numeric:tabular-nums}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Night-Shift Triage Desk",
+    "overview": "The dashboard sits on a second monitor beside a row of terminals, usually at night, and it borrows their material: graphite tinted toward blue ink, hairline borders, flat panes. It is a desk with one path through it: who needs me, then what that room is doing, then act. The resting state is quiet so that the one thing asking for the human can be seen from across the room.\n\nDensity is that of a working tool, not a marketing page. Body text is 14px, metadata drops to 11.5–12.5px, and every number is tabular. Colour is rationed hard: one cool cyan signal for interaction and focus, and four status hues that each mean exactly one thing. Depth comes from tonal steps of the same graphite, never from decorative shadow; only things that float above the desk (popovers, dialogs, toasts) lift.\n\nThe language is Thai prose with English agent terms (Plan, Code, Verify, Done, TL;DR, Sub-Agent, tool names) mixed in one line, so the type stack carries a system Thai face and labels never rely on uppercase or tracking, which Thai cannot express.",
+    "keyCharacteristics": [
+      "Graphite surfaces on a single hue (255), stepped by lightness only.",
+      "One signal accent (cyan, hue 205) for interaction, focus, selection and the resting meter.",
+      "Four status hues with fixed meanings: amber needs you, blue working, green done, red quota hold.",
+      "Hairline 1px borders, 6–10px radii, flat panes; shadow only on overlays.",
+      "An authored line-icon set (24 grid, 1.75 stroke, round caps) drawn in currentColor; no emoji.",
+      "Inbox + Focus: a grouped rail of rooms, one focused room, panels on demand."
+    ],
+    "rules": [
+      {
+        "name": "The Meaning-Only Rule",
+        "body": "Status hues carry meaning only: amber means needs you, blue means working, green means done or a diff addition, red means quota hold or a diff deletion. Never use them for decoration, category or emphasis.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Signal Rule",
+        "body": "Cyan is the only colour that says \"you can act here\" or \"this is selected\". It never stands in for a status.",
+        "section": "colors"
+      },
+      {
+        "name": "The Rising Meter Rule",
+        "body": "Meters fill with the accent at rest and shift to amber, then red, as they near a limit. The 5-hour usage meter turns amber below 25% remaining and red below the hold threshold (8% by default); the context meter turns amber above 60% and red above 85%.",
+        "section": "colors"
+      },
+      {
+        "name": "The Neutral Modification Rule",
+        "body": "A modified file's M badge is neutral (`text-2` on `surface-2`). Only additions (A, U) take green and deletions (D) take red, so the file list is not a field of colour.",
+        "section": "colors"
+      },
+      {
+        "name": "The Mono-for-Machine Rule",
+        "body": "Mono marks text that came from or goes to the machine: code, paths, branches, tool calls, keys, diff counts. Human-facing numbers (tokens, cost, percentages, times) stay in the UI face with tabular figures.",
+        "section": "typography"
+      },
+      {
+        "name": "The Sentence-Case Label Rule",
+        "body": "Group heads and section labels are sentence case, set apart by weight (650) and `text-3` colour, never by uppercase or letter-spacing, because the Thai half of every label has no case.",
+        "section": "typography"
+      },
+      {
+        "name": "The Overlays-Only Lift Rule",
+        "body": "Nothing that sits in the layout casts a shadow. Shadow means \"this floats and will go away\".",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** keep status hues to their single meanings: amber needs you, blue working, green done or a diff addition, red quota hold or a diff deletion.",
+      "**Do** fill meters with the accent and shift them to amber, then red, as they near a limit.",
+      "**Do** keep the M file badge neutral; only A/U go green and D goes red.",
+      "**Do** show approval keycaps (up, down, enter, Esc) only on the prompt card.",
+      "**Do** open side panels only on click, and never restore an open panel on reload.",
+      "**Do** leave rooms that are idle or done during a quota hold in their own state; only rooms that had work in flight show the hold.",
+      "**Do** step depth by tonal surfaces on hue 255 and separate regions with 1px hairlines.",
+      "**Do** draw every icon from the authored 24-grid, 1.75-stroke set in `currentColor`.",
+      "**Do** set numbers in tabular figures and machine text in the mono face."
+    ],
+    "donts": [
+      "**Don't** use emoji as icons, anywhere, including status, buttons and toasts.",
+      "**Don't** use a status hue for decoration, grouping or emphasis, and don't use cyan to signal a status.",
+      "**Don't** put shadows on anything that sits in the layout; only popovers, dialogs and toasts lift.",
+      "**Don't** uppercase or letter-space labels; separate them with weight and `text-3`.",
+      "**Don't** repeat the same pending prompt in more than one place on the screen."
+    ]
+  }
+}

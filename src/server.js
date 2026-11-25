@@ -5,10 +5,17 @@ const os = require('os');
 const { StateStore } = require('./state-store');
 const { CommandBridge } = require('./command-bridge');
 const { ConsoleScanner } = require('./console-scanner');
+const { UsageGuard } = require('./usage-guard');
+const {
+  getWorkspaceChangedFiles,
+  getWorkspaceFileDetail,
+} = require('./transcript-parser');
 const {
   checkHooksStatus,
   installClaudeHooks,
   uninstallClaudeHooks,
+  checkStatuslineStatus,
+  installStatusline,
 } = require('./hook-installer');
 const {
   TOKEN_HEADER,
@@ -25,6 +32,7 @@ const MIME_TYPES = {
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  '.woff2': 'font/woff2',
 };
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -76,11 +84,14 @@ function createMissionControlServer(options = {}) {
     ? null
     : new ConsoleScanner(store, { intervalMs: options.scanIntervalMs || 1800 });
   const bridge = new CommandBridge(store, scanner);
+  const usageGuard = new UsageGuard(store, bridge);
+  store.usageGuard = usageGuard;
   const publicDir = path.resolve(__dirname, '..', 'public');
   const sseClients = new Set();
 
   if (scanner) {
     scanner.start();
+    usageGuard.start();
   }
 
   // Ingest any offline events spooled while server was closed
@@ -249,6 +260,7 @@ function createMissionControlServer(options = {}) {
         return sendJson(res, 200, {
           ok: true,
           hooks: checkHooksStatus(),
+          statusline: checkStatuslineStatus(),
           ...store.getSnapshot(),
         });
       }
@@ -256,7 +268,26 @@ function createMissionControlServer(options = {}) {
       // 3. Receive Claude Hook / Agent Telemetry Event
       if (req.method === 'POST' && pathname === '/api/hook') {
         const payload = await readJsonBody(req);
+        const eventName = payload.hook_event_name || payload.event;
+        if (eventName === 'UserPromptSubmit' && usageGuard.isHolding()) {
+          // The hook script turns this into a {"decision":"block"} answer for Claude Code.
+          const summary = usageGuard.getUsageSummary();
+          const resumeAt = summary.resetAt
+            ? new Date(summary.resetAt).toLocaleTimeString('th-TH', {
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+            : '-';
+          return sendJson(res, 200, {
+            ok: true,
+            hold: {
+              resumeAt: summary.resetAt,
+              reason: `Mission Control พักงานไว้: usage เหลือ ${summary.remainingPct}% (ต่ำกว่า ${summary.autoPauseThresholdPct}%) จะทำงานต่ออัตโนมัติราว ${resumeAt} หรือกด "ทำต่อเลย" ใน dashboard`,
+            },
+          });
+        }
         const session = store.processHookEvent(payload);
+        usageGuard.checkAndEnforce().catch(() => {});
         const pendingCommands = store.dequeueCommands(session.id);
         return sendJson(res, 200, {
           ok: true,
@@ -316,6 +347,14 @@ function createMissionControlServer(options = {}) {
           return sendJson(res, 400, {
             ok: false,
             error: 'Missing sessionId or command',
+          });
+        }
+        // During a quota hold only approvals go through; new prompts wait for the reset.
+        if (usageGuard.isHolding() && !body.isApproval && !body.force) {
+          return sendJson(res, 423, {
+            ok: false,
+            held: true,
+            error: 'พักงานรอ usage reset อยู่ คำสั่งใหม่ยังไม่ถูกส่ง',
           });
         }
         const result = await bridge.dispatchCommand(
@@ -443,6 +482,190 @@ function createMissionControlServer(options = {}) {
         return sendJson(res, 200, { ok: true, ...status });
       }
 
+      // 13. Web IDE: List Modified / Touched Workspace Files
+      if (req.method === 'GET' && pathname === '/api/session/files') {
+        const sessionId = parsedUrl.searchParams.get('sessionId');
+        const session = sessionId ? store.sessions.get(sessionId) : null;
+        if (!session) {
+          return sendJson(res, 404, { ok: false, error: 'Session not found' });
+        }
+        const files = getWorkspaceChangedFiles(
+          session.cwd,
+          session.modifiedFiles
+        );
+        return sendJson(res, 200, { ok: true, cwd: session.cwd, files });
+      }
+
+      // 14. Web IDE: Read File Content & Unified Git Diff
+      if (req.method === 'GET' && pathname === '/api/session/file-content') {
+        const sessionId = parsedUrl.searchParams.get('sessionId');
+        const relFile = parsedUrl.searchParams.get('file');
+        const session = sessionId ? store.sessions.get(sessionId) : null;
+        if (!session || !relFile) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: 'Missing sessionId or file',
+          });
+        }
+        const detail = getWorkspaceFileDetail(session.cwd, relFile);
+        return sendJson(res, detail.ok ? 200 : 403, detail);
+      }
+
+      // 15. Web IDE: Open File or Workspace in VS Code (`code --goto`)
+      if (req.method === 'POST' && pathname === '/api/session/open-vscode') {
+        const body = await readJsonBody(req);
+        const session = body.sessionId
+          ? store.sessions.get(body.sessionId)
+          : null;
+        if (!session || !session.cwd) {
+          return sendJson(res, 404, { ok: false, error: 'Session not found' });
+        }
+        const baseDir = path.resolve(session.cwd);
+        let targetPath = baseDir;
+        if (body.file && typeof body.file === 'string') {
+          const candidate = path.resolve(baseDir, body.file);
+          if (
+            candidate !== baseDir &&
+            !candidate.startsWith(baseDir + path.sep)
+          ) {
+            return sendJson(res, 403, {
+              ok: false,
+              error: 'Path traversal denied',
+            });
+          }
+          targetPath = candidate;
+        }
+        // A vscode:// link opens through the OS protocol handler, so no shell is involved.
+        const stat = fs.existsSync(targetPath) ? fs.statSync(targetPath) : null;
+        const line = Math.max(1, Math.min(1e6, Math.floor(Number(body.line) || 1)));
+        const uriPath = targetPath
+          .replace(/\\/g, '/')
+          .split('/')
+          .map((seg) => (/^[A-Za-z]:$/.test(seg) ? seg : encodeURIComponent(seg)))
+          .join('/')
+          .replace(/^\/+/, '');
+        const uri =
+          stat && stat.isFile()
+            ? `vscode://file/${uriPath}:${line}:1`
+            : `vscode://file/${uriPath}`;
+        return sendJson(res, 200, {
+          ok: true,
+          targetPath,
+          uri,
+          message: `เปิด ${path.basename(targetPath)} ใน VS Code`,
+        });
+      }
+
+      // 16. Model & Effort Switcher (`/model` and `/effort`)
+      if (req.method === 'POST' && pathname === '/api/session/model-effort') {
+        const body = await readJsonBody(req);
+        const session = body.sessionId
+          ? store.sessions.get(body.sessionId)
+          : null;
+        if (!session) {
+          return sendJson(res, 404, { ok: false, error: 'Session not found' });
+        }
+        // Aliases Claude Code's /model understands, or a full model ID. No spaces are allowed,
+        // so the value can never carry extra input into the terminal.
+        const MODEL_ALIASES = new Set(['default', 'opus', 'sonnet', 'haiku', 'opusplan']);
+        const isAllowedModel = (m) =>
+          MODEL_ALIASES.has(m) || /^claude-[a-z0-9]+(-[a-z0-9]+){1,4}(\[1m\])?$/.test(m);
+        const ALLOWED_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
+        const patch = {};
+        const dispatched = [];
+
+        if (body.model && isAllowedModel(String(body.model).toLowerCase())) {
+          const m = String(body.model).toLowerCase();
+          patch.model = m;
+          const r = await bridge.dispatchCommand(session.id, `/model ${m}`);
+          dispatched.push({ type: 'model', value: m, delivered: r.delivered });
+        }
+        if (
+          body.effort &&
+          ALLOWED_EFFORTS.has(String(body.effort).toLowerCase())
+        ) {
+          const eff = String(body.effort).toLowerCase();
+          patch.effort = eff;
+          const r = await bridge.dispatchCommand(session.id, `/effort ${eff}`);
+          dispatched.push({
+            type: 'effort',
+            value: eff,
+            delivered: r.delivered,
+          });
+        }
+
+        if (dispatched.length === 0) {
+          return sendJson(res, 400, { ok: false, error: 'model หรือ effort ไม่ถูกต้อง' });
+        }
+        // Only remember what actually reached the terminal; the transcript corrects it later.
+        const deliveredPatch = {};
+        for (const d of dispatched) {
+          if (d.delivered) deliveredPatch[d.type] = d.value;
+        }
+        if (Object.keys(deliveredPatch).length > 0) {
+          store.updateSession(session.id, deliveredPatch);
+        }
+
+        return sendJson(res, 200, {
+          ok: true,
+          delivered: dispatched.every((d) => d.delivered),
+          dispatched,
+          session: store.sessions.get(session.id),
+        });
+      }
+
+      // 17. Usage Quota & <8% Auto-Pause Guard Endpoints
+      if (req.method === 'GET' && pathname === '/api/usage') {
+        return sendJson(res, 200, {
+          ok: true,
+          usage: usageGuard.getUsageSummary(),
+        });
+      }
+      if (req.method === 'POST' && pathname === '/api/usage/config') {
+        const body = await readJsonBody(req);
+        if (body.action === 'simulate-low-quota') {
+          return sendJson(res, 200, await usageGuard.simulateLowQuota(6.5));
+        }
+        if (body.action === 'reset-and-resume') {
+          return sendJson(res, 200, await usageGuard.resumeAll());
+        }
+        const summary = await usageGuard.updateConfig(body);
+        return sendJson(res, 200, { ok: true, usage: summary });
+      }
+
+      // 18. Statusline bridge: real plan usage (rate_limits) and model from Claude Code
+      if (req.method === 'POST' && pathname === '/api/usage/observed') {
+        const body = await readJsonBody(req);
+        const accepted = usageGuard.observe(body.rate_limits);
+        const session = store._findMatchingSession({
+          sessionId: body.session_id,
+          cwd: body.cwd,
+        });
+        if (session) {
+          const modelId =
+            body.model && typeof body.model.id === 'string' ? body.model.id : null;
+          if (modelId && modelId.length < 80) session.model = modelId;
+          const cw = body.context_window;
+          if (cw && Number.isFinite(Number(cw.used_percentage))) {
+            session.liveContext = {
+              usedPct: Math.max(0, Math.min(100, Number(cw.used_percentage))),
+              size: Number(cw.context_window_size) || null,
+              at: new Date().toISOString(),
+            };
+          }
+        }
+        if (accepted || session) {
+          store._emitChange('usage_observed', {});
+          usageGuard.checkAndEnforce().catch(() => {});
+        }
+        return sendJson(res, 200, { ok: true, accepted });
+      }
+      if (req.method === 'POST' && pathname === '/api/statusline/install') {
+        const status = installStatusline();
+        return sendJson(res, status.error ? 500 : 200, { ok: !status.error, ...status });
+      }
+
       if (pathname.startsWith('/api/')) {
         return sendJson(res, 404, { ok: false, error: 'Unknown endpoint' });
       }
@@ -481,11 +704,12 @@ function createMissionControlServer(options = {}) {
 
   server.on('close', () => {
     if (scanner) scanner.stop();
+    if (usageGuard) usageGuard.stop();
     if (broadcastTimer) clearTimeout(broadcastTimer);
     store.flush();
   });
 
-  return { server, store, bridge, scanner, token };
+  return { server, store, bridge, scanner, usageGuard, token };
 }
 
 module.exports = { createMissionControlServer };

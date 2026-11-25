@@ -6,6 +6,8 @@
  *   amc start [--port 4310] [--no-open]            Start Mission Control server & open Web UI (Real sessions only)
  *   amc install-hooks                              Install Claude Code lifecycle hooks into ~/.claude/settings.json
  *   amc uninstall-hooks                            Remove Mission Control hooks from ~/.claude/settings.json
+ *   amc install-statusline                         Forward real 5h plan usage from Claude Code's statusline (keeps an existing statusline)
+ *   amc uninstall-statusline                       Restore the statusline that was configured before
  *   amc status                                     Show live & history sessions right in the terminal
  *   amc run [--room "Auth"] <cmd> [args...]        Wrap any CLI agent in a Mission Control tracked room
  */
@@ -86,6 +88,28 @@ async function runCommand() {
   if (subcommand === 'uninstall-hooks') {
     const result = uninstallClaudeHooks();
     console.log('✅ ถอนการติดตั้ง Claude Code Hooks เรียบร้อย');
+    console.log(`   ไฟล์ตั้งค่า: ${result.settingsPath}`);
+    return;
+  }
+
+  if (subcommand === 'install-statusline') {
+    const result = installStatusline();
+    if (result.error) {
+      console.log(`❌ ติดตั้ง statusline ไม่สำเร็จ: ${result.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log('✅ เชื่อม Claude Code statusline กับ Mission Control แล้ว (usage 5 ชม. จริง)');
+    if (result.wrapsPrevious) {
+      console.log('   statusline เดิมของคุณยังแสดงเหมือนเดิม (ถูกครอบไว้ ไม่ได้ลบ)');
+    }
+    console.log(`   ไฟล์ตั้งค่า: ${result.settingsPath}`);
+    return;
+  }
+
+  if (subcommand === 'uninstall-statusline') {
+    const result = uninstallStatusline();
+    console.log('✅ คืนค่า statusline เดิมเรียบร้อย');
     console.log(`   ไฟล์ตั้งค่า: ${result.settingsPath}`);
     return;
   }

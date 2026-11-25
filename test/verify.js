@@ -2,6 +2,12 @@ const assert = require('assert');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+
+// Isolate from the developer's real ~/.claude transcripts: rooms here use this repo as their cwd,
+// and real sessions in it (sub-agents, turns) would otherwise leak into the assertions.
+const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'amc-home-'));
+process.env.HOME = isolatedHome;
+process.env.USERPROFILE = isolatedHome;
 const { StateStore } = require('../src/state-store');
 const { inferWorkflowFromTool } = require('../src/transcript-parser');
 const { parseConsoleScreen } = require('../src/console-scanner');

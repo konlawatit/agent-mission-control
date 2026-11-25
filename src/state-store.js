@@ -274,6 +274,12 @@ class StateStore extends EventEmitter {
     if (parsed.transcriptPath) {
       session.transcriptPath = parsed.transcriptPath;
     }
+    if (parsed.detectedModel) {
+      session.model = parsed.detectedModel;
+    }
+    if (parsed.tokenUsage) {
+      session.tokenUsage = parsed.tokenUsage;
+    }
     if (
       parsed.lastAssistantText &&
       (isDefaultTldr(session.tldr) || session.status === 'done' || session.status === 'idle')
@@ -465,6 +471,21 @@ class StateStore extends EventEmitter {
       taskHistory: Array.isArray(defaults.taskHistory)
         ? defaults.taskHistory
         : [],
+      model: defaults.model || 'opus',
+      effort: defaults.effort || 'high',
+      tokenUsage: defaults.tokenUsage || {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreateTokens: 0,
+        cacheReadTokens: 0,
+        thinkingTokens: 0,
+        totalTokens: 0,
+        contextTokens: 0,
+        contextWindowPct: 0,
+        estimatedCostUsd: 0,
+        messageCount: 0,
+      },
+      savedCheckpoint: defaults.savedCheckpoint || null,
       transcriptPath: defaults.transcriptPath || null,
       openCount: 1,
       createdAt: new Date().toISOString(),
@@ -1094,11 +1115,24 @@ class StateStore extends EventEmitter {
         (sum, s) => sum + (Array.isArray(s.subAgents) ? s.subAgents.length : 0),
         0
       ),
+      totalTokens: list.reduce(
+        (sum, s) => sum + Number((s.tokenUsage && s.tokenUsage.totalTokens) || 0),
+        0
+      ),
+      totalCostUsd:
+        Math.round(
+          list.reduce(
+            (sum, s) =>
+              sum + Number((s.tokenUsage && s.tokenUsage.estimatedCostUsd) || 0),
+            0
+          ) * 10000
+        ) / 10000,
     };
 
     return {
       stages: STAGES,
       metrics,
+      usageGuard: this.usageGuard ? this.usageGuard.getUsageSummary() : null,
       projects,
       categories,
       sessions: list,

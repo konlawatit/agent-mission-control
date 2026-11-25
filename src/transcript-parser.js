@@ -7,7 +7,11 @@ const GIT_CACHE_TTL_MS = 5000;
 const TRANSCRIPT_LIST_TTL_MS = 2000;
 const MAX_CACHE_ENTRIES = 200;
 
-const GIT_OPTS = { stdio: ['ignore', 'pipe', 'ignore'], timeout: 1200, windowsHide: true };
+const GIT_OPTS = {
+  stdio: ['ignore', 'pipe', 'ignore'],
+  timeout: 1500,
+  windowsHide: true,
+};
 
 function toGitMeta(branchOut, statusOut) {
   const branch = String(branchOut || '').trim();
@@ -21,7 +25,10 @@ function toGitMeta(branchOut, statusOut) {
 function readGitMetadataSync(cwd) {
   try {
     return toGitMeta(
-      execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { ...GIT_OPTS, cwd }),
+      execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        ...GIT_OPTS,
+        cwd,
+      }),
       execFileSync('git', ['status', '--porcelain'], { ...GIT_OPTS, cwd })
     );
   } catch {
@@ -36,7 +43,10 @@ function readGitMetadataAsync(cwd) {
         err ? reject(err) : resolve(stdout)
       )
     );
-  return Promise.all([run(['rev-parse', '--abbrev-ref', 'HEAD']), run(['status', '--porcelain'])])
+  return Promise.all([
+    run(['rev-parse', '--abbrev-ref', 'HEAD']),
+    run(['status', '--porcelain']),
+  ])
     .then(([branchOut, statusOut]) => toGitMeta(branchOut, statusOut))
     .catch(() => ({ branch: 'local', dirtyFiles: 0 }));
 }
@@ -47,13 +57,8 @@ function boundCache(map) {
   }
 }
 
-const gitCache = new Map(); // cwd -> { at, value, refreshing }
+const gitCache = new Map();
 
-/**
- * Git branch + dirty file count for a folder. Hook events arrive many times per second,
- * so only the very first lookup per folder is synchronous; afterwards the cached value is
- * returned immediately and refreshed in the background once it is older than 5s.
- */
 function getGitMetadata(cwd) {
   if (!cwd || !fs.existsSync(cwd)) {
     return { branch: 'main', dirtyFiles: 0 };
@@ -77,9 +82,235 @@ function getGitMetadata(cwd) {
 }
 
 /**
- * Finds all Claude Code UTF-8 `.jsonl` transcript files for a workspace `cwd`
- * inside `~/.claude/projects/<project-slug>/*.jsonl`, sorted newest first.
+ * Lists modified, staged, untracked, and session-touched files in `cwd` with git diff line counts
+ * for the built-in Web IDE File Explorer.
  */
+function getWorkspaceChangedFiles(cwd, sessionModifiedFiles = []) {
+  if (!cwd || !fs.existsSync(cwd)) return [];
+  const fileMap = new Map();
+
+  try {
+    // -uall lists files inside untracked folders; only trailing whitespace is trimmed because
+    // the two-character status column of the first line can start with a space.
+    const statusOut = execFileSync('git', ['status', '--porcelain', '-uall'], {
+      ...GIT_OPTS,
+      cwd,
+    })
+      .toString('utf8')
+      .replace(/\s+$/, '');
+
+    if (statusOut) {
+      for (const line of statusOut.split(/\r?\n/)) {
+        if (line.length < 4) continue;
+        const code = line.slice(0, 2).trim() || 'M';
+        let relPath = line.slice(3).trim();
+        if (relPath.includes(' -> ')) {
+          relPath = relPath.split(' -> ').pop().trim();
+        }
+        relPath = relPath.replace(/^"+|"+$/g, '');
+        fileMap.set(relPath.replace(/\\/g, '/'), {
+          path: relPath.replace(/\\/g, '/'),
+          status: code,
+          additions: 0,
+          deletions: 0,
+        });
+      }
+    }
+
+    // New untracked files have no diff; count their lines as additions.
+    for (const entry of fileMap.values()) {
+      if (entry.status !== '??') continue;
+      try {
+        const abs = path.join(cwd, entry.path);
+        const st = fs.statSync(abs);
+        if (st.isFile() && st.size <= 512 * 1024) {
+          const text = fs.readFileSync(abs, 'utf8');
+          const breaks = (text.match(/\n/g) || []).length;
+          entry.additions = text && !text.endsWith('\n') ? breaks + 1 : breaks;
+        }
+      } catch {}
+    }
+
+    const numstatOut = execFileSync('git', ['diff', '--numstat', 'HEAD'], {
+      ...GIT_OPTS,
+      cwd,
+    })
+      .toString('utf8')
+      .trim();
+
+    if (numstatOut) {
+      for (const line of numstatOut.split(/\r?\n/)) {
+        const parts = line.split('\t');
+        if (parts.length >= 3) {
+          const add = Number(parts[0]) || 0;
+          const del = Number(parts[1]) || 0;
+          const relPath = parts[2].trim().replace(/\\/g, '/');
+          const existing = fileMap.get(relPath) || {
+            path: relPath,
+            status: 'M',
+            additions: 0,
+            deletions: 0,
+          };
+          existing.additions = add;
+          existing.deletions = del;
+          fileMap.set(relPath, existing);
+        }
+      }
+    }
+  } catch {
+    // Fallback if not a git repo
+  }
+
+  const resolvedCwd = path.resolve(cwd);
+  for (const rawFile of sessionModifiedFiles || []) {
+    if (!rawFile) continue;
+    const abs = path.isAbsolute(rawFile)
+      ? path.resolve(rawFile)
+      : path.resolve(resolvedCwd, rawFile);
+    if (abs.startsWith(resolvedCwd + path.sep)) {
+      const rel = path.relative(resolvedCwd, abs).replace(/\\/g, '/');
+      if (!fileMap.has(rel)) {
+        fileMap.set(rel, {
+          path: rel,
+          status: 'Touched',
+          additions: 0,
+          deletions: 0,
+        });
+      }
+    }
+  }
+
+  return Array.from(fileMap.values()).slice(0, 50);
+}
+
+/**
+ * Safely reads a file's unified Git diff and source content inside `cwd` for the Web IDE viewer.
+ * Strictly blocks any path traversal outside `cwd`.
+ */
+function getWorkspaceFileDetail(cwd, relativeFilePath) {
+  if (!cwd || !relativeFilePath || typeof relativeFilePath !== 'string') {
+    return { ok: false, error: 'Missing cwd or file path' };
+  }
+  const baseDir = path.resolve(cwd);
+  const targetPath = path.resolve(baseDir, relativeFilePath);
+  if (
+    targetPath !== baseDir &&
+    !targetPath.startsWith(baseDir + path.sep)
+  ) {
+    return { ok: false, error: 'Path traversal denied' };
+  }
+
+  const relNormalized = path.relative(baseDir, targetPath).replace(/\\/g, '/');
+  let diffText = '';
+  try {
+    diffText = execFileSync('git', ['diff', 'HEAD', '--', relNormalized], {
+      ...GIT_OPTS,
+      cwd: baseDir,
+      maxBuffer: 512 * 1024,
+    }).toString('utf8');
+    if (!diffText.trim()) {
+      diffText = execFileSync('git', ['diff', '--', relNormalized], {
+        ...GIT_OPTS,
+        cwd: baseDir,
+        maxBuffer: 512 * 1024,
+      }).toString('utf8');
+    }
+  } catch {
+    diffText = '';
+  }
+
+  let content = '';
+  let exists = false;
+  let truncated = false;
+  try {
+    if (fs.existsSync(targetPath) && fs.statSync(targetPath).isFile()) {
+      exists = true;
+      const stat = fs.statSync(targetPath);
+      const maxRead = 120 * 1024;
+      const len = Math.min(stat.size, maxRead);
+      truncated = stat.size > maxRead;
+      const buf = Buffer.alloc(len);
+      const fd = fs.openSync(targetPath, 'r');
+      fs.readSync(fd, buf, 0, len, 0);
+      fs.closeSync(fd);
+      content = buf.toString('utf8');
+    }
+  } catch (err) {
+    content = `Cannot read file: ${err.message}`;
+  }
+
+  return {
+    ok: true,
+    relativePath: relNormalized,
+    fullPath: targetPath,
+    exists,
+    truncated,
+    diff: diffText,
+    content,
+  };
+}
+
+/**
+ * Estimates API cost in USD from Claude token counts and model family.
+ */
+// First-party API rates in USD per 1M tokens: [input, output, cache read].
+// Cache writes are billed at 1.25x input (5-minute TTL). Most specific prefix wins.
+const MODEL_RATES = [
+  ['claude-fable-5-2', [8, 40, 0.2]],
+  ['claude-mythos-5-2', [8, 40, 0.2]],
+  ['claude-fable-5', [10, 50, 1.0]],
+  ['claude-mythos-5', [10, 50, 1.0]],
+  ['claude-opus-5-5', [4, 20, 0.2]],
+  ['claude-opus-5', [5, 25, 0.5]],
+  ['claude-opus-4-8', [5, 25, 0.5]],
+  ['claude-opus-4-7', [5, 25, 0.5]],
+  ['claude-opus-4-6', [5, 25, 0.5]],
+  ['claude-opus-4-5', [5, 25, 0.5]],
+  ['claude-sonnet-5-5', [2, 10, 0.1]],
+  ['claude-sonnet-5', [2, 10, 0.2]],
+  ['claude-haiku-5-5', [0.1, 0.5, 0.01]],
+  ['claude-haiku-4-5', [1, 5, 0.1]],
+];
+const FAMILY_RATES = {
+  fable: [8, 40, 0.2],
+  mythos: [8, 40, 0.2],
+  opus: [4, 20, 0.2],
+  sonnet: [3, 15, 0.3],
+  haiku: [1, 5, 0.1],
+};
+
+function getModelRates(modelName) {
+  const m = String(modelName || '').toLowerCase();
+  for (const [prefix, rates] of MODEL_RATES) {
+    if (m.startsWith(prefix)) return rates;
+  }
+  // Claude 3.x / Opus 4.0-4.1 era IDs carried the older, higher Opus price.
+  if (/claude-(3|opus-4-[01]|opus-4-\d{8})/.test(m) && m.includes('opus')) {
+    return [15, 75, 1.5];
+  }
+  for (const family of Object.keys(FAMILY_RATES)) {
+    if (m.includes(family)) return FAMILY_RATES[family];
+  }
+  return FAMILY_RATES.sonnet;
+}
+
+/**
+ * Estimates API-equivalent cost in USD from Claude token counts and the model that produced them.
+ * Subscription plans are not billed per token; this is a relative-cost signal only.
+ */
+function estimateClaudeCostUsd(modelName, usage) {
+  const [inRate, outRate, cacheReadRate] = getModelRates(modelName);
+  const cacheWriteRate = inRate * 1.25;
+
+  const cost =
+    ((usage.inputTokens || 0) / 1e6) * inRate +
+    ((usage.outputTokens || 0) / 1e6) * outRate +
+    ((usage.cacheReadTokens || 0) / 1e6) * cacheReadRate +
+    ((usage.cacheCreateTokens || 0) / 1e6) * cacheWriteRate;
+
+  return Math.round(cost * 10000) / 10000;
+}
+
 function scanTranscriptsForCwd(cwd) {
   if (!cwd) return [];
   try {
@@ -130,12 +361,8 @@ function scanTranscriptsForCwd(cwd) {
   }
 }
 
-const transcriptListCache = new Map(); // cwd -> { at, list }
+const transcriptListCache = new Map();
 
-/**
- * Cached wrapper around the directory scan of ~/.claude/projects, which stats every
- * transcript on disk. New transcript files show up within TRANSCRIPT_LIST_TTL_MS.
- */
 function findTranscriptsForCwd(cwd) {
   if (!cwd) return [];
   const key = String(cwd);
@@ -149,7 +376,7 @@ function findTranscriptsForCwd(cwd) {
   return list;
 }
 
-const parseCache = new Map(); // "transcriptPath\0cwd" -> { signature, result }
+const parseCache = new Map();
 
 function fileSignature(paths) {
   return paths
@@ -164,10 +391,6 @@ function fileSignature(paths) {
     .join('|');
 }
 
-/**
- * Same as parseTranscriptTailUncached, but re-reads and re-parses transcripts only when one
- * of the candidate files actually changed (mtime/size). Callers get their own copy.
- */
 function parseTranscriptTail(transcriptPath, cwd = null) {
   const candidates = findTranscriptsForCwd(cwd)
     .slice(0, 3)
@@ -191,6 +414,7 @@ function clearCaches() {
   gitCache.clear();
   transcriptListCache.clear();
   parseCache.clear();
+  usageCache.clear();
 }
 
 function findLatestTranscriptForCwd(cwd) {
@@ -199,13 +423,135 @@ function findLatestTranscriptForCwd(cwd) {
 }
 
 /**
- * Parses a Claude Code transcript (.jsonl) file (and recent transcripts in the same folder)
- * to extract:
- * - Current / latest turn (`lastUserText`, `lastAssistantText`)
- * - Internal Turn History (`turnHistory`: every past user prompt + assistant summary & tools used inside this room!)
- * - Clean UTF-8 conversation log (`utf8Preview`)
- * - Active or completed Task (sub-agent) invocations
+ * Incremental, whole-file token accounting per transcript.
+ * The tail parser only reads the last 256 KB, which undercounts long sessions, so usage is
+ * accumulated here by reading only the bytes appended since the previous call.
  */
+const usageCache = new Map();
+const USAGE_RECENT_MS = 6 * 3600 * 1000;
+const USAGE_CHUNK_BYTES = 4 * 1024 * 1024;
+
+function freshUsageEntry() {
+  return {
+    offset: 0,
+    carry: '',
+    seen: new Set(),
+    totals: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreateTokens: 0,
+      cacheReadTokens: 0,
+      thinkingTokens: 0,
+      messageCount: 0,
+    },
+    // { t: epoch ms, b: billable tokens } for messages inside the recent window
+    recent: [],
+    lastAt: 0,
+  };
+}
+
+function ingestUsageLine(entry, line) {
+  if (!line.includes('"usage"')) return;
+  let obj;
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return;
+  }
+  const msg = obj.message || obj;
+  const usage = msg && msg.usage;
+  if (!usage || typeof usage !== 'object') return;
+  const key = msg.id || obj.uuid || `${obj.timestamp}-${usage.output_tokens || 0}`;
+  if (entry.seen.has(key)) return;
+  entry.seen.add(key);
+
+  const inTok = Number(usage.input_tokens || 0);
+  const outTok = Number(usage.output_tokens || 0);
+  const cacheCreate = Number(usage.cache_creation_input_tokens || 0);
+  const cacheRead = Number(usage.cache_read_input_tokens || 0);
+  const t = entry.totals;
+  t.inputTokens += inTok;
+  t.outputTokens += outTok;
+  t.cacheCreateTokens += cacheCreate;
+  t.cacheReadTokens += cacheRead;
+  t.thinkingTokens += Number(
+    (usage.output_tokens_details && usage.output_tokens_details.thinking_tokens) || 0
+  );
+  t.messageCount += 1;
+
+  const at = Date.parse(obj.timestamp || '') || 0;
+  if (at > entry.lastAt) entry.lastAt = at;
+  if (at && Date.now() - at < USAGE_RECENT_MS) {
+    // Cache reads are cheap against plan limits, so the estimate counts fresh tokens only.
+    entry.recent.push({ t: at, b: inTok + outTok + cacheCreate });
+  }
+}
+
+function readUsageIncremental(filePath) {
+  let st;
+  try {
+    st = fs.statSync(filePath);
+  } catch {
+    usageCache.delete(filePath);
+    return null;
+  }
+  let entry = usageCache.get(filePath);
+  if (!entry || st.size < entry.offset) {
+    entry = freshUsageEntry();
+    usageCache.set(filePath, entry);
+  }
+  if (st.size > entry.offset) {
+    let fd;
+    try {
+      fd = fs.openSync(filePath, 'r');
+      while (entry.offset < st.size) {
+        const len = Math.min(USAGE_CHUNK_BYTES, st.size - entry.offset);
+        const buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, entry.offset);
+        entry.offset += len;
+        const text = entry.carry + buf.toString('utf8');
+        const lines = text.split('\n');
+        entry.carry = lines.pop() || '';
+        for (const line of lines) ingestUsageLine(entry, line);
+      }
+    } catch {
+      // Leave what was read; the next call retries from the stored offset.
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+  }
+  const cutoff = Date.now() - USAGE_RECENT_MS;
+  if (entry.recent.length && entry.recent[0].t < cutoff) {
+    entry.recent = entry.recent.filter((r) => r.t >= cutoff);
+  }
+  return entry;
+}
+
+/**
+ * Fresh (non-cache-read) tokens across every transcript read so far, since `sinceMs`.
+ * Each transcript file is counted once, even when several rooms share it.
+ */
+function getRecentBillableTokens(sinceMs) {
+  let tokens = 0;
+  let oldestAt = null;
+  for (const entry of usageCache.values()) {
+    for (const r of entry.recent) {
+      if (r.t < sinceMs) continue;
+      tokens += r.b;
+      if (oldestAt === null || r.t < oldestAt) oldestAt = r.t;
+    }
+  }
+  return { tokens, oldestAt };
+}
+
+function getContextWindowTokens(modelName) {
+  const m = String(modelName || '').toLowerCase();
+  if (m.includes('haiku-4') || m.includes('claude-3') || /-4-[0-5]\b/.test(m)) {
+    return 200000;
+  }
+  return 1000000;
+}
+
 function parseTranscriptTailUncached(transcriptPath, cwd = null) {
   const allTranscripts = findTranscriptsForCwd(cwd);
   const targetPath =
@@ -220,8 +566,6 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
   }
 
   try {
-    // Parse up to the 3 most recent transcript files in this project folder so past conversations
-    // in the same room are also preserved inside the room's Internal Turn History!
     const filesToRead =
       allTranscripts.length > 0
         ? allTranscripts.slice(0, 3).map((item) => item.path).reverse()
@@ -234,15 +578,31 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
     let lastAssistantFullText = null;
     let lastAssistantText = null;
     let lastUserText = null;
+    let detectedModel = null;
     const conversationLines = [];
     const subAgentsMap = new Map();
     const turns = [];
     let currentTurn = null;
 
+    const tokenUsage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreateTokens: 0,
+      cacheReadTokens: 0,
+      thinkingTokens: 0,
+      totalTokens: 0,
+      contextTokens: 0,
+      contextWindowPct: 0,
+      estimatedCostUsd: 0,
+      messageCount: 0,
+    };
+
+    const seenMessageIds = new Set();
+
     for (const filePath of filesToRead) {
       if (!fs.existsSync(filePath)) continue;
       const stat = fs.statSync(filePath);
-      const maxBytes = 160 * 1024;
+      const maxBytes = 256 * 1024;
       const start = Math.max(0, stat.size - maxBytes);
       const length = stat.size - start;
       const buffer = Buffer.alloc(length);
@@ -268,6 +628,43 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
         const role = msg.role || entry.type;
         const content = msg.content;
         const ts = entry.timestamp || new Date(stat.mtimeMs).toISOString();
+
+        if (msg.model && typeof msg.model === 'string') {
+          detectedModel = msg.model;
+        }
+
+        // Accumulate real Claude token usage per unique message/entry
+        if (msg.usage && typeof msg.usage === 'object') {
+          const msgKey = msg.id || entry.uuid || `${ts}-${msg.usage.output_tokens || 0}`;
+          if (!seenMessageIds.has(msgKey)) {
+            seenMessageIds.add(msgKey);
+            const inTok = Number(msg.usage.input_tokens || 0);
+            const outTok = Number(msg.usage.output_tokens || 0);
+            const cacheCreate = Number(msg.usage.cache_creation_input_tokens || 0);
+            const cacheRead = Number(msg.usage.cache_read_input_tokens || 0);
+            const thinkTok = Number(
+              (msg.usage.output_tokens_details &&
+                msg.usage.output_tokens_details.thinking_tokens) ||
+                0
+            );
+
+            tokenUsage.inputTokens += inTok;
+            tokenUsage.outputTokens += outTok;
+            tokenUsage.cacheCreateTokens += cacheCreate;
+            tokenUsage.cacheReadTokens += cacheRead;
+            tokenUsage.thinkingTokens += thinkTok;
+            tokenUsage.messageCount += 1;
+
+            const turnContext = inTok + cacheCreate + cacheRead;
+            if (turnContext > 0) {
+              tokenUsage.contextTokens = turnContext;
+              tokenUsage.contextWindowPct = Math.min(
+                100,
+                Math.round((turnContext / 200000) * 1000) / 10
+              );
+            }
+          }
+        }
 
         const recordUserPrompt = (text) => {
           const clean = text.trim();
@@ -338,7 +735,9 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
                 '';
               if (block.name) {
                 const badge = `${block.name}${
-                  fileOrCmd ? ': ' + summarizeText(path.basename(String(fileOrCmd)), 35) : ''
+                  fileOrCmd
+                    ? ': ' + summarizeText(path.basename(String(fileOrCmd)), 35)
+                    : ''
                 }`;
                 conversationLines.push(
                   `🔧 [Tool: ${block.name}] ${summarizeText(fileOrCmd, 100)}`
@@ -382,17 +781,60 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
       turns.push(currentTurn);
     }
 
+    // Replace the tail-only counts with whole-file totals for the same transcripts.
+    const fullTotals = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreateTokens: 0,
+      cacheReadTokens: 0,
+      thinkingTokens: 0,
+      messageCount: 0,
+    };
+    let recentBillable = 0;
+    const windowStart = Date.now() - 5 * 3600 * 1000;
+    let accumulated = false;
+    for (const filePath of filesToRead) {
+      const acc = readUsageIncremental(filePath);
+      if (!acc) continue;
+      accumulated = true;
+      for (const k of Object.keys(fullTotals)) fullTotals[k] += acc.totals[k];
+      for (const r of acc.recent) if (r.t >= windowStart) recentBillable += r.b;
+    }
+    if (accumulated) Object.assign(tokenUsage, fullTotals);
+    tokenUsage.window5hTokens = recentBillable;
+    tokenUsage.freshTokens =
+      tokenUsage.inputTokens + tokenUsage.outputTokens + tokenUsage.cacheCreateTokens;
+    tokenUsage.contextWindowTokens = getContextWindowTokens(detectedModel);
+    tokenUsage.contextWindowPct = tokenUsage.contextTokens
+      ? Math.min(
+          100,
+          Math.round((tokenUsage.contextTokens / tokenUsage.contextWindowTokens) * 1000) / 10
+        )
+      : 0;
+
+    tokenUsage.totalTokens =
+      tokenUsage.inputTokens +
+      tokenUsage.outputTokens +
+      tokenUsage.cacheCreateTokens +
+      tokenUsage.cacheReadTokens;
+    tokenUsage.estimatedCostUsd = estimateClaudeCostUsd(
+      detectedModel,
+      tokenUsage
+    );
+
     const recentLog = conversationLines.slice(-30).join('\n\n');
 
     return {
       transcriptPath: targetPath,
+      detectedModel,
+      tokenUsage,
       lastAssistantFullText,
       lastAssistantText: lastAssistantText
         ? summarizeText(lastAssistantText, 260)
         : null,
       lastUserText: lastUserText ? summarizeText(lastUserText, 160) : null,
       utf8Preview: recentLog || lastAssistantFullText || null,
-      turnHistory: turns.reverse().slice(0, 20), // Newest first
+      turnHistory: turns.reverse().slice(0, 20),
       subAgents: Array.from(subAgentsMap.values()),
     };
   } catch {
@@ -493,6 +935,12 @@ function inferWorkflowFromTool(toolName, toolInput = {}) {
 
 module.exports = {
   getGitMetadata,
+  getWorkspaceChangedFiles,
+  getWorkspaceFileDetail,
+  estimateClaudeCostUsd,
+  getModelRates,
+  getRecentBillableTokens,
+  getContextWindowTokens,
   findTranscriptsForCwd,
   findLatestTranscriptForCwd,
   parseTranscriptTail,

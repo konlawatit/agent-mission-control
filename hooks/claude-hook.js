@@ -65,8 +65,25 @@ process.stdin.on('end', () => {
       timeout: 1200,
     },
     (res) => {
-      res.resume();
-      process.exit(0);
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      res.on('end', () => {
+        // During a usage hold the server asks us to hold new prompts until the window resets.
+        if (enriched.hook_event_name === 'UserPromptSubmit') {
+          try {
+            const reply = JSON.parse(data);
+            if (reply && reply.hold && reply.hold.reason) {
+              process.stdout.write(
+                JSON.stringify({ decision: 'block', reason: String(reply.hold.reason) })
+              );
+            }
+          } catch {}
+        }
+        process.exit(0);
+      });
     }
   );
 

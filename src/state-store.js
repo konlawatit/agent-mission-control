@@ -383,12 +383,15 @@ class StateStore extends EventEmitter {
     if (!Array.isArray(scanItems)) return;
     let changed = false;
     const now = new Date().toISOString();
-    const activePids = new Set();
+    const activePids = new Set(
+      scanItems
+        .filter((i) => i && i.pid && i.screen)
+        .map((i) => Number(i.pid))
+    );
 
     for (const item of scanItems) {
       if (!item || !item.pid || !item.screen) continue;
       const numericPid = Number(item.pid);
-      activePids.add(numericPid);
 
       const parsed = parseConsoleScreen(item.screen);
       if (!parsed) continue;
@@ -417,7 +420,6 @@ class StateStore extends EventEmitter {
       const prevStateSig = JSON.stringify({
         lifecycle: session.lifecycle,
         status: session.status,
-        pid: session.pid,
         cwd: session.cwd,
         prompt: session.interactivePrompt,
         preview: session.screenPreview,
@@ -435,8 +437,11 @@ class StateStore extends EventEmitter {
       }
 
       session.isProcessAlive = true;
-      session.pid = numericPid;
-      session.cli = cliLabel;
+      // Keep existing alive PID stable if multiple child claude.exe processes share the same console
+      if (!session.pid || !activePids.has(Number(session.pid))) {
+        session.pid = numericPid;
+        session.cli = cliLabel;
+      }
 
       if (
         cwd &&
@@ -496,7 +501,6 @@ class StateStore extends EventEmitter {
       const nextStateSig = JSON.stringify({
         lifecycle: session.lifecycle,
         status: session.status,
-        pid: session.pid,
         cwd: session.cwd,
         prompt: session.interactivePrompt,
         preview: session.screenPreview,

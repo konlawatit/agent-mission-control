@@ -23,11 +23,15 @@ let appState = {
 };
 
 let selectedSessionId = null;
+let mountedInspectorSessionId = null;
 let viewMode = 'split'; // 'split' | 'grid'
 let activeTab = 'live'; // 'live' | 'needs_input' | 'history' | 'by_project' | 'pinned' | 'all'
 let searchQuery = '';
 let selectedProject = 'ALL';
 let selectedCategory = 'ALL';
+
+// Persist user scroll state per session so scrolling never jumps back to top
+const terminalScrollState = new Map(); // sessionId -> { scrollTop, stickToBottom }
 
 function escapeHtml(str) {
   return String(str || '')
@@ -77,7 +81,6 @@ async function fetchInitialState() {
     const data = await res.json();
     if (data.ok) {
       appState = { ...appState, ...data };
-      // If no live rooms exist yet but history exists, keep tab on 'live' or switch if needed
       ensureValidSelection();
       renderAll();
     }
@@ -124,7 +127,6 @@ function connectSSE() {
 
 function getFilteredSessions() {
   return appState.sessions.filter((s) => {
-    // 1. Tab filter
     if (activeTab === 'live' && s.lifecycle !== 'live') return false;
     if (
       activeTab === 'needs_input' &&
@@ -135,17 +137,13 @@ function getFilteredSessions() {
     if (activeTab === 'history' && s.lifecycle !== 'history') return false;
     if (activeTab === 'pinned' && !s.pinned) return false;
 
-    // 2. Project filter
     if (selectedProject !== 'ALL' && s.project !== selectedProject) {
       return false;
     }
-
-    // 3. Category filter
     if (selectedCategory !== 'ALL' && s.category !== selectedCategory) {
       return false;
     }
 
-    // 4. Search filter
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
       const hay = [
@@ -309,9 +307,8 @@ function renderTabsAndFilters() {
       .join('');
   }
 
-  // Update project & category select options
   const projSelect = document.getElementById('project-filter');
-  if (projSelect) {
+  if (projSelect && document.activeElement !== projSelect) {
     const current = selectedProject;
     projSelect.innerHTML =
       `<option value="ALL">📁 ทุกโปรเจกต์ (${(appState.projects || []).length})</option>` +
@@ -324,7 +321,7 @@ function renderTabsAndFilters() {
   }
 
   const catSelect = document.getElementById('category-filter');
-  if (catSelect) {
+  if (catSelect && document.activeElement !== catSelect) {
     const current = selectedCategory;
     catSelect.innerHTML =
       `<option value="ALL">🏷️ ทุกหมวดหมู่ (${(appState.categories || []).length})</option>` +
@@ -339,6 +336,7 @@ function renderTabsAndFilters() {
 
 window.switchTab = function (tabId) {
   activeTab = tabId;
+  mountedInspectorSessionId = null;
   ensureValidSelection();
   renderTabsAndFilters();
   renderWorkspace();
@@ -346,23 +344,27 @@ window.switchTab = function (tabId) {
 
 window.handleSearchChange = function (val) {
   searchQuery = val || '';
+  mountedInspectorSessionId = null;
   ensureValidSelection();
   renderWorkspace();
 };
 
 window.handleProjectFilter = function (val) {
   selectedProject = val || 'ALL';
+  mountedInspectorSessionId = null;
   ensureValidSelection();
   renderWorkspace();
 };
 
 window.handleCategoryFilter = function (val) {
   selectedCategory = val || 'ALL';
+  mountedInspectorSessionId = null;
   ensureValidSelection();
   renderWorkspace();
 };
 
 function buildInteractiveChoiceBoxHtml(s, compact = false) {
+  if (s.lifecycle === 'history') return '';
   const prompt = s.interactivePrompt;
   if (!prompt || !Array.isArray(prompt.options) || prompt.options.length === 0) {
     if (!s.pendingAction) return '';
@@ -552,7 +554,7 @@ function buildPipelineHtml(session) {
   `;
 }
 
-function buildRoomCardHtml(s, isDetailedGrid = false) {
+function buildRoomCardHtml(s) {
   const isSelected = s.id === selectedSessionId;
   const isHistory = s.lifecycle === 'history';
   const dotClass = isHistory
@@ -569,10 +571,6 @@ function buildRoomCardHtml(s, isDetailedGrid = false) {
     : s.status === 'working'
     ? 'working'
     : 'done';
-
-  const activeSubs = (s.subAgents || []).filter(
-    (sub) => sub.state === 'working' || sub.state === 'waiting'
-  ).length;
 
   const inlineChoicesHtml =
     !isHistory &&
@@ -657,26 +655,69 @@ function buildRoomCardHtml(s, isDetailedGrid = false) {
   `;
 }
 
-function buildInspectorHtml(s) {
-  if (!s) {
-    return `
-      <div class="inspector" style="text-align:center; padding:48px 24px; color:var(--text-muted);">
-        <div style="font-size:32px; margin-bottom:10px;">🎛️</div>
-        <div style="font-size:15px; font-weight:600; color:var(--text); margin-bottom:6px;">
-          ไม่พบ Session ในมุมมอง/ตัวกรองนี้
+function buildInspectorHeaderHtml(s) {
+  const isHistory = s.lifecycle === 'history';
+  return `
+    <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; gap:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+      <div>
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <h2 style="font-size:19px; font-weight:700;">${s.pinned ? '📌 ' : ''}${escapeHtml(s.room)}</h2>
+          <span class="pill">🏷️ ${escapeHtml(s.category || 'General')}</span>
+          <span class="pill mono">${escapeHtml(s.cli)}</span>
+          <span class="pill mono">🌿 ${escapeHtml(s.branch)}</span>
+          ${
+            s.pid
+              ? `<span class="pill mono" style="color:var(--success);">🟢 Live PID ${s.pid}</span>`
+              : `<span class="pill mono" style="color:#94a3b8;">🕘 Saved in History</span>`
+          }
         </div>
-        <div style="font-size:13px; max-width:460px; margin:0 auto 16px;">
-          เมื่อคุณเปิด <code>claude</code> ใน Windows Terminal หรือ PowerShell ระบบจะตรวจจับและบันทึกห้องให้อัตโนมัติ และหากเผลอปิด Tab ระบบจะย้ายมาเก็บไว้ในแท็บ <b>"🕘 ประวัติที่ปิดแล้ว (History)"</b>
-        </div>
-        <div style="display:flex; justify-content:center; gap:10px;">
-          <button class="btn btn-primary" onclick="openSpawnModal()">+ เปิดห้อง Agent ใหม่</button>
-          <button class="btn" onclick="scanTerminalsNow()">🔄 สแกนหน้าจอ Terminal ทันที</button>
+        <div class="mono" style="font-size:12px; color:var(--text-muted); margin-top:5px;">
+          📁 ${escapeHtml(s.cwd || 'Local Workspace')} • เปิดใช้งานแล้ว ${s.openCount || 1} ครั้ง • อัปเดตล่าสุด ${formatRelativeTime(s.updatedAt)}
         </div>
       </div>
-    `;
-  }
+      <div style="display:flex; flex-wrap:wrap; gap:6px;">
+        <button class="btn" onclick="togglePinRoom('${escapeJsAttr(s.id)}', ${!s.pinned})">
+          ${s.pinned ? '📌 เลิกปักหมุด' : '📌 ปักหมุดกันลืม'}
+        </button>
+        <button class="btn" onclick="openEditModal('${escapeJsAttr(s.id)}')">
+          ✏️ เปลี่ยนชื่อ / หมวดหมู่
+        </button>
+        <button class="btn btn-success" onclick="resumeSession('${escapeJsAttr(s.id)}')">
+          🔄 เปิดต่อใน Terminal (Resume)
+        </button>
+        ${
+          !isHistory
+            ? `<button class="btn" onclick="archiveRoom('${escapeJsAttr(s.id)}')">📥 เก็บเข้าประวัติ</button>`
+            : `<button class="btn" onclick="removeRoomPermanent('${escapeJsAttr(s.id)}')">🗑️ ลบถาวร</button>`
+        }
+      </div>
+    </div>
+  `;
+}
 
+function buildInspectorBodyDynamicHtml(s) {
   const isHistory = s.lifecycle === 'history';
+
+  const recoveryBannerHtml = isHistory
+    ? `
+      <div class="choice-card" style="border-color: var(--success); background: linear-gradient(135deg, rgba(16, 185, 129, 0.12), rgba(19, 26, 39, 0.96));">
+        <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px;">
+          <div>
+            <div style="font-weight:700; font-size:15px; color:#34d399;">
+              🕘 Session นี้ถูกปิดหน้าต่าง Terminal ไปแล้ว (${formatRelativeTime(s.closedAt || s.updatedAt)})
+            </div>
+            <div style="font-size:12.5px; color:var(--text-muted); margin-top:3px;">
+              ระบบจดจำโฟลเดอร์โปรเจกต์ <code>${escapeHtml(s.cwd)}</code> และประวัติไว้ครบถ้วน กดปุ่มด้านขวาเพื่อเปิด Terminal และคุยต่อจากจุดเดิมได้ทันที
+            </div>
+          </div>
+          <button class="btn btn-success" style="padding:10px 16px; font-size:13.5px;"
+                  onclick="resumeSession('${escapeJsAttr(s.id)}')">
+            🔄 กู้คืน / เปิดต่อใน Terminal (Resume Session)
+          </button>
+        </div>
+      </div>
+    `
+    : '';
 
   const subAgentsHtml =
     s.subAgents && s.subAgents.length > 0
@@ -734,138 +775,147 @@ function buildInspectorHtml(s) {
           .join('')
       : `<div style="color:var(--text-muted); font-size:12px;">ยังไม่มีประวัติ Event</div>`;
 
-  const screenPreviewHtml = s.screenPreview
-    ? `
-      <div class="section-box">
-        <div class="section-title">
-          <span>🖥️ หน้าจอ Terminal ล่าสุด (${isHistory ? 'ภาพหน้าจอก่อนปิด Tab' : `Live Console Buffer — PID ${escapeHtml(s.pid || 'N/A')}`})</span>
-          ${
-            !isHistory
-              ? `<div style="display:flex; gap:6px;">
-                  <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">↑</button>
-                  <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">↓</button>
-                  <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">↵ Enter</button>
-                  <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">Esc</button>
-                  <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="scanTerminalsNow()">🔄 รีเฟรชจอ</button>
-                </div>`
-              : ''
-          }
-        </div>
-        <div class="terminal-preview">${escapeHtml(s.screenPreview)}</div>
-      </div>
-    `
-    : '';
+  return `
+    ${recoveryBannerHtml}
+    ${!isHistory ? buildInteractiveChoiceBoxHtml(s, false) : ''}
 
-  const recoveryBannerHtml = isHistory
-    ? `
-      <div class="choice-card" style="border-color: var(--success); background: linear-gradient(135deg, rgba(16, 185, 129, 0.12), rgba(19, 26, 39, 0.96));">
-        <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px;">
-          <div>
-            <div style="font-weight:700; font-size:15px; color:#34d399;">
-              🕘 Session นี้ถูกปิดหน้าต่าง Terminal ไปแล้ว (${formatRelativeTime(s.closedAt || s.updatedAt)})
-            </div>
-            <div style="font-size:12.5px; color:var(--text-muted); margin-top:3px;">
-              ระบบจดจำโฟลเดอร์โปรเจกต์ <code>${escapeHtml(s.cwd)}</code> และประวัติไว้ครบถ้วน กดปุ่มด้านขวาเพื่อเปิด Terminal และคุยต่อจากจุดเดิมได้ทันที
-            </div>
-          </div>
-          <button class="btn btn-success" style="padding:10px 16px; font-size:13.5px;"
-                  onclick="resumeSession('${escapeJsAttr(s.id)}')">
-            🔄 กู้คืน / เปิดต่อใน Terminal (Resume Session)
-          </button>
+    <div>
+      <div class="section-title">
+        <span>📊 ขั้นตอนการทำงาน (Workflow Pipeline)</span>
+        <span class="mono" style="color:var(--primary);">Status: ${escapeHtml(s.currentTool || 'Idle')}</span>
+      </div>
+      ${buildPipelineHtml(s)}
+    </div>
+
+    <div class="section-box" style="border-color: rgba(59, 130, 246, 0.4);">
+      <div class="section-title">
+        <span>📌 Auto-TL;DR (สรุปสถานะล่าสุดโดยไม่ต้องเปิดอ่าน History ใน Tab)</span>
+        <span>🎯 เป้าหมาย: ${escapeHtml(s.goal)}</span>
+      </div>
+      <div style="font-size:14px; color:var(--text); line-height:1.6;">
+        ${escapeHtml(s.tldr)}
+      </div>
+    </div>
+
+    <div class="section-box">
+      <div class="section-title">
+        <span>🌳 โครงสร้าง Sub-Agents ใน Session นี้ (${(s.subAgents || []).length} ตัว)</span>
+        <span>Main Agent → Child Tasks</span>
+      </div>
+      ${subAgentsHtml}
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+      <div class="section-box">
+        <div class="section-title"><span>📄 ไฟล์ที่แก้ไขในห้องนี้</span></div>
+        ${filesHtml}
+      </div>
+      <div class="section-box">
+        <div class="section-title"><span>⚡ ประวัติเหตุการณ์ (Session Timeline)</span></div>
+        ${eventsHtml}
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Updates the terminal preview box WITHOUT destroying its DOM node or resetting user scroll!
+ */
+function syncTerminalPreviewDom(s) {
+  const wrapper = document.getElementById('inspector-terminal-box');
+  if (!wrapper) return;
+
+  if (!s.screenPreview) {
+    wrapper.style.display = 'none';
+    return;
+  }
+
+  wrapper.style.display = 'block';
+  const titleSpan = document.getElementById('terminal-box-title');
+  if (titleSpan) {
+    titleSpan.textContent =
+      s.lifecycle === 'history'
+        ? '🖥️ หน้าจอ Terminal ล่าสุด (ภาพหน้าจอก่อนปิด Tab)'
+        : `🖥️ หน้าจอ Terminal ล่าสุด (Live Console Buffer — PID ${s.pid || 'N/A'})`;
+  }
+
+  const pre = document.getElementById('terminal-preview-content');
+  if (!pre) return;
+
+  // Bind scroll listener once so we remember exactly where the user scrolled
+  if (!pre.dataset.scrollBound) {
+    pre.dataset.scrollBound = '1';
+    pre.addEventListener('scroll', () => {
+      const isNearBottom =
+        pre.scrollHeight - pre.scrollTop - pre.clientHeight <= 28;
+      terminalScrollState.set(s.id, {
+        scrollTop: pre.scrollTop,
+        stickToBottom: isNearBottom,
+      });
+    });
+  }
+
+  const prevText = pre.dataset.rawText || '';
+  if (prevText !== s.screenPreview) {
+    const saved = terminalScrollState.get(s.id);
+    pre.textContent = s.screenPreview;
+    pre.dataset.rawText = s.screenPreview;
+
+    // If user hasn't scrolled up manually, or first time viewing, scroll to bottom
+    if (!saved || saved.stickToBottom) {
+      pre.scrollTop = pre.scrollHeight;
+    } else {
+      pre.scrollTop = saved.scrollTop;
+    }
+  }
+}
+
+function buildFullInspectorMountHtml(s) {
+  if (!s) {
+    return `
+      <div class="inspector" style="text-align:center; padding:48px 24px; color:var(--text-muted);">
+        <div style="font-size:32px; margin-bottom:10px;">🎛️</div>
+        <div style="font-size:15px; font-weight:600; color:var(--text); margin-bottom:6px;">
+          ไม่พบ Session ในมุมมอง/ตัวกรองนี้
+        </div>
+        <div style="font-size:13px; max-width:460px; margin:0 auto 16px;">
+          เมื่อคุณเปิด <code>claude</code> ใน Windows Terminal หรือ PowerShell ระบบจะตรวจจับและบันทึกห้องให้อัตโนมัติ และหากเผลอปิด Tab ระบบจะย้ายมาเก็บไว้ในแท็บ <b>"🕘 ประวัติที่ปิดแล้ว (History)"</b>
+        </div>
+        <div style="display:flex; justify-content:center; gap:10px;">
+          <button class="btn btn-primary" onclick="openSpawnModal()">+ เปิดห้อง Agent ใหม่</button>
+          <button class="btn" onclick="scanTerminalsNow()">🔄 สแกนหน้าจอ Terminal ทันที</button>
         </div>
       </div>
-    `
-    : '';
+    `;
+  }
 
   return `
-    <div class="inspector">
-      <!-- Room Header -->
-      <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; gap:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
-        <div>
-          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-            <h2 style="font-size:19px; font-weight:700;">${s.pinned ? '📌 ' : ''}${escapeHtml(s.room)}</h2>
-            <span class="pill">🏷️ ${escapeHtml(s.category || 'General')}</span>
-            <span class="pill mono">${escapeHtml(s.cli)}</span>
-            <span class="pill mono">🌿 ${escapeHtml(s.branch)}</span>
-            ${
-              s.pid
-                ? `<span class="pill mono" style="color:var(--success);">🟢 Live PID ${s.pid}</span>`
-                : `<span class="pill mono" style="color:#94a3b8;">🕘 Saved in History</span>`
-            }
+    <div class="inspector" id="mounted-inspector" data-session-id="${escapeHtml(s.id)}">
+      <div id="inspector-header-region">
+        ${buildInspectorHeaderHtml(s)}
+      </div>
+
+      <div id="inspector-dynamic-region" style="display:flex; flex-direction:column; gap:15px;">
+        ${buildInspectorBodyDynamicHtml(s)}
+      </div>
+
+      <!-- Persistent Terminal Preview Node (Never destroyed on SSE updates so mouse scroll never resets!) -->
+      <div class="section-box" id="inspector-terminal-box" style="display:${s.screenPreview ? 'block' : 'none'};">
+        <div class="section-title">
+          <span id="terminal-box-title">🖥️ หน้าจอ Terminal ล่าสุด</span>
+          <div style="display:flex; gap:6px;">
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">↑</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">↓</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">↵ Enter</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">Esc</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="scanTerminalsNow()">🔄 รีเฟรชจอ</button>
           </div>
-          <div class="mono" style="font-size:12px; color:var(--text-muted); margin-top:5px;">
-            📁 ${escapeHtml(s.cwd || 'Local Workspace')} • เปิดใช้งานแล้ว ${s.openCount || 1} ครั้ง • อัปเดตล่าสุด ${formatRelativeTime(s.updatedAt)}
-          </div>
         </div>
-        <div style="display:flex; flex-wrap:wrap; gap:6px;">
-          <button class="btn" onclick="togglePinRoom('${escapeJsAttr(s.id)}', ${!s.pinned})">
-            ${s.pinned ? '📌 เลิกปักหมุด' : '📌 ปักหมุดกันลืม'}
-          </button>
-          <button class="btn" onclick="openEditModal('${escapeJsAttr(s.id)}')">
-            ✏️ เปลี่ยนชื่อ / หมวดหมู่
-          </button>
-          <button class="btn btn-success" onclick="resumeSession('${escapeJsAttr(s.id)}')">
-            🔄 เปิดต่อใน Terminal (Resume)
-          </button>
-          ${
-            !isHistory
-              ? `<button class="btn" onclick="archiveRoom('${escapeJsAttr(s.id)}')">📥 เก็บเข้าประวัติ</button>`
-              : `<button class="btn" onclick="removeRoomPermanent('${escapeJsAttr(s.id)}')">🗑️ ลบถาวร</button>`
-          }
-        </div>
+        <div class="terminal-preview" id="terminal-preview-content"></div>
       </div>
 
-      ${recoveryBannerHtml}
-
-      <!-- Interactive Choice Card -->
-      ${!isHistory ? buildInteractiveChoiceBoxHtml(s, false) : ''}
-
-      <!-- Current Goal & Workflow Stage -->
-      <div>
-        <div class="section-title">
-          <span>📊 ขั้นตอนการทำงาน (Workflow Pipeline)</span>
-          <span class="mono" style="color:var(--primary);">Status: ${escapeHtml(s.currentTool || 'Idle')}</span>
-        </div>
-        ${buildPipelineHtml(s)}
-      </div>
-
-      <!-- Auto-TL;DR Summary Box -->
-      <div class="section-box" style="border-color: rgba(59, 130, 246, 0.4);">
-        <div class="section-title">
-          <span>📌 Auto-TL;DR (สรุปสถานะล่าสุดโดยไม่ต้องเปิดอ่าน History ใน Tab)</span>
-          <span>🎯 เป้าหมาย: ${escapeHtml(s.goal)}</span>
-        </div>
-        <div style="font-size:14px; color:var(--text); line-height:1.6;">
-          ${escapeHtml(s.tldr)}
-        </div>
-      </div>
-
-      <!-- Live Terminal Screen Buffer Preview -->
-      ${screenPreviewHtml}
-
-      <!-- Sub-Agent Hierarchy Tree -->
-      <div class="section-box">
-        <div class="section-title">
-          <span>🌳 โครงสร้าง Sub-Agents ใน Session นี้ (${(s.subAgents || []).length} ตัว)</span>
-          <span>Main Agent → Child Tasks</span>
-        </div>
-        ${subAgentsHtml}
-      </div>
-
-      <!-- Modified Files & Structured Event Timeline -->
-      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
-        <div class="section-box">
-          <div class="section-title"><span>📄 ไฟล์ที่แก้ไขในห้องนี้</span></div>
-          ${filesHtml}
-        </div>
-        <div class="section-box">
-          <div class="section-title"><span>⚡ ประวัติเหตุการณ์ (Session Timeline)</span></div>
-          ${eventsHtml}
-        </div>
-      </div>
-
-      <!-- Central Command Center -->
-      <div class="section-box" style="background:var(--surface-elevated);">
+      <!-- Persistent Command Input Box (Never destroyed on SSE updates so typing focus is NEVER lost!) -->
+      <div class="section-box" style="background:var(--surface-elevated);" id="inspector-command-box">
         <div class="section-title">
           <span>⌨️ สั่งการไปยัง ${escapeHtml(s.room)} โดยตรง</span>
           <label style="display:flex; align-items:center; gap:6px; text-transform:none; font-weight:500; cursor:pointer;">
@@ -907,7 +957,7 @@ function buildInspectorHtml(s) {
 
 function buildGroupedByProjectHtml(sessions) {
   if (sessions.length === 0) {
-    return buildInspectorHtml(null);
+    return buildFullInspectorMountHtml(null);
   }
   const groups = new Map();
   for (const s of sessions) {
@@ -935,7 +985,7 @@ function buildGroupedByProjectHtml(sessions) {
           </div>
         </div>
         <div class="grid-layout">
-          ${items.map((s) => buildRoomCardHtml(s, true)).join('')}
+          ${items.map((s) => buildRoomCardHtml(s)).join('')}
         </div>
       </div>
     `;
@@ -950,17 +1000,19 @@ function renderWorkspace() {
   const filtered = getFilteredSessions();
 
   if (activeTab === 'by_project') {
+    mountedInspectorSessionId = null;
     container.innerHTML = buildGroupedByProjectHtml(filtered);
     return;
   }
 
   if (viewMode === 'grid') {
+    mountedInspectorSessionId = null;
     container.innerHTML =
       filtered.length > 0
         ? `<div class="grid-layout">${filtered
-            .map((s) => buildRoomCardHtml(s, true))
+            .map((s) => buildRoomCardHtml(s))
             .join('')}</div>`
-        : buildInspectorHtml(null);
+        : buildFullInspectorMountHtml(null);
     return;
   }
 
@@ -975,25 +1027,52 @@ function renderWorkspace() {
         </div>`
       : '';
 
+  const roomListHtml =
+    filtered.length > 0
+      ? filtered.map((s) => buildRoomCardHtml(s)).join('')
+      : `<div class="section-box" style="text-align:center; padding:24px; color:var(--text-muted);">
+          ไม่มีรายการในแท็บ "${escapeHtml(activeTab)}"
+        </div>`;
+
+  // Check if the split layout and inspector for this exact session are ALREADY mounted!
+  // If so, update only the left list and dynamic regions WITHOUT touching #cmd-input or #terminal-preview-content!
+  const existingLeftCol = document.getElementById('split-left-col');
+  const existingHeaderRegion = document.getElementById('inspector-header-region');
+  const existingDynamicRegion = document.getElementById('inspector-dynamic-region');
+
+  if (
+    activeSession &&
+    mountedInspectorSessionId === activeSession.id &&
+    existingLeftCol &&
+    existingHeaderRegion &&
+    existingDynamicRegion
+  ) {
+    existingLeftCol.innerHTML = `${clearHistoryBtnHtml}<div class="room-list">${roomListHtml}</div>`;
+    existingHeaderRegion.innerHTML = buildInspectorHeaderHtml(activeSession);
+    existingDynamicRegion.innerHTML = buildInspectorBodyDynamicHtml(activeSession);
+    syncTerminalPreviewDom(activeSession);
+    return;
+  }
+
+  // Otherwise, mount the split layout fresh for the new session selection
+  mountedInspectorSessionId = activeSession ? activeSession.id : null;
   container.innerHTML = `
     <div class="split-layout">
-      <div>
+      <div id="split-left-col">
         ${clearHistoryBtnHtml}
         <div class="room-list">
-          ${
-            filtered.length > 0
-              ? filtered.map((s) => buildRoomCardHtml(s, false)).join('')
-              : `<div class="section-box" style="text-align:center; padding:24px; color:var(--text-muted);">
-                  ไม่มีรายการในแท็บ "${escapeHtml(activeTab)}"
-                </div>`
-          }
+          ${roomListHtml}
         </div>
       </div>
-      <div>
-        ${buildInspectorHtml(activeSession)}
+      <div id="split-right-col">
+        ${buildFullInspectorMountHtml(activeSession)}
       </div>
     </div>
   `;
+
+  if (activeSession) {
+    syncTerminalPreviewDom(activeSession);
+  }
 }
 
 function renderAll() {
@@ -1016,6 +1095,7 @@ window.selectSession = function (sessionId) {
 
 window.toggleViewMode = function () {
   viewMode = viewMode === 'split' ? 'grid' : 'split';
+  mountedInspectorSessionId = null;
   renderWorkspace();
 };
 
@@ -1116,6 +1196,7 @@ window.resumeSession = async function (sessionId) {
     const data = await res.json();
     showToast(`🔄 ${data.message}`);
     activeTab = 'live';
+    mountedInspectorSessionId = null;
     renderTabsAndFilters();
   } catch (err) {
     showToast('❌ กู้คืน Session ไม่สำเร็จ: ' + err.message);
@@ -1232,6 +1313,7 @@ window.submitSpawnRoom = async function () {
   if (data.ok && data.session) {
     selectedSessionId = data.session.id;
     activeTab = 'live';
+    mountedInspectorSessionId = null;
     closeSpawnModal();
     showToast(`🚀 เปิดห้อง "${data.session.room}" เรียบร้อย!`);
   }

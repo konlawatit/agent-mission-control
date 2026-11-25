@@ -564,7 +564,8 @@ function renderSidebar() {
 
   const newBtn = $('#new-btn');
   if (newBtn && !newBtn.__done) {
-    newBtn.innerHTML = `${icon('plus', 17)}ห้องใหม่`;
+    newBtn.innerHTML = `${icon('plus', 17)}<span class="side-label">ห้องใหม่</span>`;
+    newBtn.title = 'เปิดห้อง Agent ใหม่';
     newBtn.__done = true;
   }
 
@@ -573,8 +574,8 @@ function renderSidebar() {
   const hist = appState.sessions.length - live.length;
   const nav = currentNav();
   const item = (key, ic, label, trail) => `
-    <button class="nav-item" ${act('navigate', key)} ${nav === key ? 'aria-current="page"' : ''}>
-      ${icon(ic, 18)}<span class="label">${escapeHtml(label)}</span>${trail}
+    <button class="nav-item" ${act('navigate', key)} ${nav === key ? 'aria-current="page"' : ''} title="${escapeHtml(label)}">
+      ${icon(ic, 18)}<span class="label side-label">${escapeHtml(label)}</span>${trail}
     </button>`;
   setHTML(
     $('#side-nav'),
@@ -592,11 +593,11 @@ function renderSidebar() {
     const cls = remaining < threshold ? 'is-low' : remaining < 25 ? 'is-mid' : '';
     const source = u.source === 'claude' ? 'จาก Claude Code' : u.source === 'simulated' ? 'ค่าจำลอง' : 'ค่าประมาณ';
     usage = `
-      <button class="usage-card" ${act('openPanel', 'usage')} title="Usage รอบ 5 ชม. คงเหลือ ${remaining}% · พักงานเมื่อต่ำกว่า ${threshold}%">
-        <span class="usage-top"><span>Usage 5 ชม.</span><span>${escapeHtml(source)}</span></span>
+      <button class="usage-card ${u.hold ? 'is-hold' : ''}" ${act('openPanel', 'usage')} aria-label="Usage รอบ 5 ชม. คงเหลือ ${remaining}%" title="Usage รอบ 5 ชม. คงเหลือ ${remaining}% (${escapeHtml(source)}) · พักงานเมื่อต่ำกว่า ${threshold}%">
+        <span class="usage-top">Usage 5 ชม.</span>
         <span class="usage-value">${remaining}%<small>คงเหลือ</small></span>
         <span class="bar ${cls}" aria-hidden="true"><i style="width:${Math.max(2, remaining)}%"></i><span class="bar-mark" style="left:${threshold}%"></span></span>
-        <span class="usage-foot">${u.hold ? 'พักงานอยู่ · ' : ''}reset ${escapeHtml(clock(u.resetAt))}</span>
+        <span class="usage-foot"><span>${u.hold ? 'พักงานอยู่ · ' : ''}reset ${escapeHtml(clock(u.resetAt))}</span><span>${escapeHtml(source)}</span></span>
       </button>`;
   }
   setHTML($('#side-usage'), usage);
@@ -774,7 +775,7 @@ function focusHeadHtml(s) {
       <button class="icon-btn icon-btn-sm" ${act('openEdit', s.id)} aria-label="แก้ไขชื่อห้อง" title="แก้ไขชื่อห้อง หมวดหมู่ และเป้าหมาย">${icon('edit', 15)}</button>
       <div class="title-actions">
         <button class="btn btn-ghost btn-sm" ${act('openInVsCode', s.id, '', 1)} title="เปิดโฟลเดอร์ห้องนี้ใน VS Code">${icon('editor', 15)}VS Code</button>
-        <button class="icon-btn" ${act('togglePin', s.id, !s.pinned)} aria-pressed="${Boolean(s.pinned)}" aria-label="${s.pinned ? 'เลิกปักหมุด' : 'ปักหมุด'}" title="${s.pinned ? 'เลิกปักหมุด' : 'ปักหมุดไว้บนสุด'}" ${s.pinned ? 'style="color:var(--accent)"' : ''}>${icon('pin', 16)}</button>
+        <button class="icon-btn" ${act('togglePin', s.id, !s.pinned)} aria-pressed="${Boolean(s.pinned)}" aria-label="${s.pinned ? 'เลิกปักหมุด' : 'ปักหมุด'}" title="${s.pinned ? 'เลิกปักหมุด' : 'ปักหมุดไว้บนสุด'}">${icon('pin', 16)}</button>
         <button class="icon-btn" ${act('openMore', s.id)} aria-label="คำสั่งเพิ่มเติม" title="คำสั่งเพิ่มเติม">${icon('more', 18)}</button>
       </div>
     </div>
@@ -786,7 +787,7 @@ function focusHeadHtml(s) {
       <button class="chip num" ${act('openPanel', 'usage')} title="Tokens ใหม่ ${formatTokens(freshTokens(s))} · cache read ${formatTokens(t.cacheReadTokens)} · ค่าใช้จ่ายเทียบราคา API ${formatUsd(t.estimatedCostUsd)}">
         ${icon('tokens', 14)}<span>${formatTokens(freshTokens(s))}</span><span style="color:var(--text-3)">${formatUsd(t.estimatedCostUsd)}</span>
       </button>
-      <span class="chip num" title="Context window ใช้ไป ${ctx}%">${icon('layers', 14)}<span>ctx ${Math.round(ctx)}%</span><span class="bar ctx-mini ${ctx > 85 ? 'is-low' : ctx > 60 ? 'is-mid' : ''}"><i style="width:${Math.max(2, ctx)}%"></i></span></span>
+      <span class="chip num" title="Context window ใช้ไป ${ctx}%">${icon('layers', 14)}<span>ctx ${Math.round(ctx)}%</span><span class="bar ctx-mini ${ctx > 85 ? 'is-low' : ctx > 60 ? 'is-mid' : ''}"><i style="width:${ctx > 0 ? Math.max(2, ctx) : 0}%"></i></span></span>
       ${
         s.lifecycle !== 'history' && !connected
           ? `<span class="chip" title="ยังไม่พบ terminal ของห้องนี้ คำสั่งจะเข้าคิวไว้ หรือเปิดโหมดพื้นหลัง">${icon('plug', 14)}ยังไม่เชื่อม terminal</span>`
@@ -949,26 +950,34 @@ function updateComposerState(s) {
   const history = s.lifecycle === 'history';
   // During a usage hold new prompts wait for the reset; approvals and keys still work.
   const held = Boolean(appState.usageGuard && appState.usageGuard.hold);
+  // A closed room only takes prompts through the background (`claude --resume`) path.
+  const closed = history && !ui.headless;
   const ta = $('#cmd-input');
   const send = $('#send-btn');
   const box = $('#f-composer .composer-box');
-  if (box) box.classList.toggle('is-held', held);
+  if (box) {
+    box.classList.toggle('is-held', held);
+    box.classList.toggle('is-closed', closed && !held);
+  }
   if (ta) {
-    ta.disabled = history && !ui.headless;
+    ta.disabled = closed;
     ta.placeholder = held
       ? 'พักรอ usage reset อยู่ พิมพ์เก็บไว้ได้ จะส่งได้หลัง reset หรือกด "ทำต่อเลย"'
+      : closed
+      ? 'ห้องนี้ปิดแล้ว กด "เปิดต่อ" หรือเปิดโหมดพื้นหลังเพื่อสั่งงาน'
       : 'สั่งงานห้องนี้ (Enter ส่ง, Shift+Enter ขึ้นบรรทัดใหม่)';
   }
   if (send) {
-    send.disabled = held || (history && !ui.headless);
-    send.title = held ? 'พักรอ usage reset อยู่' : 'ส่ง (Enter)';
+    send.disabled = held || closed;
+    send.title = held ? 'พักรอ usage reset อยู่' : closed ? 'ห้องนี้ปิดแล้ว' : 'ส่ง (Enter)';
   }
+  const quickOff = closed ? 'disabled' : '';
   setHTML(
     $('#composer-row'),
     `
     ${held ? `<span class="chip is-held-note">${icon('pauseCircle', 14)}คำสั่งใหม่พักไว้ถึง ${escapeHtml(clock(appState.usageGuard.resetAt))}</span>` : `
-    <button class="chip" ${act('quick', 'รันชุดทดสอบ (test) แล้วสรุปผลสั้นๆ')} title="ส่ง: รันชุดทดสอบแล้วสรุปผล">${icon('flask', 14)}Run tests</button>
-    <button class="chip" ${act('quick', 'สรุปสิ่งที่แก้ไขไปทั้งหมด พร้อมตรวจ git status')} title="ส่ง: สรุปสิ่งที่แก้ไขทั้งหมด">${icon('summary', 14)}สรุปงาน</button>`}
+    <button class="chip" ${act('quick', 'รันชุดทดสอบ (test) แล้วสรุปผลสั้นๆ')} title="ส่ง: รันชุดทดสอบแล้วสรุปผล" ${quickOff}>${icon('flask', 14)}Run tests</button>
+    <button class="chip" ${act('quick', 'สรุปสิ่งที่แก้ไขไปทั้งหมด พร้อมตรวจ git status')} title="ส่ง: สรุปสิ่งที่แก้ไขทั้งหมด" ${quickOff}>${icon('summary', 14)}สรุปงาน</button>`}
     ${
       // Approval keys live on the prompt card only; here the one key that matters is stopping a running turn.
       !history && s.status === 'working'
@@ -1290,7 +1299,7 @@ function renderIde() {
   el.innerHTML = `
     <div class="ide-bar">
       <div class="ide-crumb">${icon('folder', 15)}<span>${escapeHtml(s ? s.room : '')}${dir ? ` / ${escapeHtml(dir)}` : ''}</span><span>/</span><b>${escapeHtml(name)}</b></div>
-      <div class="topbar-spacer"></div>
+      <div class="ide-spacer"></div>
       ${ide.path ? `<button class="btn btn-sm" ${act('openInVsCode', ide.sessionId, ide.path, 1)}>${icon('editor', 14)}เปิดใน VS Code</button>` : ''}
       <button class="icon-btn" ${act('closeIde')} aria-label="ปิด" title="ปิด (Esc)">${icon('x', 17)}</button>
     </div>
@@ -1335,25 +1344,53 @@ function renderOverview() {
   const el = $('#overview');
   if (ui.view !== 'grid') return;
   const list = appState.sessions.filter((s) => matchesFilters(s) && s.lifecycle !== 'history');
-  const head = `<h2 class="ov-title">ภาพรวมทุกห้อง</h2>`;
+
+  // One line that answers "who needs me" before any card is read.
+  const counts = { attn: 0, work: 0, hold: 0, rest: 0 };
+  for (const s of list) {
+    const k = roomState(s).key;
+    counts[k in counts ? k : 'rest'] += 1;
+  }
+  const summary = [
+    ['attn', 's-attn', 'รอคุณ'],
+    ['work', 's-work', 'กำลังทำงาน'],
+    ['hold', 's-hold', 'พักรอ reset'],
+    ['rest', '', 'ว่าง / เสร็จแล้ว'],
+  ]
+    .filter(([k]) => k !== 'hold' || counts.hold)
+    .map(([k, cls, label]) => `<span class="pill ${counts[k] ? cls : ''}"><b class="num">${counts[k]}</b>${escapeHtml(label)}</span>`)
+    .join('');
+  const head = `<div class="ov-top"><h2 class="ov-title">ภาพรวมทุกห้อง</h2><div class="ov-summary" aria-label="สรุปสถานะ">${summary}</div></div>`;
   if (!list.length) {
     setHTML(el, `${head}<div class="empty-list">ไม่มีห้องที่เปิดอยู่</div>`);
     return;
   }
-  const groups = new Map();
+
+  // Project lanes, densely packed; lanes holding a room that waits on you come first.
+  const rank = { attn: 0, work: 1, hold: 2, done: 3, idle: 4, closed: 5 };
+  const lanes = new Map();
   for (const s of list) {
     const k = s.project || 'General';
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k).push(s);
+    if (!lanes.has(k)) lanes.set(k, []);
+    lanes.get(k).push(s);
   }
-  const rank = { attn: 0, work: 1, hold: 2, done: 3, idle: 4, closed: 5 };
-  let html = head;
-  for (const [name, items] of groups) {
-    items.sort((a, b) => rank[roomState(a).key] - rank[roomState(b).key] || byPinnedThenAge(a, b));
-    html += `<section class="ov-group"><div class="ov-head">${icon('folder', 16)}${escapeHtml(name)}<span class="path mono">${escapeHtml(items[0].cwd || '')}</span></div>
-      <div class="ov-grid">${items.map((s) => rcardHtml(s)).join('')}</div></section>`;
-  }
-  setHTML(el, html);
+  const ordered = [...lanes.entries()]
+    .map(([name, items]) => {
+      items.sort((a, b) => rank[roomState(a).key] - rank[roomState(b).key] || byPinnedThenAge(a, b));
+      return { name, items, best: rank[roomState(items[0]).key] };
+    })
+    .sort((a, b) => a.best - b.best || a.name.localeCompare(b.name));
+  const html = ordered
+    .map(
+      ({ name, items }) => `
+      <section class="ov-lane" aria-label="${escapeHtml(name)}">
+        <div class="ov-head">${icon('folder', 16)}<span class="ov-name">${escapeHtml(name)}</span><span class="count">${items.length}</span></div>
+        <div class="ov-path mono" title="${escapeHtml(items[0].cwd || '')}">${escapeHtml(items[0].cwd || '')}</div>
+        <div class="ov-stack">${items.map((s) => rcardHtml(s)).join('')}</div>
+      </section>`
+    )
+    .join('');
+  setHTML(el, `${head}<div class="ov-lanes">${html}</div>`);
 }
 
 /* ---------- Popovers ---------- */
@@ -1798,7 +1835,7 @@ document.addEventListener('change', (e) => {
 });
 
 function isTyping(target) {
-  return target && (target.closest('input, textarea, select, [contenteditable="true"]') !== null);
+  return Boolean(target && typeof target.closest === 'function' && target.closest('input, textarea, select, [contenteditable="true"]'));
 }
 
 document.addEventListener('keydown', (e) => {

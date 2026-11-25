@@ -1,74 +1,89 @@
 ---
 name: Agent Mission Control
-description: A night-shift triage desk for many Claude Code rooms, set in graphite beside the terminals.
+description: A calm lavender control room where every Claude Code room says what it is doing, on rounded translucent glass beside the terminals.
 colors:
-  bg: "oklch(0.165 0.012 255)"
-  bg-sunk: "oklch(0.145 0.011 255)"
-  rail: "oklch(0.185 0.012 255)"
-  surface: "oklch(0.205 0.013 255)"
-  surface-2: "oklch(0.235 0.014 255)"
-  surface-3: "oklch(0.275 0.015 255)"
-  line: "oklch(0.31 0.014 255)"
-  line-soft: "oklch(0.255 0.013 255)"
-  text: "oklch(0.95 0.006 255)"
-  text-2: "oklch(0.80 0.012 255)"
-  text-3: "oklch(0.67 0.014 255)"
-  accent: "oklch(0.80 0.10 205)"
-  accent-ink: "oklch(0.20 0.03 220)"
-  accent-soft: "oklch(0.80 0.10 205 / 0.13)"
-  attn: "oklch(0.83 0.14 78)"
-  attn-soft: "oklch(0.83 0.14 78 / 0.11)"
-  attn-line: "oklch(0.83 0.14 78 / 0.42)"
-  work: "oklch(0.72 0.13 262)"
-  work-soft: "oklch(0.72 0.13 262 / 0.14)"
-  done: "oklch(0.76 0.13 155)"
-  done-soft: "oklch(0.76 0.13 155 / 0.12)"
-  hold: "oklch(0.70 0.17 25)"
-  hold-soft: "oklch(0.70 0.17 25 / 0.12)"
-  hold-line: "oklch(0.70 0.17 25 / 0.45)"
-  hold-text: "oklch(0.86 0.09 25)"
-  add: "oklch(0.76 0.13 155)"
-  add-bg: "oklch(0.76 0.13 155 / 0.10)"
-  del: "oklch(0.72 0.15 22)"
-  del-bg: "oklch(0.72 0.15 22 / 0.11)"
+  ground: "oklch(0.935 0.022 282)"
+  blob-a: "oklch(0.82 0.11 2 / 0.75)"
+  blob-b: "oklch(0.66 0.19 292 / 0.55)"
+  glass: "oklch(0.995 0.004 282 / 0.70)"
+  glass-strong: "oklch(0.995 0.004 282 / 0.94)"
+  glass-edge: "oklch(1 0 0 / 0.75)"
+  card: "oklch(1 0 0 / 0.80)"
+  card-sel: "oklch(1 0 0)"
+  soft: "oklch(0.962 0.014 282)"
+  soft-2: "oklch(0.93 0.024 282)"
+  lane: "oklch(0.97 0.012 282 / 0.55)"
+  line: "oklch(0.90 0.02 282)"
+  text: "oklch(0.27 0.065 276)"
+  text-2: "oklch(0.43 0.045 276)"
+  text-3: "oklch(0.52 0.035 276)"
+  code-bg: "oklch(0.985 0.006 282)"
+  dot-off: "oklch(0.86 0.03 282)"
+  primary: "oklch(0.50 0.23 287)"
+  primary-2: "oklch(0.53 0.20 272)"
+  primary-ink: "oklch(0.47 0.22 287)"
+  primary-soft: "oklch(0.55 0.23 287 / 0.11)"
+  on-primary: "oklch(1 0 0)"
+  ring: "oklch(0.50 0.23 287)"
+  side-a: "oklch(0.55 0.18 300)"
+  side-b: "oklch(0.49 0.15 270)"
+  on-side: "oklch(1 0 0)"
+  on-side-2: "oklch(1 0 0 / 0.90)"
+  attn: "oklch(0.74 0.16 62)"
+  attn-ink: "oklch(0.50 0.14 55)"
+  attn-soft: "oklch(0.80 0.15 70 / 0.18)"
+  attn-line: "oklch(0.74 0.16 62 / 0.55)"
+  work: "oklch(0.60 0.17 255)"
+  work-ink: "oklch(0.47 0.17 258)"
+  work-soft: "oklch(0.60 0.17 255 / 0.12)"
+  done: "oklch(0.68 0.16 150)"
+  done-ink: "oklch(0.45 0.12 152)"
+  done-soft: "oklch(0.68 0.16 150 / 0.14)"
+  hold: "oklch(0.63 0.20 15)"
+  hold-fill: "oklch(0.55 0.20 15)"
+  hold-ink: "oklch(0.50 0.19 15)"
+  hold-soft: "oklch(0.63 0.20 15 / 0.11)"
+  hold-line: "oklch(0.63 0.20 15 / 0.45)"
+  add-bg: "oklch(0.68 0.16 150 / 0.13)"
+  del-bg: "oklch(0.63 0.20 15 / 0.11)"
 typography:
   headline:
-    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Noto Sans Thai, Leelawadee UI, sans-serif"
-    fontSize: "19px"
-    fontWeight: 650
-    lineHeight: 1.25
-    letterSpacing: "-0.015em"
+    fontFamily: "Figtree, Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Leelawadee UI, Noto Sans Thai, sans-serif"
+    fontSize: "23px"
+    fontWeight: 750
+    lineHeight: 1.2
+    letterSpacing: "-0.02em"
   title:
-    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Noto Sans Thai, Leelawadee UI, sans-serif"
-    fontSize: "14.5px"
-    fontWeight: 650
+    fontFamily: "Figtree, Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Leelawadee UI, Noto Sans Thai, sans-serif"
+    fontSize: "15px"
+    fontWeight: 700
     lineHeight: 1.4
   body:
-    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Noto Sans Thai, Leelawadee UI, sans-serif"
+    fontFamily: "Figtree, Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Leelawadee UI, Noto Sans Thai, sans-serif"
     fontSize: "14px"
     fontWeight: 400
     lineHeight: 1.5
   body-sm:
-    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Noto Sans Thai, Leelawadee UI, sans-serif"
+    fontFamily: "Figtree, Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Leelawadee UI, Noto Sans Thai, sans-serif"
     fontSize: "13px"
-    fontWeight: 400
+    fontWeight: 500
     lineHeight: 1.5
   label:
-    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Noto Sans Thai, Leelawadee UI, sans-serif"
+    fontFamily: "Figtree, Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Leelawadee UI, Noto Sans Thai, sans-serif"
     fontSize: "12.5px"
-    fontWeight: 600
+    fontWeight: 650
     lineHeight: 1.5
   meta:
-    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Noto Sans Thai, Leelawadee UI, sans-serif"
+    fontFamily: "Figtree, Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Leelawadee UI, Noto Sans Thai, sans-serif"
     fontSize: "11.5px"
     fontWeight: 500
     lineHeight: 1.5
     fontFeature: "tnum"
   figure:
-    fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Noto Sans Thai, Leelawadee UI, sans-serif"
-    fontSize: "22px"
-    fontWeight: 650
-    letterSpacing: "-0.01em"
+    fontFamily: "Figtree, Segoe UI Variable Text, Segoe UI, system-ui, -apple-system, Leelawadee UI, Noto Sans Thai, sans-serif"
+    fontSize: "30px"
+    fontWeight: 750
+    letterSpacing: "-0.03em"
     fontFeature: "tnum"
   mono:
     fontFamily: "Cascadia Code, Cascadia Mono, JetBrains Mono, ui-monospace, Consolas, monospace"
@@ -76,268 +91,304 @@ typography:
     fontWeight: 400
     lineHeight: 1.6
 rounded:
-  xs: "4px"
-  sm: "6px"
-  md: "8px"
-  lg: "10px"
+  xs: "8px"
+  sm: "10px"
+  md: "14px"
+  lg: "18px"
+  xl: "26px"
   pill: "999px"
 spacing:
   2xs: "4px"
   xs: "6px"
   sm: "8px"
-  md: "12px"
-  lg: "16px"
-  xl: "20px"
+  md: "10px"
+  lg: "14px"
+  xl: "18px"
+  2xl: "24px"
 components:
   button:
-    backgroundColor: "{colors.surface-2}"
+    backgroundColor: "{colors.soft}"
     textColor: "{colors.text}"
     rounded: "{rounded.sm}"
-    padding: "0 11px"
-    height: "30px"
+    padding: "0 14px"
+    height: "34px"
   button-hover:
-    backgroundColor: "{colors.surface-3}"
+    backgroundColor: "{colors.soft-2}"
   button-primary:
-    backgroundColor: "{colors.accent}"
-    textColor: "{colors.accent-ink}"
+    backgroundColor: "linear-gradient(135deg, {colors.primary}, {colors.primary-2})"
+    textColor: "{colors.on-primary}"
     rounded: "{rounded.sm}"
-    padding: "0 11px"
-    height: "30px"
+    padding: "0 14px"
+    height: "34px"
   button-ghost:
     backgroundColor: "transparent"
     textColor: "{colors.text-2}"
     rounded: "{rounded.sm}"
-    height: "30px"
+    height: "34px"
   button-attn:
     backgroundColor: "{colors.attn}"
-    textColor: "oklch(0.22 0.04 70)"
+    textColor: "oklch(0.25 0.05 60)"
     rounded: "{rounded.sm}"
-    height: "30px"
+    height: "34px"
   button-hold:
-    backgroundColor: "{colors.hold}"
-    textColor: "oklch(0.18 0.04 25)"
+    backgroundColor: "{colors.hold-fill}"
+    textColor: "oklch(1 0 0)"
     rounded: "{rounded.sm}"
-    height: "30px"
+    height: "34px"
   icon-button:
     textColor: "{colors.text-2}"
     rounded: "{rounded.sm}"
-    size: "30px"
+    size: "34px"
   icon-button-on:
-    backgroundColor: "{colors.accent-soft}"
-    textColor: "{colors.accent}"
+    backgroundColor: "{colors.primary-soft}"
+    textColor: "{colors.primary-ink}"
   chip:
-    backgroundColor: "{colors.surface}"
+    backgroundColor: "{colors.soft}"
+    textColor: "{colors.text-2}"
+    rounded: "{rounded.pill}"
+    padding: "0 11px"
+    height: "28px"
+  pill:
+    backgroundColor: "{colors.soft}"
     textColor: "{colors.text-2}"
     rounded: "{rounded.pill}"
     padding: "0 9px"
-    height: "26px"
+    height: "22px"
   input:
-    backgroundColor: "{colors.bg-sunk}"
-    textColor: "{colors.text}"
-    rounded: "{rounded.sm}"
-    padding: "0 10px"
-    height: "34px"
-  key:
-    backgroundColor: "{colors.surface-2}"
-    textColor: "{colors.text-2}"
-    typography: "{typography.mono}"
-    rounded: "5px"
-    height: "24px"
-  room-row:
+    backgroundColor: "{colors.soft}"
     textColor: "{colors.text}"
     rounded: "{rounded.md}"
-    padding: "8px"
-  room-row-current:
-    backgroundColor: "{colors.surface-2}"
+    padding: "0 14px"
+    height: "40px"
+  key:
+    backgroundColor: "{colors.card-sel}"
+    textColor: "{colors.text-2}"
+    typography: "{typography.mono}"
+    rounded: "7px"
+    height: "26px"
+  room-card:
+    backgroundColor: "{colors.card}"
+    textColor: "{colors.text}"
+    rounded: "{rounded.lg}"
+    padding: "14px"
+  room-card-current:
+    backgroundColor: "{colors.card-sel}"
   prompt-card:
     backgroundColor: "{colors.attn-soft}"
     rounded: "{rounded.lg}"
-    padding: "12px"
+    padding: "16px"
   output:
-    backgroundColor: "{colors.bg-sunk}"
+    backgroundColor: "{colors.soft}"
     textColor: "{colors.text-2}"
     rounded: "{rounded.lg}"
+  composer:
+    backgroundColor: "{colors.card-sel}"
+    rounded: "26px"
+    height: "52px"
   panel:
-    backgroundColor: "{colors.rail}"
+    backgroundColor: "{colors.glass-strong}"
+    rounded: "{rounded.xl}"
     width: "380px"
   popover:
-    backgroundColor: "{colors.surface-2}"
+    backgroundColor: "{colors.glass-strong}"
     rounded: "{rounded.lg}"
-    padding: "6px"
+    padding: "8px"
+  nav-item:
+    textColor: "{colors.on-side-2}"
+    rounded: "{rounded.sm}"
+    height: "42px"
 ---
 
 # Design System: Agent Mission Control
 
 ## Overview
 
-**Creative North Star: "The Night-Shift Triage Desk"**
+**Creative North Star: "The Glass Control Room"**
 
-The dashboard sits on a second monitor beside a row of terminals, usually at night, and it borrows their material: graphite tinted toward blue ink, hairline borders, flat panes. It is a desk with one path through it: who needs me, then what that room is doing, then act. The resting state is quiet so that the one thing asking for the human can be seen from across the room.
+The dashboard sits beside the terminals and does one job: say what every Claude Code room is doing right now, without opening it. Its world is the one the author pinned with a reference image and two sentences: a soft lavender room ("สีประมาณนี้ ขอบมนๆ โปร่งใส transparent") where every room can be read from the overview, with a short summary and its status ("มองเห็นจากภาพรวมได้เลย... มีสรุปสั้นๆ ให้อ่านและ status เป็นอะไร").
 
-Density is that of a working tool, not a marketing page. Body text is 14px, metadata drops to 11.5–12.5px, and every number is tabular. Colour is rationed hard: one cool cyan signal for interaction and focus, and four status hues that each mean exactly one thing. Depth comes from tonal steps of the same graphite, never from decorative shadow; only things that float above the desk (popovers, dialogs, toasts) lift.
+So the ground is lavender with two blurred colour fields, the shell is a violet gradient, and the work happens on a large sheet of white glass with generous radii. Everything that is the author's to act on is violet; everything that says how a room is doing uses one of four status hues and nothing else. The room card, not the log, is the unit of the product: status pill, stage dots, the active tool, a three-line summary (or the question it is asking), and the branch, tokens and sub-agents underneath.
 
-The language is Thai prose with English agent terms (Plan, Code, Verify, Done, TL;DR, Sub-Agent, tool names) mixed in one line, so the type stack carries a system Thai face and labels never rely on uppercase or tracking, which Thai cannot express.
+The language is Thai prose with English agent terms (Plan, Code, Verify, Done, TL;DR, Sub-Agent, tool names) in one line. Figtree sets the Latin half, the system Thai face (Leelawadee UI on Windows, Noto Sans Thai elsewhere) sets the Thai half, and labels never rely on uppercase or tracking, which Thai cannot express.
 
 **Key Characteristics:**
-- Graphite surfaces on a single hue (255), stepped by lightness only.
-- One signal accent (cyan, hue 205) for interaction, focus, selection and the resting meter.
-- Four status hues with fixed meanings: amber needs you, blue working, green done, red quota hold.
-- Hairline 1px borders, 6–10px radii, flat panes; shadow only on overlays.
-- An authored line-icon set (24 grid, 1.75 stroke, round caps) drawn in currentColor; no emoji.
-- Inbox + Focus: a grouped rail of rooms, one focused room, panels on demand.
+- Lavender ground (hue 282) with a pink and a violet blurred field; a violet-to-periwinkle gradient shell.
+- One large translucent glass work card (26px radius, 28px backdrop blur, violet-tinted shadow) holding list, room and inspector.
+- Rich room cards (18px radius) that summarise each room; the open one slides toward the room it opens.
+- One violet primary for acting and selection, drawn as a gradient on buttons, the send circle and user chat bubbles.
+- Four status hues with fixed meanings: amber needs you, blue working, green done, rose quota hold.
+- An authored line-icon set (24 grid, 1.75 stroke, round caps) in `currentColor`; no emoji.
+- Light and dark follow the system and can be pinned; dark is deep indigo glass with the same structure.
 
 ## Colors
 
-A single cool graphite family with one cyan signal and four semantic status hues, all defined in OKLCH, which is the normative source.
+A lavender family on hue 276–287 with one violet signal and four semantic status hues, all in OKLCH, which is the normative source. Values above are the light theme; dark values are listed after the roles.
 
 ### Primary
-- **Terminal Cyan** (`accent`): the only interaction colour. Primary buttons (filled, with `accent-ink` text), focus rings, the selected state of icon buttons, toggles and strip buttons (on `accent-soft`), switches, the caret, links, the "Claude" turn marker in output, and the resting fill of every meter. It is also the brand mark's colour.
-- **Deep Ink** (`accent-ink`): text and glyphs set on a filled cyan surface.
+- **Violet** (`primary` → `primary-2`, drawn as a 135° gradient): the only "act here / this is selected" colour. Primary buttons, the send circle, the current stage step, pressed segments, switches when on, user turns in the output, the strip's count badges.
+- **Violet Ink** (`primary-ink`): violet as text or glyph on a light surface: the Claude turn marker, list bullets, links, the TL;DR tag, pressed icon and strip buttons (on `primary-soft`).
+- **Focus Ring** (`ring`): every keyboard focus outline. Equal to `primary` in light; a lighter violet in dark so it clears 3:1 on indigo glass.
 
 ### Secondary (status hues; meaning only)
-- **Lamp Amber** (`attn`, with `attn-soft` fill and `attn-line` border): needs you. The attention count in the top bar, the "รอคุณ" rail group, the pending prompt card, its cursor option, the current stage step when the room waits on the human.
-- **Working Blue** (`work`, `work-soft`): working. The spinning status glyph and the current stage step of a running room.
-- **Done Green** (`done`, `done-soft`): done. Finished stage steps, finished-room glyphs, the connection dot when live, success toasts, the A/U file badge.
-- **Hold Red** (`hold`, `hold-soft`, `hold-line`, with `hold-text` for emphasis on red fills): quota hold. The hold banner, the held-room notice, the held composer, the "resume now" button, and the meter fill below the hold threshold.
-- **Diff Green / Diff Red** (`add` / `add-bg`, `del` / `del-bg`): line additions and deletions in diffs and the +/− deltas beside files. They share hue with done and hold but are separate tokens so diff colour never has to change when status colour does.
+- **Lamp Amber** (`attn`, `attn-ink`, `attn-soft`, `attn-line`): needs you. The "รอคุณ" group head and pill, the prompt card, its cursor option, the current stage step while the room waits, the nav badge (amber ink on white).
+- **Working Blue** (`work`, `work-ink`, `work-soft`): working. The spinning avatar, the "กำลังทำงาน" pill, the current stage dot, tool names in output.
+- **Done Green** (`done`, `done-ink`, `done-soft`): done. Finished steps and dots, done avatars, the A/U file badge, success toasts, the live connection dot.
+- **Quota Rose** (`hold`, `hold-ink`, `hold-soft`, `hold-line`, `hold-fill`): quota hold. The hold banner, the held-room notice, the held composer and its note chip, the low end of meters. `hold-fill` is the darker rose used under white text (the "ทำต่อเลย" button).
+- **Diff tints** (`add-bg`, `del-bg`): row tints in diffs. They share hue with done and hold but are separate tokens.
 
 ### Neutral
-- **Night Desk** (`bg`): page background, top bar, icon strip, IDE overlay.
-- **Sunk Well** (`bg-sunk`): wells that hold machine text or input: live output, code views, search, text and number fields, segmented controls.
-- **Rail Graphite** (`rail`): the room rail, side panels, the IDE file list.
-- **Surface / Surface 2 / Surface 3** (`surface`, `surface-2`, `surface-3`): three raised steps. Cards, chips and notices sit on `surface`; buttons, the current room and popovers on `surface-2`; hover states, pressed segments, badges, toasts and meter tracks on `surface-3`.
-- **Hairline / Soft Hairline** (`line`, `line-soft`): every border and divider. `line-soft` separates regions; `line` outlines controls and the current selection.
-- **Text / Text 2 / Text 3** (`text`, `text-2`, `text-3`): primary copy; secondary copy and resting icon buttons; metadata, placeholders, counts and inactive labels.
+- **Lavender Ground** (`ground`, with `blob-a` pink and `blob-b` violet fields blurred 70px behind everything).
+- **Glass** (`glass`, `glass-strong`, `glass-edge`): the work card at 70%, floating sheets (panel, popover, IDE, dialog, toast) at 94%, and a 1px inner white edge on every glass and card surface.
+- **Cards** (`card`, `card-sel`): room cards and notices at 80% white; hover, selected and the composer at solid white.
+- **Wells** (`soft`, `soft-2`, `lane`, `code-bg`): the output well, chips, inputs and resting buttons (`soft`); hover and tracks (`soft-2`); overview lanes (`lane`); code views (`code-bg`).
+- **Line** (`line`): table borders, dividers inside panels, the IDE bar and file list edge.
+- **Text / Text 2 / Text 3** (`text`, `text-2`, `text-3`): headings and primary copy; summaries and output prose; metadata, timestamps, placeholders.
+- **Shell** (`side-a` → `side-b`, `on-side`, `on-side-2`): the sidebar gradient and its white text.
+
+### Dark theme
+Deep indigo glass, same structure: `ground` 0.175/0.035/285, `glass` 0.245 at 62%, `card` 0.30 at 70%, `card-sel` 0.345, text 0.96 / 0.83 / 0.71, `primary` 0.56/0.22/287 → `primary-2` 0.55/0.17/268 (still dark enough for white text), `primary-ink` and `ring` lifted to 0.80 / 0.78, status inks lifted to ~0.80 lightness, shell 0.43/0.165/303 → 0.34/0.12/274. The theme follows `prefers-color-scheme`; the sidebar's theme button cycles auto → light → dark and pins it with `data-theme` on `<html>`.
 
 ### Named Rules
-**The Meaning-Only Rule.** Status hues carry meaning only: amber means needs you, blue means working, green means done or a diff addition, red means quota hold or a diff deletion. Never use them for decoration, category or emphasis.
+**The Meaning-Only Rule.** Status hues carry meaning only: amber means needs you, blue means working, green means done or a diff addition, rose means quota hold or a diff deletion. Never use them for decoration, category or emphasis.
 
-**The One Signal Rule.** Cyan is the only colour that says "you can act here" or "this is selected". It never stands in for a status.
+**The One Violet Rule.** Violet is the only colour that says "you can act here" or "this is selected". It never stands in for a status, and a status never borrows it.
 
-**The Rising Meter Rule.** Meters fill with the accent at rest and shift to amber, then red, as they near a limit. The 5-hour usage meter turns amber below 25% remaining and red below the hold threshold (8% by default); the context meter turns amber above 60% and red above 85%.
+**The Rising Meter Rule.** Meters fill violet at rest (white inside the violet sidebar) and shift to amber, then rose, as they near a limit. The 5-hour usage meter turns amber below 25% remaining and rose below the hold threshold (8% by default), with a tick at the threshold; the context meter turns amber above 60% and rose above 85%. A 0% meter draws no fill.
 
-**The Neutral Modification Rule.** A modified file's M badge is neutral (`text-2` on `surface-2`). Only additions (A, U) take green and deletions (D) take red, so the file list is not a field of colour.
+**The Neutral Modification Rule.** A modified file's M badge is neutral (`text-2` on `soft-2`). Only additions (A, U) take green and deletions (D) take rose, so the file list is not a field of colour.
+
+**The Measured Contrast Rule.** Contrast is measured over the composited glass, not over the token alone. Body and meta text clear 4.5:1 in both themes (`text-3` on a card: 5.5 light, 5.8 dark), status inks on their soft fills clear 4.9:1, and the shell gradient was deepened until its 90% white labels clear 4.5:1 at the gradient's lightest point. White text only sits on `primary` (6.7:1 light, 5.1:1 dark) or `hold-fill` (5.4:1), never on `hold` or the light shell stops. The off-stage dots (1.5–1.7:1) are the one exception, and only because the stage is always named in text beside them.
 
 ## Typography
 
-**Display Font:** none; the system has no display face.
-**Body Font:** Segoe UI Variable Text (with Segoe UI, system-ui, -apple-system, then Noto Sans Thai and Leelawadee UI for Thai)
-**Label/Mono Font:** Cascadia Code (with Cascadia Mono, JetBrains Mono, ui-monospace, Consolas)
+**Display Font:** none; Figtree at 750 carries every heading.
+**Body Font:** Figtree (self-hosted, latin and latin-ext subsets, SIL OFL 1.1; licence in `public/fonts/OFL.txt`), falling back to Segoe UI Variable Text, Segoe UI, system-ui, then Leelawadee UI and Noto Sans Thai for Thai.
+**Mono Font:** Cascadia Code (with Cascadia Mono, JetBrains Mono, ui-monospace, Consolas), ligatures off.
 
-**Character:** The native Windows UI face, the same one the terminals' chrome uses, paired with the terminal's own mono. It reads as part of the desktop, not as a branded site, and it renders Thai and Latin in one line without a seam.
+**Character:** Figtree's round, open geometry matches the rounded glass, and it stays friendly at 750 without turning into a display face. Thai falls through to the system face per glyph, so a mixed line keeps one rhythm without a webfont for Thai.
 
 ### Hierarchy
-- **Headline** (650, 19px, 1.25, −0.015em): the focused room's name. One per view.
-- **Title** (650, 14.5–16px, 1.4): the prompt question, dialog and empty-state headings, panel titles (14px), the brand name.
-- **Body** (400, 14px, 1.5): TL;DR, composer, general copy. Output prose runs at 13.5px, 1.6, capped at 80ch.
-- **Body Small** (400, 13px): list rows, popover items, form fields, toasts.
-- **Label** (600–650, 12.5px): rail group heads, stage steps, segment buttons, panel section heads, button text (13px, 550).
-- **Meta** (500, 11.5–12px, tabular): timestamps, token counts, file paths under names, tile footers.
-- **Figure** (650, 22px, tabular, −0.01em): the one large number, remaining usage in the Usage panel.
-- **Mono** (400, 12.5px, 1.6): live output in raw mode, code and diff views, code blocks, inline code (0.88em), tool lines, branch names, keycaps, file status badges and diff deltas.
+- **Headline** (750, 23px, 1.2, −0.02em): the open room's name, the list title, the overview title. One per region.
+- **Title** (700, 15px, 1.4): the prompt question, panel titles (17px/750), dialog titles (19px/750), room names on cards (14.5px/700).
+- **Body** (400, 14px, 1.5): TL;DR and the composer. Output prose runs at 13.5px, 1.6, capped at 80ch; card summaries at 13px, clamped to three lines.
+- **Body Small** (500–550, 13px): popover items, file rows, form fields, toasts, options in the prompt card (13.5px/550).
+- **Label** (650–700, 12.5px): group heads, stage steps, chips, segment buttons, panel section heads.
+- **Meta** (500, 11.5px, tabular): timestamps, token counts, card footers, paths under file names. Pills are 11.5px/650.
+- **Figure** (750, 30px, tabular, −0.03em): remaining usage in the Usage panel; the sidebar shows the same number at 22px.
+- **Mono** (400, 12.5px, 1.6): raw output, code and diff views, code blocks, inline code (0.86em), tool lines, branches, paths, keycaps, file badges.
 
 ### Named Rules
-**The Mono-for-Machine Rule.** Mono marks text that came from or goes to the machine: code, paths, branches, tool calls, keys, diff counts. Human-facing numbers (tokens, cost, percentages, times) stay in the UI face with tabular figures.
+**The Mono-for-Machine Rule.** Mono marks text that came from or goes to the machine: code, paths, branches, tool calls, keys, diff counts. Human-facing numbers (tokens, cost, percentages, times) stay in Figtree with tabular figures.
 
-**The Sentence-Case Label Rule.** Group heads and section labels are sentence case, set apart by weight (650) and `text-3` colour, never by uppercase or letter-spacing, because the Thai half of every label has no case.
+**The No-Ligature Rule.** Code, keys and mono text render with `font-variant-ligatures: none`. Cascadia's ligatures turn `===` into a single glyph, and a diff must show exactly what was typed.
+
+**The Sentence-Case Label Rule.** Group heads and section labels are sentence case, set apart by weight and `text-3`, never by uppercase or letter-spacing.
 
 ## Layout
 
-A full-height application grid, no page scroll on desktop. Rows: a 48px top bar, an optional hold banner, then the app frame. The frame is three columns: a 300px rail, a fluid focus column, and an inspector made of an optional 380px panel plus a 60px icon strip on the right edge. (The direction contract sketched a 48px strip; the build settled on 60px so the strip buttons can carry Thai labels under their icons.)
+A full-height application on desktop with no page scroll. The shell pads 18px around two columns: the sidebar and the glass work card. The sidebar is 236px and tucks 28px under the work card's rounded left edge, so the card reads as laid on top of it.
 
-The focus column stacks room header (name, branch/model/tokens/context chips), the 4-step stage stepper, the prompt card when one is pending, a one-line TL;DR, live output filling the remaining height, and the composer pinned at the bottom. Gaps inside the focus column are 12px; its padding is 16px top and 20px sides. The rail pads 12px, rows 8px. A grid view swaps rail and focus for an overview of 250px-minimum tiles in an auto-fill grid with 8px gaps.
+The work card is a grid: an optional hold banner across the top row, then three columns: the room list (372px), the open room (fluid), and a 64px icon strip on the card's right edge. Inspector panels (380px) float inside the card to the left of the strip, inset 14px from top and bottom.
 
-Spacing steps on 4, 6, 8, 12, 16, 20px. Control heights are 26px (small), 30px (default), 32–34px (search, text inputs).
+The open room stacks: title row (name, edit, VS Code, pin, more), a chip row (branch, model/effort, tokens and cost, context meter, terminal connection), the four-step stepper, notices (closed, hold), the prompt card, a TL;DR line, the output well filling the rest, then the composer pinned at the bottom. Gaps are 14px; padding is 24px top, 24px right, 18px left.
 
-Responsive: at 1180px the rail narrows to 260px and the panel to 340px. At 900px the page becomes a single scrolling column (rail above focus), the brand name and secondary meter text hide, the icon strip becomes a fixed 58px bottom bar, and panels become a bottom sheet (70vh, top corners rounded 10px). The IDE overlay stacks its file list above the code.
+The overview replaces list, room and strip with a status summary (counts per status as pills) and project lanes: a grid of `minmax(310px, 1fr)` columns, each a soft well holding that project's room cards, lanes holding a waiting room first.
+
+Spacing steps on 4, 6, 8, 10, 12, 14, 18, 24px. Control heights: 28px small, 34px default, 40px search and text inputs, 42px sidebar items.
+
+### Responsive
+- **≤1280px:** sidebar 212px, list 330px, panel 340px.
+- **901–1180px:** the sidebar folds into an 84px icon rail: brand mark with the connection dot on its corner, a 46px round "new room" button, icon-only nav with the attention badge on the icon, the usage card reduced to its percentage and bar, tools stacked. Labels stay in the DOM for screen readers. List 312px.
+- **≤900px:** one scrolling page. The sidebar becomes a top card (nav as a horizontal row, usage meter inline), the list and the open room follow, the strip becomes a fixed bottom bar, and panels become a 70vh bottom sheet above it. The work card drops its backdrop blur here, because `backdrop-filter` makes an element the containing block for fixed descendants and would pin the bar and sheet to the card instead of the screen.
+
+### Named Rules
+**The Pinned Composer Rule.** The composer never moves and nothing paints under it. When header, notices, prompt card and TL;DR leave too little room, the column scrolls as a whole and the output keeps a 260px floor.
+
+**The Blur-Free Ancestor Rule.** No ancestor of a `position: fixed` element may carry `backdrop-filter`, `filter` or `transform`.
 
 ## Elevation & Depth
 
-The desk is flat. Depth is tonal: `bg-sunk` below the page for wells, `bg` for the page, `rail` and `surface` through `surface-3` for raised steps, all on one hue so the eye reads lightness as height. Borders, not shadows, separate panes. Only elements that float above the desk carry shadow, tinted with the same blue-black.
+Depth is glass over colour. The ground's blurred fields show through the 70% work card (backdrop blur 28px, saturate 1.3), cards sit on it at 80% white, and floating sheets sit at 94% with stronger blur. Every glass and card surface has a 1px inner white edge (`glass-edge`) instead of a border. Shadows are violet-tinted in light and near-black indigo in dark, never neutral grey.
 
 ### Shadow Vocabulary
-- **Popover lift** (`box-shadow: 0 12px 32px -6px oklch(0.05 0.01 255 / 0.65), 0 2px 6px oklch(0.05 0.01 255 / 0.4)`): model/effort and "more" popovers.
-- **Dialog lift** (`box-shadow: 0 24px 60px -12px oklch(0.05 0.01 255 / 0.7)`, backdrop `oklch(0.1 0.01 255 / 0.6)`): the new-room dialog.
-- **Toast lift** (`box-shadow: 0 12px 28px -8px oklch(0.05 0.01 255 / 0.7)`): transient confirmations.
+- **Card** (`0 8px 24px -14px oklch(0.42 0.16 287 / 0.30)`): room cards, notices, search, the composer at rest, prompt options.
+- **Lift** (`0 22px 44px -18px oklch(0.42 0.18 287 / 0.42)`): the open room card, popovers, toasts, hovered prompt options, the focused composer.
+- **Shell** (`0 40px 90px -36px oklch(0.38 0.16 287 / 0.45)`): the sidebar, the work card, panels, the IDE, dialogs.
+- **Primary** (`0 10px 22px -10px oklch(0.50 0.23 287 / 0.65)`): violet fills (primary buttons, send, the current step, user bubbles).
 
 ### Named Rules
-**The Overlays-Only Lift Rule.** Nothing that sits in the layout casts a shadow. Shadow means "this floats and will go away".
+**The Tinted Shadow Rule.** A shadow carries the violet of the room it sits in. Grey or black drop shadows are off-world.
 
 ## Shapes
 
-Gently rounded rectangles throughout: 6px for controls (buttons, inputs, segments, file rows), 8px for rows, notices, tiles and toasts, 10px for the large containers (prompt card, output well, composer, popovers, dialogs, bottom sheets). 4px for tiny tags (TL;DR label, inline code, file badges). Pills (999px) are reserved for chips and the attention count. Keycaps are 5px with a 2px bottom border, the one place the system imitates a physical object. Status and stage icons sit in circles. All borders are 1px hairlines; the only dashed border is the "connect" hint card, echoing the dashed idle glyph.
+Rounded throughout and rounder as things get bigger: 8px for small controls (small buttons, keycaps 7px, popover rows), 10px for buttons and nav items, 14px for inputs, prompt options, code blocks and the new-room button, 18px for room cards, the prompt card, the output well and popovers, 26px for the work card, sidebar, panels, IDE, dialogs, overview lanes and the composer pill. Pills (999px) are for chips, status pills, badges and toasts. Avatars, stage steps and the send button are circles.
 
 ## Components
 
 ### Buttons
-Compact and quiet; colour appears only where it means something.
-- **Shape:** 6px radius, 30px high (26px small), 11px side padding, 13px/550 text, 6px icon gap.
-- **Default:** `surface-2` with a `line` border; hover steps to `surface-3`.
-- **Primary:** filled cyan with `accent-ink` text; hover lightens to `oklch(0.86 0.09 205)`. One per region (New room, Send).
-- **Ghost:** transparent, `text-2`; hover fills `surface-2` and brightens text.
-- **Attention / Hold:** amber or red fills with dark ink, used only for actions that resolve that status (resume now during a hold).
-- **Icon button:** 30px (26px small) square, `text-2`; hover `surface-2`; selected state cyan on `accent-soft`.
-- **Focus:** a 2px cyan outline offset 2px, everywhere. Disabled: 45% opacity, not-allowed cursor.
-- **Transitions:** background, border and colour over 120ms.
+- **Shape:** 10px radius, 34px high (28px small), 14px side padding, 13px/600 text, 7px icon gap.
+- **Default:** `soft` fill; hover `soft-2`.
+- **Primary:** the violet gradient with white text and the primary shadow; hover lifts 1px. One per region (new room in dialogs and empty states, create, save).
+- **Ghost:** transparent, `text-2`; hover fills `soft`.
+- **Attention / Hold:** amber with dark ink ("อนุญาต"), or `hold-fill` with white ("ทำต่อเลย"). Only for actions that resolve that status.
+- **Icon button:** 34px (28px small) square, `text-2`; hover `soft`; pressed violet ink on `primary-soft`.
+- **Focus:** a 2px `ring` outline offset 2px that follows the element's own radius. Disabled: 45% opacity.
 
-### Chips
-- **Style:** 26px pill, `surface` fill, `line-soft` border, `text-2` at 12.5px, 6px gap for a leading 14px icon. Used for branch, model/effort, tokens/cost and context in the room header, and for quick actions under the composer.
-- **State:** clickable chips brighten to `surface-2` and `line` on hover. Toggle chips go cyan on `accent-soft` when pressed. The held-note chip under the composer takes the hold treatment.
+### Chips and Pills
+- **Chip:** 28px pill on `soft`, `text-2` at 12.5px, 14px leading icon. Branch, model/effort, tokens/cost and context in the room header; quick actions under the composer. Toggle chips turn violet ink on `primary-soft` when pressed; the held note takes the hold treatment.
+- **Status pill:** 22px, 11.5px/650, the status ink on its soft fill (neutral for idle and closed).
 
-### Cards / Containers
-- **Corner Style:** 8px (notices, tiles), 10px (prompt card, output, composer).
-- **Background:** `surface` for notices and tiles; `bg-sunk` for the output well; the prompt card uses `attn-soft` with an `attn-line` border; hold notices use `hold-soft` with `hold-line`.
-- **Shadow Strategy:** none (see Elevation & Depth).
-- **Internal Padding:** 11–14px for notices and tiles, 12px for the prompt card, 12px/16px inside output.
-
-### Inputs / Fields
-- **Style:** `bg-sunk` well, `line` (or `line-soft` for search) 1px border, 6px radius, 28–34px high, cyan caret.
-- **Focus:** the border turns cyan; no glow. The composer box behaves the same and turns to the hold treatment while rooms are held.
-- **Switch:** 34×20 track on `surface-3`, cyan when on, with the knob in `accent-ink`; the knob slides on the standard ease-out.
-
-### Navigation
-- **Rail:** a search well, a Live/History segmented control, then rooms grouped by attention ("รอคุณ", working, idle/done) with sentence-case group heads in 12px/650 `text-3`; the attention group head is amber.
-- **Room row:** a 20px status glyph, name (13.5px/600) over four stage dots and the active tool, with age and token count right-aligned in tabular meta. Hover `surface`; the current room sits on `surface-2` with a `line` border.
-- **Icon strip:** 50px-wide stacked icon-over-label buttons (10.5px/600) for Files, Agents, History, Usage, with a neutral count badge; pressed state cyan on `accent-soft`.
-- **Segmented control:** a `bg-sunk` track with 2px inset; the pressed segment lifts to `surface-3`.
+### Room Card (signature)
+The unit of the product. A 44px gradient avatar in the status hue with the status glyph (and a pin dot when pinned); then the room name and relative time; a row with the status pill, four stage dots and the stage plus active tool ("Code · Edit"); the summary, which is the room's question in amber ink when it waits on you and otherwise its TL;DR (three lines, inline code kept); and a meta footer of branch, fresh tokens and sub-agent count. Cards are `card` with the card shadow; hover goes to solid white. The open room's card turns solid white, takes the lift shadow and slides 10px toward the room it opens (a transform, so its text never re-wraps); on a phone it gets a 2px violet inner ring instead.
 
 ### Prompt Card (signature)
-The one amber container. It holds the pending permission question (14.5px/650), numbered options as rows with keycaps, the cursor option outlined in amber with an amber "Enter" hint, and a row of keycap buttons (up, down, enter, Esc). It appears only when a prompt is pending and sits directly under the stepper, above everything else the room says.
+The one amber container: `attn-soft` with an `attn-line` inner edge, 18px radius, 16px padding. The question at 15px/700, up to four lines of context, numbered options as white rows with keycaps (the cursor option ringed in amber with an amber "Enter" hint), and keycap buttons for up, down, enter and Esc. A pending tool approval shows the command in mono with "อนุญาต" and "ปฏิเสธ (Esc)". It sits under the stepper, above everything else the room says, and approval keys appear nowhere else.
 
-### Stage Stepper (signature)
-Four 24px circular steps joined by 1px lines: finished steps green, the current step blue (amber when it waits on the human), future steps neutral. The rail repeats it as four 5px dots.
+### Stage Stepper
+Four 28px circular steps joined by 2px lines: finished steps green-ink checks on `done-soft`, the current step a violet gradient circle (amber while the room waits on you), future steps neutral. Cards repeat it as four 6px dots: green done, blue (or amber) current, `dot-off` ahead. The dots repeat the stage named beside them, so they are decorative for assistive tech.
 
-### Status Glyphs
-Each room state maps to one authored glyph: needs you is an amber diamond with an exclamation, working is a blue spinner (1.1s linear rotation), done is a green check-circle, held is a red pause-circle, idle is a dashed neutral ring, closed is a neutral circle with a bar. Shape and colour both carry the state, so it reads without colour.
+### Output as Conversation
+The output well (`soft`, 18px) shows the transcript as a chat: user turns are right-aligned violet gradient bubbles (18/18/6/18 radius, up to 78% wide); Claude turns are white cards (6/18/18/18) headed by a violet "Claude" marker; tool calls are mono lines with the tool name in `work-ink`; Markdown headings, lists, tables, quotes and fenced code render inside. A raw toggle shows the plain text in mono, A−/A+ change its size, and it sticks to the bottom unless the reader scrolled up.
+
+### Composer
+A white pill (26px radius) with an auto-growing textarea and a 40px violet send circle; on focus it lifts and takes a 2px `ring` inner edge. Below it: quick-action chips (Run tests, สรุปงาน), "หยุด (Esc)" while the room works, and the background (headless) toggle on the right. During a quota hold the pill turns `hold-soft`, send is disabled and the quick actions give way to a "held until" note. For a closed room it turns `soft` with a line edge, send and quick actions are disabled, and the placeholder says to resume the room or switch to background mode.
+
+### Navigation
+- **Sidebar:** brand mark (40px, white 18% glass) and name with the connection dot; a white "ห้องใหม่" button with violet text; nav items Live, รอคุณ (white badge with amber count), ภาพรวม, ประวัติ, 42px high, white 12% on hover and 22% when current; then the usage card and three tool buttons (hooks, scan terminals, theme).
+- **Usage card:** white 14% glass, "Usage 5 ชม.", the remaining percentage at 22px/750, a white meter with the threshold tick, and a footer with the reset time and the reading's source. During a hold it gains a rose inner ring.
+- **Icon strip:** 52px stacked icon-over-label buttons (10.5px/650) for ไฟล์, Agents, ประวัติ, Usage, with violet count badges; pressed violet ink on `primary-soft`.
+
+### Panels, Popovers and the IDE
+- **Panels** float inside the work card as 94% glass sheets (26px radius, 30px blur), entering over 220ms with a 14px slide. Sections are separated by `line` hairlines. They open only on click and are never restored on reload.
+- **Popovers** (model/effort, more, filters) are 94% glass with 18px radius, positioned under their anchor and flipped above when there is no room.
+- **The IDE overlay** covers the screen inset 16px: a 58px bar (breadcrumb, "เปิดใน VS Code", close) over a 300px file list and a Diff/Source view in a mono table with clickable line numbers that open VS Code at that line.
+
+### Overview
+Status pills with counts, then project lanes (see Layout). Every lane shows the project name, its room count and the folder path (truncated, full path on hover), and stacks the same room cards as the list, sorted attention first.
 
 ### Icons
-An authored set on a 24-unit grid, stroked at 1.75 with round caps and joins, drawn in `currentColor` with no fill, rendered at 13–18px. Icons inherit their colour from context; they are never multicolour.
-
-### Usage Meter
-A 30px top-bar control: label "5h", an 84px × 6px bar on `surface-3` with a 2px threshold mark, the remaining percentage in tabular 650 weight. It opens the Usage panel. The fill follows the Rising Meter Rule.
-
-### Side Panels and IDE Overlay
-Panels slide in from the right over 180ms on the standard ease-out (10px travel plus fade) on `rail`, with a 14px/650 heading and hairline-separated sections. Files open in a full-screen IDE overlay (160ms scale-in from 0.985) with a 280px file list, diff and source tabs, a mono code table with tabular line numbers, and `add-bg`/`del-bg` row tints with +/− gutters.
+An authored set on a 24-unit grid, stroked at 1.75 with round caps and joins, in `currentColor`, rendered at 11–20px. Icons inherit colour from context and are never multicolour.
 
 ### Motion
-One easing, `cubic-bezier(0.16, 1, 0.3, 1)`, for everything that enters. Colour changes take 120–140ms; panels, popovers, overlays and toasts enter in 140–180ms with a short translate or scale. Under reduced motion every animation and transition collapses to near-instant.
+One easing, `cubic-bezier(0.16, 1, 0.3, 1)`. Colour changes take 140ms; the room card's slide and shadow 220ms; panels 220ms, the IDE 200ms, toasts 200ms and popovers 160ms, each with a short slide or scale. The working spinner turns every 1.1s. Under `prefers-reduced-motion` every animation and transition collapses to near-instant.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** keep status hues to their single meanings: amber needs you, blue working, green done or a diff addition, red quota hold or a diff deletion.
-- **Do** fill meters with the accent and shift them to amber, then red, as they near a limit.
-- **Do** keep the M file badge neutral; only A/U go green and D goes red.
-- **Do** show approval keycaps (up, down, enter, Esc) only on the prompt card.
-- **Do** open side panels only on click, and never restore an open panel on reload.
-- **Do** leave rooms that are idle or done during a quota hold in their own state; only rooms that had work in flight show the hold.
-- **Do** step depth by tonal surfaces on hue 255 and separate regions with 1px hairlines.
-- **Do** draw every icon from the authored 24-grid, 1.75-stroke set in `currentColor`.
-- **Do** set numbers in tabular figures and machine text in the mono face.
+- **Do** let the room card answer "what is it doing?": status pill, stage, active tool, a short summary, the question when it asks.
+- **Do** keep status hues to their single meanings and violet to acting and selection.
+- **Do** measure contrast over the composited glass, in both themes, before shipping a colour.
+- **Do** keep the composer pinned and let the column scroll when content does not fit.
+- **Do** keep the M file badge neutral; only A/U go green and D goes rose.
+- **Do** show approval keycaps only on the prompt card.
+- **Do** open panels only on click, and never restore an open panel on reload.
+- **Do** tint shadows violet (indigo in dark) and give glass a 1px inner white edge instead of a border.
+- **Do** set numbers in tabular figures and machine text in mono without ligatures.
 
 ### Don't:
 - **Don't** use emoji as icons, anywhere, including status, buttons and toasts.
-- **Don't** use a status hue for decoration, grouping or emphasis, and don't use cyan to signal a status.
-- **Don't** put shadows on anything that sits in the layout; only popovers, dialogs and toasts lift.
+- **Don't** put white text on `hold`, `attn` or the light shell stops; use `hold-fill`, dark ink, or the deepened gradient.
+- **Don't** put `backdrop-filter`, `filter` or `transform` on an ancestor of a fixed element.
+- **Don't** move the open room's card with margins; a transform keeps its text from re-wrapping and stays inside the list's scroll clip.
 - **Don't** uppercase or letter-space labels; separate them with weight and `text-3`.
 - **Don't** repeat the same pending prompt in more than one place on the screen.

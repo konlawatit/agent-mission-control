@@ -31,7 +31,7 @@
       --blob-a: oklch(0.82 0.11 2 / 0.75);
       --blob-b: oklch(0.66 0.19 292 / 0.55);
       --glass: oklch(0.995 0.004 282 / 0.70);
-      --glass-strong: oklch(0.995 0.004 282 / 0.90);
+      --glass-strong: oklch(0.995 0.004 282 / 0.94);
       --glass-edge: oklch(1 0 0 / 0.75);
       --card: oklch(1 0 0 / 0.80);
       --card-sel: oklch(1 0 0);
@@ -42,17 +42,20 @@
       --text-2: oklch(0.43 0.045 276);
       --text-3: oklch(0.52 0.035 276);
       --code-bg: oklch(0.985 0.006 282);
+      --dot-off: oklch(0.86 0.03 282);
 
       --primary: oklch(0.50 0.23 287);
       --primary-2: oklch(0.53 0.20 272);
       --primary-ink: oklch(0.47 0.22 287);
       --primary-soft: oklch(0.55 0.23 287 / 0.11);
       --on-primary: oklch(1 0 0);
+      --ring: oklch(0.50 0.23 287);
 
-      --side-a: oklch(0.71 0.165 303);
-      --side-b: oklch(0.61 0.145 272);
+      /* Deep enough that white labels clear 4.5:1 across the whole gradient. */
+      --side-a: oklch(0.55 0.18 300);
+      --side-b: oklch(0.49 0.15 270);
       --on-side: oklch(1 0 0);
-      --on-side-2: oklch(1 0 0 / 0.80);
+      --on-side-2: oklch(1 0 0 / 0.90);
       --side-hover: oklch(1 0 0 / 0.12);
       --side-active: oklch(1 0 0 / 0.22);
 
@@ -68,9 +71,11 @@
       --done-ink: oklch(0.45 0.12 152);
       --done-soft: oklch(0.68 0.16 150 / 0.14);
       --hold: oklch(0.63 0.20 15);
+      --hold-fill: oklch(0.55 0.20 15);
       --hold-ink: oklch(0.50 0.19 15);
       --hold-soft: oklch(0.63 0.20 15 / 0.11);
       --hold-line: oklch(0.63 0.20 15 / 0.45);
+      --lane: oklch(0.97 0.012 282 / 0.55);
       --add-bg: oklch(0.68 0.16 150 / 0.13);
       --del-bg: oklch(0.63 0.20 15 / 0.11);
 
@@ -99,10 +104,13 @@
         --text-2: oklch(0.83 0.02 285);
         --text-3: oklch(0.71 0.025 285);
         --code-bg: oklch(0.21 0.03 285);
-        --primary: oklch(0.66 0.20 287);
-        --primary-2: oklch(0.64 0.15 266);
+        --dot-off: oklch(0.47 0.04 285);
+        /* Fills stay dark enough for white text; rings and inks carry the light violet. */
+        --primary: oklch(0.56 0.22 287);
+        --primary-2: oklch(0.55 0.17 268);
         --primary-ink: oklch(0.80 0.13 287);
         --primary-soft: oklch(0.66 0.20 287 / 0.20);
+        --ring: oklch(0.78 0.14 287);
         --side-a: oklch(0.43 0.165 303);
         --side-b: oklch(0.34 0.12 274);
         --attn-ink: oklch(0.83 0.14 72);
@@ -113,12 +121,14 @@
         --done-soft: oklch(0.68 0.16 150 / 0.18);
         --hold-ink: oklch(0.80 0.13 15);
         --hold-soft: oklch(0.63 0.20 15 / 0.18);
-        --add-bg: oklch(0.68 0.16 150 / 0.16);
+        --lane: oklch(0.29 0.04 285 / 0.45);
+        --lane: oklch(0.29 0.04 285 / 0.45);
+      --add-bg: oklch(0.68 0.16 150 / 0.16);
         --del-bg: oklch(0.63 0.20 15 / 0.16);
         --shadow-card: 0 8px 24px -14px oklch(0.05 0.02 285 / 0.7);
         --shadow-lift: 0 22px 44px -18px oklch(0.05 0.03 285 / 0.85);
         --shadow-shell: 0 40px 90px -36px oklch(0.03 0.03 285 / 0.9);
-      --shadow-primary: 0 10px 22px -10px oklch(0.04 0.01 285 / 0.85);
+        --shadow-primary: 0 10px 22px -10px oklch(0.04 0.01 285 / 0.85);
       }
     }
     :root[data-theme="dark"] {
@@ -138,10 +148,12 @@
       --text-2: oklch(0.83 0.02 285);
       --text-3: oklch(0.71 0.025 285);
       --code-bg: oklch(0.21 0.03 285);
-      --primary: oklch(0.50 0.23 287);
-      --primary-2: oklch(0.53 0.20 272);
+      --dot-off: oklch(0.47 0.04 285);
+      --primary: oklch(0.56 0.22 287);
+      --primary-2: oklch(0.55 0.17 268);
       --primary-ink: oklch(0.80 0.13 287);
       --primary-soft: oklch(0.66 0.20 287 / 0.20);
+      --ring: oklch(0.78 0.14 287);
       --side-a: oklch(0.43 0.165 303);
       --side-b: oklch(0.34 0.12 274);
       --attn-ink: oklch(0.83 0.14 72);
@@ -199,7 +211,10 @@
     ::-webkit-scrollbar { width: 10px; height: 10px; }
     ::-webkit-scrollbar-thumb { background: var(--soft-2); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }
     ::-webkit-scrollbar-track { background: transparent; }
-    :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: var(--r-xs); }
+    /* The outline follows each element's own radius; never reshape the element on focus. */
+    :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+    /* Code ligatures turn === into a glyph; diffs and terminal text must show what is typed. */
+    code, pre, kbd, .mono, .code, .key { font-variant-ligatures: none; }
     button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
     button:disabled { cursor: not-allowed; opacity: 0.45; }
     svg { display: block; flex-shrink: 0; }
@@ -224,8 +239,8 @@
     .btn-ghost:hover:not(:disabled) { background: var(--soft); color: var(--text); }
     .btn-attn { background: var(--attn); color: oklch(0.25 0.05 60); }
     .btn-attn:hover:not(:disabled) { background: oklch(0.79 0.15 66); }
-    .btn-hold { background: var(--hold); color: oklch(1 0 0); }
-    .btn-hold:hover:not(:disabled) { background: oklch(0.58 0.20 15); }
+    .btn-hold { background: var(--hold-fill); color: oklch(1 0 0); }
+    .btn-hold:hover:not(:disabled) { background: oklch(0.50 0.20 15); }
     .btn-sm { height: 28px; padding: 0 10px; font-size: 12.5px; border-radius: var(--r-xs); }
     .icon-btn {
       display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: var(--r-sm);
@@ -310,7 +325,7 @@
     }
     .side-spacer { flex: 1; }
     .usage-card {
-      display: flex; flex-direction: column; gap: 8px; padding: 14px; border-radius: var(--r-lg);
+      display: flex; flex-direction: column; gap: 8px; width: 100%; padding: 14px; border-radius: var(--r-lg);
       background: oklch(1 0 0 / 0.14); box-shadow: inset 0 0 0 1px oklch(1 0 0 / 0.18); text-align: left; color: var(--on-side);
     }
     .usage-card:hover { background: oklch(1 0 0 / 0.20); }
@@ -322,7 +337,8 @@
     .usage-card .bar.is-mid > i { background: oklch(0.88 0.14 80); }
     .usage-card .bar.is-low > i { background: oklch(0.80 0.15 20); }
     .usage-card .bar-mark { background: oklch(1 0 0 / 0.7); }
-    .usage-foot { font-size: 11.5px; color: var(--on-side-2); }
+    .usage-foot { display: flex; flex-wrap: wrap; justify-content: space-between; column-gap: 8px; font-size: 11.5px; color: var(--on-side-2); }
+    .usage-card.is-hold { box-shadow: inset 0 0 0 1px oklch(1 0 0 / 0.18), inset 0 0 0 2px oklch(0.80 0.15 20 / 0.7); }
     .side-tools { display: flex; gap: 4px; }
     .side-tools .icon-btn { color: var(--on-side-2); }
     .side-tools .icon-btn:hover { background: var(--side-hover); color: var(--on-side); }
@@ -364,10 +380,11 @@
       border-radius: var(--r); background: var(--card); box-shadow: var(--shadow-card), inset 0 0 0 1px var(--glass-edge);
       color: var(--text-3);
     }
-    .search:focus-within { box-shadow: var(--shadow-card), inset 0 0 0 2px var(--primary); }
+    .search:focus-within { box-shadow: var(--shadow-card), inset 0 0 0 2px var(--ring); }
     .search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 13.5px; }
     .search input::placeholder { color: var(--text-3); }
-    .list-scroll { flex: 1; overflow-y: auto; padding: 4px 14px 24px 0; }
+    /* Side padding leaves room for the selected card's lift and shadow inside the scroll clip. */
+    .list-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 4px 16px 24px 4px; margin-left: -4px; }
     .group-head { display: flex; align-items: center; gap: 7px; padding: 14px 6px 8px; font-size: 12.5px; font-weight: 700; color: var(--text-3); }
     .group-head.is-attn { color: var(--attn-ink); }
     .group-head .count { font-variant-numeric: tabular-nums; }
@@ -379,12 +396,13 @@
       width: 100%; padding: 14px 14px 13px; margin-bottom: 10px; border-radius: var(--r-lg);
       background: var(--card); text-align: left; color: var(--text);
       box-shadow: var(--shadow-card), inset 0 0 0 1px var(--glass-edge);
-      transition: transform 220ms var(--ease-out), box-shadow 220ms var(--ease-out), background-color 160ms, margin 220ms var(--ease-out);
+      transition: transform 220ms var(--ease-out), box-shadow 220ms var(--ease-out), background-color 160ms;
     }
     .rcard:hover { background: var(--card-sel); }
+    /* The open room slides toward the focus pane; a transform keeps its text from re-wrapping. */
     .rcard[aria-current="true"] {
       background: var(--card-sel); box-shadow: var(--shadow-lift), inset 0 0 0 1px var(--glass-edge);
-      margin-left: -10px; margin-right: -8px; z-index: 1;
+      transform: translateX(10px); z-index: 1;
     }
     .avatar {
       position: relative; grid-row: span 3; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%;
@@ -414,14 +432,16 @@
     .rc-foot .branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11px; }
 
     .dots { display: inline-flex; gap: 3px; flex-shrink: 0; }
-    .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--soft-2); }
+    .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--dot-off); }
     .dots i.on { background: var(--done); }
     .dots i.now { background: var(--work); }
     .dots.is-attn i.now { background: var(--attn); }
 
     /* ---------- Focus ---------- */
     .focus { grid-row: 2; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-    .focus-scroll { display: flex; flex-direction: column; gap: 14px; padding: 24px 24px 0 18px; min-height: 0; flex: 1; }
+    /* When a prompt card, notices and the output do not all fit, the column scrolls and the composer stays put. */
+    .focus-scroll { display: flex; flex-direction: column; gap: 14px; padding: 24px 24px 2px 18px; min-height: 0; flex: 1; overflow-y: auto; }
+    .focus-scroll > * { flex-shrink: 0; }
     .focus-head { display: flex; flex-direction: column; gap: 12px; }
     .title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
     .title-row h1 { font-size: 23px; font-weight: 750; letter-spacing: -0.02em; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -475,7 +495,8 @@
     .tldr-label { flex-shrink: 0; font-size: 11px; font-weight: 800; color: var(--primary-ink); background: var(--primary-soft); border-radius: 6px; padding: 0 7px; line-height: 20px; }
     .tldr-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 
-    .output { flex: 1; min-height: 180px; display: flex; flex-direction: column; border-radius: var(--r-lg); background: var(--soft); overflow: hidden; }
+    .focus-scroll > .output { flex: 1 0 0; }
+    .output { min-height: 260px; display: flex; flex-direction: column; border-radius: var(--r-lg); background: var(--soft); overflow: hidden; }
     .output-head { display: flex; align-items: center; gap: 4px; padding: 8px 10px 4px 16px; color: var(--text-3); font-size: 12.5px; font-weight: 650; }
     .output-head .output-title { display: inline-flex; align-items: center; gap: 7px; margin-right: auto; }
     .output-body {
@@ -524,8 +545,9 @@
       display: flex; align-items: flex-end; gap: 10px; padding: 7px 7px 7px 18px; border-radius: 26px;
       background: var(--card-sel); box-shadow: var(--shadow-card), inset 0 0 0 1px var(--glass-edge);
     }
-    .composer-box:focus-within { box-shadow: var(--shadow-lift), inset 0 0 0 2px var(--primary); }
+    .composer-box:focus-within { box-shadow: var(--shadow-lift), inset 0 0 0 2px var(--ring); }
     .composer-box.is-held { background: var(--hold-soft); box-shadow: inset 0 0 0 1px var(--hold-line); }
+    .composer-box.is-closed { background: var(--soft); box-shadow: inset 0 0 0 1px var(--line); }
     .composer-box textarea {
       flex: 1; min-width: 0; resize: none; border: 0; outline: 0; background: transparent; color: var(--text);
       font: inherit; font-size: 14px; line-height: 1.5; padding: 8px 0; max-height: 160px; min-height: 38px;
@@ -614,7 +636,7 @@
       width: 110px; height: 32px; padding: 0 10px; border: 0; border-radius: var(--r-sm); background: var(--soft);
       color: var(--text); font: inherit; font-size: 13px; text-align: right; font-variant-numeric: tabular-nums;
     }
-    .field input[type="number"]:focus { outline: 2px solid var(--primary); }
+    .field input[type="number"]:focus { outline: 2px solid var(--ring); }
     .switch { position: relative; width: 38px; height: 22px; border-radius: 11px; background: var(--soft-2); transition: background-color 160ms; }
     .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: oklch(1 0 0); box-shadow: 0 1px 3px oklch(0.3 0.05 285 / 0.4); transition: transform 180ms var(--ease-out); }
     .switch[aria-checked="true"] { background: linear-gradient(135deg, var(--primary), var(--primary-2)); }
@@ -626,12 +648,21 @@
 
     /* ---------- Overview ---------- */
     .overview { grid-row: 2; overflow-y: auto; padding: 24px 26px 30px; }
-    .ov-title { font-size: 23px; font-weight: 750; letter-spacing: -0.02em; margin-bottom: 6px; }
-    .ov-group { margin-top: 18px; }
-    .ov-head { display: flex; align-items: center; gap: 8px; min-width: 0; margin-bottom: 10px; font-size: 13.5px; font-weight: 750; color: var(--text-2); }
-    .ov-head .path { flex: 1; min-width: 0; font-weight: 500; color: var(--text-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
-    .ov-grid .rcard { margin: 0; }
+    .ov-top { display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap; margin-bottom: 18px; }
+    .ov-title { font-size: 23px; font-weight: 750; letter-spacing: -0.02em; }
+    .ov-summary { display: flex; gap: 6px; flex-wrap: wrap; }
+    .ov-summary .pill { height: 26px; padding: 0 11px; font-size: 12.5px; gap: 6px; }
+    .ov-summary .pill b { font-weight: 800; }
+    /* Project lanes: a dense grid of columns, each a soft glass well holding that project's rooms. */
+    .ov-lanes { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 16px; align-items: start; }
+    .ov-lane { display: flex; flex-direction: column; min-width: 0; padding: 12px; border-radius: var(--r-xl); background: var(--lane); box-shadow: inset 0 0 0 1px var(--glass-edge); }
+    .ov-head { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 6px 0; font-size: 13.5px; font-weight: 750; color: var(--text); }
+    .ov-head > svg { color: var(--text-3); }
+    .ov-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ov-head .count { color: var(--text-3); font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
+    .ov-path { padding: 2px 6px 10px 30px; font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ov-stack { display: flex; flex-direction: column; gap: 10px; }
+    .ov-stack .rcard { margin: 0; }
 
     /* ---------- Popover ---------- */
     .popover {
@@ -706,7 +737,7 @@
     dialog h2 { font-size: 19px; font-weight: 750; letter-spacing: -0.01em; }
     .form-field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--text-2); font-weight: 650; }
     .form-field input[type="text"] { height: 40px; padding: 0 14px; border: 0; border-radius: var(--r); background: var(--soft); color: var(--text); font: inherit; font-size: 13.5px; font-weight: 500; }
-    .form-field input[type="text"]:focus { outline: 2px solid var(--primary); }
+    .form-field input[type="text"]:focus { outline: 2px solid var(--ring); }
     .form-field input::placeholder { color: var(--text-3); }
     .form-field .hint { font-weight: 500; color: var(--text-3); }
     .check-row { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--text-2); cursor: pointer; }
@@ -735,6 +766,27 @@
     @media (max-width: 1280px) {
       :root { --side-w: 212px; --list-w: 330px; --panel-w: 340px; }
     }
+    /* Mid widths: the sidebar folds into an icon rail so the selected room keeps a readable column. */
+    @media (min-width: 901px) and (max-width: 1180px) {
+      :root { --side-w: 84px; --list-w: 312px; }
+      .side { align-items: center; gap: 14px; padding: 22px 40px 18px 12px; }
+      .brand { position: relative; padding: 0; }
+      .brand-text { display: contents; }
+      .brand-name { display: none; }
+      .brand-sub { position: absolute; right: -2px; bottom: -2px; }
+      .brand-sub #conn-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+      .conn-dot { width: 11px; height: 11px; box-shadow: 0 0 0 2px var(--side-a); }
+      .side-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+      .new-btn { width: 46px; height: 46px; border-radius: 16px; }
+      .nav { align-items: center; }
+      .nav-item { position: relative; width: 46px; height: 46px; padding: 0; justify-content: center; }
+      .nav-item .count { display: none; }
+      .nav-item .badge-attn { position: absolute; top: 1px; right: -2px; min-width: 19px; height: 19px; padding: 0 5px; font-size: 11px; line-height: 19px; }
+      .usage-card { width: 58px; padding: 10px 7px; align-items: center; gap: 6px; }
+      .usage-top, .usage-foot, .usage-value small { display: none; }
+      .usage-value { font-size: 15px; }
+      .side-tools { flex-direction: column; align-items: center; }
+    }
     @media (max-width: 900px) {
       body { overflow: auto; }
       body::before { width: 320px; height: 280px; }
@@ -748,10 +800,11 @@
       .side-spacer { display: none; }
       .usage-card { flex-direction: row; align-items: center; flex-wrap: wrap; padding: 10px 12px; }
       .usage-card .bar { flex: 1; min-width: 80px; }
-      .work { display: flex; flex-direction: column; }
+      /* backdrop-filter would make .work the containing block for the fixed strip and panel. */
+      .work { display: flex; flex-direction: column; -webkit-backdrop-filter: none; backdrop-filter: none; background: var(--glass-strong); }
       .list { padding: 18px 8px 0 14px; }
       .list-scroll { overflow: visible; }
-      .focus-scroll { padding: 18px 14px 0; }
+      .focus-scroll { padding: 18px 14px 0; overflow: visible; }
       .composer { padding: 12px 14px 16px; }
       .output { min-height: 300px; }
       .strip {
@@ -764,7 +817,7 @@
       .ide-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
       .ide-files { max-height: 30vh; border-right: 0; border-bottom: 1px solid var(--line); }
       .overview { padding: 18px 14px; }
-      .rcard[aria-current="true"] { margin-left: 0; margin-right: 0; }
+      .rcard[aria-current="true"] { transform: none; box-shadow: var(--shadow-lift), inset 0 0 0 2px var(--primary); }
     }
   </style>
 </head>
@@ -777,7 +830,7 @@
             <path d="M4 16.5a10 10 0 0 1 16 0" /><path d="M7.8 14a5.2 5.2 0 0 1 8.4 0" /><circle cx="12" cy="17.5" r="1.9" fill="currentColor" stroke="none" />
           </svg>
         </span>
-        <div>
+        <div class="brand-text">
           <div class="brand-name">Mission Control</div>
           <div class="brand-sub"><span class="conn-dot" id="conn-dot"></span><span id="conn-label">เชื่อมต่อแล้ว</span></div>
         </div>

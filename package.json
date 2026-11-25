@@ -12,10 +12,9 @@
   },
   "scripts": {
     "start": "node bin/amc.js start",
-    "demo": "node bin/amc.js demo",
     "install-hooks": "node bin/amc.js install-hooks",
     "status": "node bin/amc.js status",
-    "test": "node test/verify.js"
+    "test": "node test/verify.js && node test/security.test.js"
   },
   "keywords": [
     "claude-code",

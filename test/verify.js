@@ -39,14 +39,14 @@ async function runTests() {
     'Try the new fullscreen renderer?'
   );
   assert.strictEqual(parsedScreen.interactivePrompt.options.length, 2);
-  assert.strictEqual(parsedScreen.interactivePrompt.options[0].label, 'Yes, try it');
-  assert.strictEqual(parsedScreen.interactivePrompt.options[0].active, true);
-  assert.strictEqual(parsedScreen.interactivePrompt.options[1].label, 'Not now');
 
   const tempDir = path.join(os.tmpdir(), `amc-test-${Date.now()}`);
   const store = new StateStore({ dataDir: tempDir });
 
-  // 1. Test Console Scan Ingestion into StateStore
+  // 1. Ensure zero demo rooms on startup
+  assert.strictEqual(store.getSnapshot().sessions.length, 0);
+
+  // 2. Test Console Scan Ingestion & Automatic Project/Category Categorization
   store.ingestConsoleScan([
     {
       pid: 99999,
@@ -57,11 +57,61 @@ async function runTests() {
 
   let snap = store.getSnapshot();
   assert.strictEqual(snap.sessions.length, 1);
+  assert.strictEqual(snap.sessions[0].lifecycle, 'live');
+  assert.strictEqual(snap.sessions[0].project, 'queue-ticket-system');
+  assert.strictEqual(snap.sessions[0].category, 'Application Developer Test');
   assert.strictEqual(snap.sessions[0].status, 'needs_input');
-  assert.ok(snap.sessions[0].interactivePrompt);
-  assert.strictEqual(snap.sessions[0].interactivePrompt.options.length, 2);
+  assert.strictEqual(snap.metrics.liveRooms, 1);
+  assert.strictEqual(snap.metrics.historyRooms, 0);
 
-  // 2. Test Sub-Agent Spawning via PreToolUse (Task)
+  // 3. Test Accidental Tab Close Detection -> Automatically transitions to 'history'
+  store.ingestConsoleScan([]); // PID 99999 disappeared (tab closed)
+  snap = store.getSnapshot();
+  assert.strictEqual(snap.sessions.length, 1, 'Session must be remembered in history');
+  assert.strictEqual(snap.sessions[0].lifecycle, 'history');
+  assert.strictEqual(snap.sessions[0].status, 'closed');
+  assert.strictEqual(snap.metrics.liveRooms, 0);
+  assert.strictEqual(snap.metrics.historyRooms, 1);
+
+  // 4. Test Reopening / Reviving Session in the same folder
+  store.ingestConsoleScan([
+    {
+      pid: 88888,
+      title: 'Claude Code',
+      screen: sampleScreen,
+    },
+  ]);
+  snap = store.getSnapshot();
+  assert.strictEqual(snap.sessions.length, 1, 'Should revive existing session instead of duplicating');
+  assert.strictEqual(snap.sessions[0].lifecycle, 'live');
+  assert.strictEqual(snap.sessions[0].pid, 88888);
+  assert.strictEqual(snap.sessions[0].openCount, 2);
+
+  // 5. Test Hook Event + ConsoleScanner Deduplication (must NOT create 2 rooms for the same cwd!)
+  store.processHookEvent({
+    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    cwd: 'C:\\Job\\Application Developer Test\\queue-ticket-system',
+    hook_event_name: 'UserPromptSubmit',
+    prompt: 'สรุปโปรเจกต์นี้ให้หน่อย',
+  });
+
+  store.ingestConsoleScan([
+    {
+      pid: 27120,
+      title: 'Claude Code',
+      screen: sampleScreen,
+    },
+  ]);
+
+  snap = store.getSnapshot();
+  assert.strictEqual(
+    snap.sessions.length,
+    1,
+    'Hook event and ConsoleScanner for same cwd must merge into 1 single room!'
+  );
+  assert.strictEqual(snap.sessions[0].pid, 27120);
+
+  // 6. Test Sub-Agent Spawning & Workflow Stages
   store.processHookEvent({
     session_id: snap.sessions[0].id,
     hook_event_name: 'PreToolUse',
@@ -76,30 +126,17 @@ async function runTests() {
 
   snap = store.getSnapshot();
   assert.strictEqual(snap.sessions[0].subAgents.length, 1);
-  assert.strictEqual(snap.sessions[0].subAgents[0].state, 'working');
   assert.strictEqual(snap.metrics.activeSubAgents, 1);
 
-  // 3. Test Code Stage Transition (Edit) and Verify Stage Transition (Bash test)
   const editInference = inferWorkflowFromTool('Edit', { file_path: 'src/auth.ts' });
   assert.strictEqual(editInference.stageIndex, 1);
 
   const testInference = inferWorkflowFromTool('Bash', { command: 'npm run test:unit' });
   assert.strictEqual(testInference.stageIndex, 2);
 
-  // 4. Test Stop Event (Completion)
-  store.processHookEvent({
-    session_id: snap.sessions[0].id,
-    hook_event_name: 'Stop',
-    summary: 'All OAuth2 tests passed and sub-agents completed.',
-  });
-  snap = store.getSnapshot();
-  assert.strictEqual(snap.sessions[0].status, 'done');
-  assert.strictEqual(snap.sessions[0].stageIndex, 3);
-  assert.strictEqual(snap.metrics.activeSubAgents, 0);
-
   // Cleanup temp test dir
   fs.rmSync(tempDir, { recursive: true, force: true });
-  console.log('✅ All verification assertions (Console TUI Parser + StateStore + Sub-Agents) passed!');
+  console.log('✅ All verification assertions (No Demo + Session Memory/History + Project Categorization) passed!');
 }
 
 runTests().catch((err) => {

@@ -3,11 +3,10 @@
  * Agent Mission Control CLI (`amc`)
  *
  * Commands:
- *   amc start [--port 4310] [--demo] [--no-open]   Start Mission Control server & open Web UI
- *   amc demo                                       Start server pre-loaded with 4 simulated agent rooms
+ *   amc start [--port 4310] [--no-open]            Start Mission Control server & open Web UI (Real sessions only)
  *   amc install-hooks                              Install Claude Code lifecycle hooks into ~/.claude/settings.json
  *   amc uninstall-hooks                            Remove Mission Control hooks from ~/.claude/settings.json
- *   amc status                                     Show live multi-room status table right in the terminal
+ *   amc status                                     Show live & history sessions right in the terminal
  *   amc run [--room "Auth"] <cmd> [args...]        Wrap any CLI agent in a Mission Control tracked room
  */
 const http = require('http');
@@ -95,30 +94,25 @@ async function runCommand() {
       res.on('data', (c) => (raw += c));
       res.on('end', () => {
         const data = JSON.parse(raw);
-        console.log('\n🎛️  AGENT MISSION CONTROL — LIVE STATUS');
+        console.log('\n🎛️  AGENT MISSION CONTROL — LIVE & HISTORY STATUS');
         console.log('====================================================');
         console.log(
-          `Rooms: ${data.metrics.totalRooms} | ⚠️ รอตัดสินใจ: ${data.metrics.needsInput} | ⚡ กำลังรัน: ${data.metrics.working} | 🤖 Active Sub-Agents: ${data.metrics.activeSubAgents}\n`
+          `🟢 เปิดอยู่ (Live): ${data.metrics.liveRooms} | ⚠️ รอเลือกตอบ: ${data.metrics.needsInput} | 🕘 ประวัติที่ปิดแล้ว (History): ${data.metrics.historyRooms}\n`
         );
         for (const s of data.sessions) {
           const icon =
-            s.status === 'needs_input'
+            s.lifecycle === 'history'
+              ? '🕘'
+              : s.status === 'needs_input'
               ? '⚠️'
               : s.status === 'working'
               ? '⚡'
-              : s.status === 'done'
-              ? '✅'
-              : '⏸️';
-          console.log(`${icon} [${s.room}] (${s.branch}) — ${s.statusLabel}`);
-          console.log(`   🎯 เป้าหมาย: ${s.goal}`);
+              : '🟢';
+          console.log(
+            `${icon} [${s.room}] (${s.project} • ${s.branch}) — ${s.statusLabel}`
+          );
+          console.log(`   📁 โฟลเดอร์: ${s.cwd}`);
           console.log(`   📌 TL;DR   : ${s.tldr}`);
-          if (s.subAgents && s.subAgents.length > 0) {
-            console.log(
-              `   🌳 Sub-Agents (${s.subAgents.length}): ${s.subAgents
-                .map((sub) => `${sub.name} [${sub.state}]`)
-                .join(', ')}`
-            );
-          }
           console.log('');
         }
       });
@@ -132,10 +126,8 @@ async function runCommand() {
   }
 
   if (subcommand === 'run') {
-    // Wrap any CLI command (e.g. `amc run --room "Auth" claude`)
     const roomName =
-      getFlagValue('--room') ||
-      `Room • ${path.basename(process.cwd())}`;
+      getFlagValue('--room') || `${path.basename(process.cwd())}`;
     let cmdStartIdx = 1;
     if (args[1] === '--room') cmdStartIdx = 3;
     const targetCmd = args[cmdStartIdx] || 'claude';
@@ -178,21 +170,15 @@ async function runCommand() {
     return;
   }
 
-  // Default: `start` or `demo`
-  const isDemo = subcommand === 'demo' || args.includes('--demo');
+  // Default: `start` (Real sessions only — no demo rooms seeded!)
   const noOpen = args.includes('--no-open');
-  const { server, store } = createMissionControlServer();
-
-  if (isDemo || store.sessions.size === 0) {
-    store.seedDemoSessions();
-  }
-
+  const { server } = createMissionControlServer();
   const hooksState = checkHooksStatus();
 
   server.listen(PORT, '127.0.0.1', () => {
     const url = `http://127.0.0.1:${PORT}`;
     console.log('\n============================================================');
-    console.log('🎛️  AGENT MISSION CONTROL — READY');
+    console.log('🎛️  AGENT MISSION CONTROL — READY (REAL SESSIONS MODE)');
     console.log('============================================================');
     console.log(`🌐 Web Dashboard : ${url}`);
     console.log(
@@ -203,9 +189,9 @@ async function runCommand() {
       }`
     );
     console.log('------------------------------------------------------------');
-    console.log('💡 ทุกครั้งที่คุณเปิด Claude CLI ใน Terminal Tab ใดๆ');
-    console.log('   สถานะห้อง, Workflow Stage, Sub-Agents และ Auto-TL;DR');
-    console.log('   จะเด้งขึ้นบนหน้าจอ Dashboard อัตโนมัติโดยไม่ต้องไล่อ่าน Log!');
+    console.log('💡 ระบบกำลังสแกนและจดจำทุก Session ของ Claude ที่คุณเปิดใช้งานจริง');
+    console.log('   หากเผลอปิด Tab ระบบจะย้ายไปเก็บในแท็บ "🕘 ประวัติที่ปิดแล้ว"');
+    console.log('   เพื่อให้คุณกดปุ่ม "🔄 กู้คืน / เปิดต่อใน Terminal" ได้ตลอดเวลา!');
     console.log('============================================================\n');
 
     if (!noOpen) {

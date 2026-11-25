@@ -17,6 +17,32 @@ const STAGES = [
   { index: 3, id: 'done', label: '4. Done / Ready' },
 ];
 
+const DEMO_IDS = new Set([
+  'room-auth-oauth2',
+  'room-payment-webhook',
+  'room-frontend-perf',
+  'room-db-index',
+]);
+
+const DEFAULT_GOALS = new Set([
+  'รอคำสั่งเริ่มต้น...',
+  'เปิด Session พร้อมเริ่มงาน',
+  'เปิดห้องทำงานใหม่จาก Mission Control',
+]);
+
+function isDefaultTldr(text) {
+  if (!text) return true;
+  return (
+    text.includes('พร้อมรับคำสั่งผ่าน Terminal หรือสั่งการจากหน้า Dashboard') ||
+    text === 'เปิด Claude Session พร้อมเริ่มงาน'
+  );
+}
+
+function normalizeCwdKey(cwd) {
+  if (!cwd) return '';
+  return String(cwd).toLowerCase().replace(/[\\\/]+$/, '').trim();
+}
+
 class StateStore extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -41,12 +67,167 @@ class StateStore extends EventEmitter {
         const raw = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
         if (Array.isArray(raw.sessions)) {
           for (const s of raw.sessions) {
+            if (DEMO_IDS.has(s.id)) continue;
+
+            if (!s.lifecycle) {
+              s.lifecycle = s.status === 'closed' ? 'history' : 'live';
+            }
+            if (!s.project) {
+              s.project = s.cwd ? path.basename(s.cwd) : 'General';
+            }
+            if (!s.category) {
+              s.category = this._inferProjectMeta(s.cwd).category;
+            }
+            // Strip any corrupted U+FFFD screen preview from old Win32 cell reads
+            if (s.screenPreview && s.screenPreview.includes('\uFFFD')) {
+              s.screenPreview = null;
+            }
             this.sessions.set(s.id, s);
           }
+          this._deduplicateSessionsByCwd();
+          this._enrichAllFromTranscripts();
+          this._saveToDisk();
         }
       }
     } catch {
       // Ignore corrupt state file on startup
+    }
+  }
+
+  /**
+   * Merges duplicate session cards that point to the exact same workspace `cwd`
+   * (e.g., when one card was created by ConsoleScanner `claude-pid-27120` and another by a Hook with `ppid 30996`).
+   */
+  _deduplicateSessionsByCwd() {
+    const byCwd = new Map();
+    for (const s of Array.from(this.sessions.values())) {
+      const key = normalizeCwdKey(s.cwd);
+      if (!key) continue;
+      if (!byCwd.has(key)) {
+        byCwd.set(key, []);
+      }
+      byCwd.get(key).push(s);
+    }
+
+    for (const [, group] of byCwd.entries()) {
+      if (group.length <= 1) continue;
+
+      // Pick the richest session as primary (prefer one with real claudeSessionId or real goal/tldr)
+      group.sort((a, b) => {
+        const aHasUuid = Boolean(a.claudeSessionId || /^[0-9a-f]{8}-/i.test(a.id));
+        const bHasUuid = Boolean(b.claudeSessionId || /^[0-9a-f]{8}-/i.test(b.id));
+        if (aHasUuid !== bHasUuid) return aHasUuid ? -1 : 1;
+        const aRich = !isDefaultTldr(a.tldr) ? 1 : 0;
+        const bRich = !isDefaultTldr(b.tldr) ? 1 : 0;
+        return bRich - aRich;
+      });
+
+      const primary = group[0];
+      for (let i = 1; i < group.length; i++) {
+        const dup = group[i];
+        this._mergeSessionInto(primary, dup);
+        this.sessions.delete(dup.id);
+      }
+    }
+  }
+
+  _mergeSessionInto(target, source) {
+    if (!target || !source) return;
+    if (source.claudeSessionId && !target.claudeSessionId) {
+      target.claudeSessionId = source.claudeSessionId;
+    }
+    if (source.transcriptPath && !target.transcriptPath) {
+      target.transcriptPath = source.transcriptPath;
+    }
+    if (source.pid) {
+      target.pid = source.pid;
+    }
+    if (source.goal && !DEFAULT_GOALS.has(source.goal) && DEFAULT_GOALS.has(target.goal)) {
+      target.goal = source.goal;
+    }
+    if (source.tldr && !isDefaultTldr(source.tldr) && isDefaultTldr(target.tldr)) {
+      target.tldr = source.tldr;
+    }
+    if ((source.stageIndex || 0) > (target.stageIndex || 0)) {
+      target.stageIndex = source.stageIndex;
+    }
+    if (source.status === 'done' && target.status === 'idle') {
+      target.status = 'done';
+      target.statusLabel = source.statusLabel || 'เสร็จสิ้น (รอบคำสั่ง)';
+    }
+    if (source.interactivePrompt && !target.interactivePrompt) {
+      target.interactivePrompt = source.interactivePrompt;
+      target.status = 'needs_input';
+      target.statusLabel = source.statusLabel;
+    }
+    if (source.screenPreview && !source.screenPreview.includes('\uFFFD') && !target.screenPreview) {
+      target.screenPreview = source.screenPreview;
+    }
+    if (Array.isArray(source.subAgents)) {
+      for (const sub of source.subAgents) {
+        if (!target.subAgents.some((s) => s.id === sub.id)) {
+          target.subAgents.push(sub);
+        }
+      }
+    }
+    if (Array.isArray(source.modifiedFiles)) {
+      for (const f of source.modifiedFiles) {
+        if (!target.modifiedFiles.includes(f)) {
+          target.modifiedFiles.push(f);
+        }
+      }
+    }
+    if (Array.isArray(source.recentEvents)) {
+      for (const ev of source.recentEvents) {
+        if (!target.recentEvents.some((e) => e.id === ev.id)) {
+          target.recentEvents.push(ev);
+        }
+      }
+      target.recentEvents.sort(
+        (a, b) => new Date(b.timestamp) - new Date(a.timestamp)
+      );
+      if (target.recentEvents.length > 30) target.recentEvents.length = 30;
+    }
+  }
+
+  /**
+   * Enriches a session with pure UTF-8 Thai text from its Claude `.jsonl` transcript file.
+   */
+  _enrichSessionFromTranscript(session) {
+    if (!session) return;
+    const parsed = parseTranscriptTail(session.transcriptPath, session.cwd);
+    if (!parsed) return;
+
+    if (parsed.transcriptPath && !session.transcriptPath) {
+      session.transcriptPath = parsed.transcriptPath;
+    }
+    if (parsed.lastAssistantText && (isDefaultTldr(session.tldr) || session.status === 'done')) {
+      session.tldr = parsed.lastAssistantText;
+    }
+    if (parsed.lastUserText && DEFAULT_GOALS.has(session.goal)) {
+      session.goal = parsed.lastUserText;
+    }
+    // Always prefer the pure UTF-8 transcript preview over Win32 console cell text if Win32 had \uFFFD!
+    if (parsed.utf8Preview && !session.interactivePrompt) {
+      session.screenPreview = parsed.utf8Preview;
+    }
+    if (parsed.subAgents && parsed.subAgents.length > 0) {
+      for (const tSub of parsed.subAgents) {
+        const existing = session.subAgents.find((s) => s.id === tSub.id);
+        if (!existing) {
+          session.subAgents.push(tSub);
+        } else if (tSub.state === 'done') {
+          existing.state = 'done';
+          existing.tool = 'Completed';
+          if (tSub.resultSummary) existing.resultSummary = tSub.resultSummary;
+        }
+      }
+    }
+  }
+
+  _enrichAllFromTranscripts() {
+    for (const s of this.sessions.values()) {
+      this._enrichSessionFromTranscript(s);
     }
   }
 
@@ -71,10 +252,20 @@ class StateStore extends EventEmitter {
     });
   }
 
-  /**
-   * Finds an existing session matching pid or normalized cwd to avoid duplicate cards
-   * when merging live console buffer scans with Claude Code hooks.
-   */
+  _inferProjectMeta(cwd) {
+    if (!cwd) {
+      return { project: 'General', category: 'General' };
+    }
+    const clean = String(cwd).replace(/[\\\/]+$/, '');
+    const parts = clean.split(/[\\\/]+/).filter(Boolean);
+    const project = parts[parts.length - 1] || 'Workspace';
+    const parent = parts.length >= 2 ? parts[parts.length - 2] : 'Local';
+    return {
+      project,
+      category: parent,
+    };
+  }
+
   _findMatchingSession({ sessionId, pid, cwd }) {
     if (sessionId && this.sessions.has(String(sessionId))) {
       return this.sessions.get(String(sessionId));
@@ -87,15 +278,32 @@ class StateStore extends EventEmitter {
       }
     }
     if (cwd) {
-      const norm = String(cwd).toLowerCase().replace(/[\\\/]+$/, '');
+      const norm = normalizeCwdKey(cwd);
+      // Match ANY live session in the same cwd first (unifying Hook events and ConsoleScanner PID!)
       for (const s of this.sessions.values()) {
-        if (
-          s.cwd &&
-          String(s.cwd).toLowerCase().replace(/[\\\/]+$/, '') === norm &&
-          !s.id.startsWith('room-') // Don't overwrite demo rooms unless exact ID
-        ) {
+        if (normalizeCwdKey(s.cwd) === norm && s.lifecycle === 'live') {
           return s;
         }
+      }
+      // Or revive a history session in the same cwd
+      const historyCandidates = Array.from(this.sessions.values())
+        .filter(
+          (s) => normalizeCwdKey(s.cwd) === norm && s.lifecycle === 'history'
+        )
+        .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+
+      if (historyCandidates.length > 0) {
+        return historyCandidates[0];
+      }
+    }
+    // If ConsoleScanner scanned a `claude.exe` whose top banner scrolled off (`cwd === null`),
+    // and there is exactly 1 live session in the store, match it!
+    if (pid && !cwd) {
+      const liveSessions = Array.from(this.sessions.values()).filter(
+        (s) => s.lifecycle === 'live'
+      );
+      if (liveSessions.length === 1) {
+        return liveSessions[0];
       }
     }
     return null;
@@ -111,15 +319,24 @@ class StateStore extends EventEmitter {
       return existing;
     }
 
-    const id = String(sessionId || `room-${Date.now()}`);
+    const id = String(sessionId || `session-${Date.now()}`);
     const cwd = defaults.cwd || process.cwd();
-    const folderName = path.basename(cwd) || 'workspace';
-    const roomNum = String(this.sessions.size + 1).padStart(2, '0');
+    const { project, category } = this._inferProjectMeta(cwd);
     const gitMeta = getGitMetadata(cwd);
 
     const created = {
       id,
-      room: defaults.room || `Room ${roomNum} • ${folderName}`,
+      claudeSessionId:
+        /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(id)
+          ? id
+          : defaults.claudeSessionId || null,
+      room: defaults.room || `${project}`,
+      project: defaults.project || project,
+      category: defaults.category || category,
+      tags: Array.isArray(defaults.tags) ? defaults.tags : [category],
+      pinned: Boolean(defaults.pinned),
+      lifecycle: defaults.lifecycle || 'live',
+      isProcessAlive: true,
       cli: defaults.cli || 'claude-code',
       cwd,
       branch: defaults.branch || gitMeta.branch,
@@ -133,10 +350,10 @@ class StateStore extends EventEmitter {
       wrapperConnected: Boolean(defaults.wrapperConnected),
       status: defaults.status || 'idle',
       statusLabel: defaults.statusLabel || 'พร้อมรับคำสั่ง',
-      goal: defaults.goal || 'รอคำสั่งเริ่มต้น...',
+      goal: defaults.goal || 'เปิด Session พร้อมเริ่มงาน',
       tldr:
         defaults.tldr ||
-        'เปิด Session เรียบร้อย พร้อมรับคำสั่งผ่าน Terminal หรือสั่งการจากหน้า Dashboard',
+        'เชื่อมต่อ Session เรียบร้อย พร้อมรับคำสั่งผ่าน Terminal หรือสั่งการจากหน้า Dashboard',
       pendingAction: defaults.pendingAction || null,
       interactivePrompt: defaults.interactivePrompt || null,
       screenPreview: defaults.screenPreview || null,
@@ -151,59 +368,112 @@ class StateStore extends EventEmitter {
         ? defaults.recentEvents
         : [],
       transcriptPath: defaults.transcriptPath || null,
+      openCount: 1,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      closedAt: null,
     };
 
+    this._enrichSessionFromTranscript(created);
     this.sessions.set(id, created);
     return created;
   }
 
-  /**
-   * Ingests live Windows Console Screen Buffer scans from running `claude.exe` processes.
-   * Detects TUI interactive choice menus (`❯ 1. Yes, try it / 2. Not now`, permission menus, etc.)
-   * even before any Claude lifecycle hook fires!
-   */
   ingestConsoleScan(scanItems = []) {
     if (!Array.isArray(scanItems)) return;
     let changed = false;
+    const now = new Date().toISOString();
+    const activePids = new Set();
 
     for (const item of scanItems) {
       if (!item || !item.pid || !item.screen) continue;
+      const numericPid = Number(item.pid);
+      activePids.add(numericPid);
+
       const parsed = parseConsoleScreen(item.screen);
       if (!parsed) continue;
 
       const cwd = parsed.cwd || null;
-      const folderName = cwd ? path.basename(cwd) : `PID-${item.pid}`;
+      const { project, category } = this._inferProjectMeta(cwd);
       const cliLabel = [
         'claude',
         parsed.version || '',
-        parsed.model ? `(${parsed.model.split('·')[0].trim()})` : `(PID ${item.pid})`,
+        parsed.model
+          ? `(${parsed.model.split('·')[0].trim()})`
+          : `(PID ${numericPid})`,
       ]
         .filter(Boolean)
         .join(' ');
 
-      const session = this.getOrCreateSession(`claude-pid-${item.pid}`, {
-        pid: item.pid,
-        cwd: cwd || process.cwd(),
-        room: `Room • ${folderName}`,
+      const session = this.getOrCreateSession(`claude-pid-${numericPid}`, {
+        pid: numericPid,
+        cwd: cwd || undefined,
+        room: cwd ? project : `Claude Tab (PID ${numericPid})`,
+        project: cwd ? project : 'Terminal Session',
+        category: cwd ? category : 'CLI',
         cli: cliLabel,
       });
 
-      const prevPromptJson = JSON.stringify(session.interactivePrompt);
-      const prevPreview = session.screenPreview;
+      const prevStateSig = JSON.stringify({
+        lifecycle: session.lifecycle,
+        status: session.status,
+        pid: session.pid,
+        cwd: session.cwd,
+        prompt: session.interactivePrompt,
+        preview: session.screenPreview,
+        tldr: session.tldr,
+      });
 
-      session.pid = item.pid;
+      if (session.lifecycle === 'history') {
+        session.lifecycle = 'live';
+        session.closedAt = null;
+        session.openCount = (session.openCount || 1) + 1;
+        if (session.status === 'closed') {
+          session.status = 'idle';
+          session.statusLabel = 'กลับมาเปิดใช้งาน (Resumed)';
+        }
+      }
+
+      session.isProcessAlive = true;
+      session.pid = numericPid;
       session.cli = cliLabel;
-      if (cwd && (session.cwd === process.cwd() || !session.cwd)) {
+
+      if (
+        cwd &&
+        (!session.cwd ||
+          session.cwd === process.cwd() ||
+          session.room.startsWith('Claude Tab'))
+      ) {
         session.cwd = cwd;
-        session.room = `Room • ${path.basename(cwd)}`;
+        const meta = this._inferProjectMeta(cwd);
+        session.project = meta.project;
+        session.category = meta.category;
+        if (
+          !session.customNamed &&
+          (session.room.startsWith('Claude Tab') ||
+            session.room.startsWith('Room •') ||
+            session.room === path.basename(process.cwd()))
+        ) {
+          session.room = meta.project;
+        }
         const gitMeta = getGitMetadata(cwd);
         session.branch = gitMeta.branch;
         session.dirtyFiles = gitMeta.dirtyFiles;
       }
 
-      session.screenPreview = parsed.screenPreview;
+      // Enrich with pure UTF-8 transcript so Thai text is 100% sharp without \uFFFD!
+      this._enrichSessionFromTranscript(session);
+
+      // Only use console screenPreview if we don't have a UTF-8 transcript yet or if an ASCII/English startup menu is showing
+      if (!session.screenPreview || parsed.interactivePrompt) {
+        const cleanConsolePreview = (parsed.screenPreview || '').replace(
+          /\uFFFD+/g,
+          ''
+        );
+        if (!session.screenPreview) {
+          session.screenPreview = cleanConsolePreview;
+        }
+      }
 
       if (parsed.interactivePrompt) {
         session.interactivePrompt = parsed.interactivePrompt;
@@ -213,22 +483,58 @@ class StateStore extends EventEmitter {
         session.tldr = `⚠️ ${parsed.interactivePrompt.question} — คลิกเลือกตัวเลือก (${parsed.interactivePrompt.options
           .map((o) => `${o.number}. ${o.label}`)
           .join(' / ')}) จากด้านล่างได้เลย`;
-      } else if (session.interactivePrompt && !session.id.startsWith('room-')) {
-        // The TUI menu on this console tab was answered and cleared!
+      } else if (session.interactivePrompt) {
         session.interactivePrompt = null;
         session.pendingAction = null;
         if (session.status === 'needs_input') {
           session.status = 'idle';
           session.statusLabel = 'พร้อมรับคำสั่ง';
-          session.tldr = 'ส่งคำตอบเข้า Terminal เรียบร้อย พร้อมพิมพ์คำสั่งถัดไป';
+          this._enrichSessionFromTranscript(session);
         }
       }
 
+      const nextStateSig = JSON.stringify({
+        lifecycle: session.lifecycle,
+        status: session.status,
+        pid: session.pid,
+        cwd: session.cwd,
+        prompt: session.interactivePrompt,
+        preview: session.screenPreview,
+        tldr: session.tldr,
+      });
+
+      if (prevStateSig !== nextStateSig) {
+        session.updatedAt = now;
+        changed = true;
+      }
+    }
+
+    this._deduplicateSessionsByCwd();
+
+    for (const session of this.sessions.values()) {
       if (
-        JSON.stringify(session.interactivePrompt) !== prevPromptJson ||
-        session.screenPreview !== prevPreview
+        session.lifecycle === 'live' &&
+        session.pid &&
+        !activePids.has(Number(session.pid))
       ) {
-        session.updatedAt = new Date().toISOString();
+        session.lifecycle = 'history';
+        session.isProcessAlive = false;
+        session.closedAt = now;
+        session.updatedAt = now;
+        session.status = 'closed';
+        session.statusLabel = 'ปิด Tab ไปแล้ว • กู้คืนได้';
+        session.interactivePrompt = null;
+        session.pendingAction = null;
+        session.currentTool = 'Tab Closed';
+        session.recentEvents.unshift({
+          id: `${Date.now()}-closed`,
+          timestamp: now,
+          event: 'TabClosed',
+          title: `หน้าต่าง Terminal (PID ${session.pid}) ถูกปิด — บันทึกเก็บไว้ในประวัติเรียบร้อย`,
+          badge: 'Saved to History',
+          level: 'info',
+        });
+        session.pid = null;
         changed = true;
       }
     }
@@ -238,20 +544,21 @@ class StateStore extends EventEmitter {
     }
   }
 
-  /**
-   * Processes incoming lifecycle events from Claude Code Hooks or CLI wrappers.
-   */
   processHookEvent(payload = {}) {
-    const sessionId =
-      payload.session_id ||
-      payload.sessionId ||
+    const rawSessionId = payload.session_id || payload.sessionId || null;
+    const isUuid =
+      rawSessionId && /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(String(rawSessionId));
+
+    const lookupId =
+      rawSessionId ||
       payload.room_id ||
       (payload.pid ? `claude-pid-${payload.pid}` : null) ||
       `cwd-${Buffer.from(String(payload.cwd || 'default')).toString('hex').slice(0, 10)}`;
 
-    const session = this.getOrCreateSession(sessionId, {
+    const session = this.getOrCreateSession(lookupId, {
       cwd: payload.cwd,
       room: payload.room,
+      claudeSessionId: isUuid ? String(rawSessionId) : null,
       cli:
         payload.cli ||
         (payload.pane_id ? `claude (pane #${payload.pane_id})` : 'claude-code'),
@@ -262,11 +569,31 @@ class StateStore extends EventEmitter {
 
     const now = new Date().toISOString();
     session.updatedAt = now;
-    if (payload.cwd) session.cwd = payload.cwd;
+    if (isUuid) {
+      session.claudeSessionId = String(rawSessionId);
+    }
+    if (payload.cwd) {
+      session.cwd = payload.cwd;
+      const meta = this._inferProjectMeta(payload.cwd);
+      session.project = meta.project;
+      session.category = meta.category;
+      if (
+        !session.customNamed &&
+        (session.room.startsWith('Claude Tab') ||
+          session.room.startsWith('Room •'))
+      ) {
+        session.room = meta.project;
+      }
+    }
+    if (payload.room) {
+      session.room = payload.room;
+      session.customNamed = true;
+    }
     if (payload.pane_id) session.paneId = payload.pane_id;
     if (payload.wt_session) session.wtSession = payload.wt_session;
     if (payload.pid && !session.pid) session.pid = payload.pid;
-    if (payload.transcript_path) session.transcriptPath = payload.transcript_path;
+    if (payload.transcript_path)
+      session.transcriptPath = payload.transcript_path;
     if (typeof payload.wrapper_connected === 'boolean') {
       session.wrapperConnected = payload.wrapper_connected;
     }
@@ -282,6 +609,12 @@ class StateStore extends EventEmitter {
     const toolName = payload.tool_name || payload.toolName || '';
     const toolInput = payload.tool_input || payload.toolInput || {};
 
+    if (hookEvent !== 'SessionEnd') {
+      session.lifecycle = 'live';
+      session.isProcessAlive = true;
+      session.closedAt = null;
+    }
+
     const pushTimeline = (title, badge, level = 'info') => {
       session.recentEvents.unshift({
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -291,14 +624,14 @@ class StateStore extends EventEmitter {
         badge,
         level,
       });
-      if (session.recentEvents.length > 25) {
-        session.recentEvents.length = 25;
+      if (session.recentEvents.length > 30) {
+        session.recentEvents.length = 30;
       }
     };
 
     if (hookEvent === 'SessionStart') {
       session.status = 'idle';
-      session.statusLabel = 'เปิดห้องใหม่';
+      session.statusLabel = 'เปิดห้องพร้อมใช้งาน';
       session.tldr = 'เปิด Claude Session พร้อมเริ่มงาน';
       pushTimeline('เริ่มต้น Session ใน ' + session.cwd, 'SessionStart', 'info');
     } else if (hookEvent === 'UserPromptSubmit') {
@@ -332,10 +665,9 @@ class StateStore extends EventEmitter {
         !session.modifiedFiles.includes(inferred.modifiedFile)
       ) {
         session.modifiedFiles.unshift(inferred.modifiedFile);
-        if (session.modifiedFiles.length > 15) session.modifiedFiles.length = 15;
+        if (session.modifiedFiles.length > 20) session.modifiedFiles.length = 20;
       }
 
-      // If Claude calls AskUserQuestion tool with options, surface them as interactive buttons!
       if (
         toolName === 'AskUserQuestion' ||
         (Array.isArray(toolInput.questions) && toolInput.questions.length > 0)
@@ -347,7 +679,8 @@ class StateStore extends EventEmitter {
         if (opts.length > 0) {
           session.status = 'needs_input';
           session.statusLabel = `รอคุณเลือกตอบ (${opts.length} ตัวเลือก)`;
-          session.pendingAction = qObj.question || 'Claude ต้องการให้คุณเลือกคำตอบ';
+          session.pendingAction =
+            qObj.question || 'Claude ต้องการให้คุณเลือกคำตอบ';
           session.interactivePrompt = {
             question: qObj.question || 'กรุณาเลือกแนวทางที่ต้องการ:',
             context: qObj.header ? [qObj.header] : [],
@@ -437,26 +770,35 @@ class StateStore extends EventEmitter {
         runningSub.completedAt = now;
       }
       pushTimeline('Sub-Agent ทำงานเสร็จสิ้น 1 ตัว', 'SubagentStop', 'success');
-    } else if (hookEvent === 'PermissionRequest' || hookEvent === 'Notification') {
+    } else if (
+      hookEvent === 'PermissionRequest' ||
+      hookEvent === 'Notification'
+    ) {
       const cmdDetail =
         (toolInput && (toolInput.command || toolInput.file_path)) ||
         payload.message ||
         payload.title ||
-        (toolName ? `ขอสิทธิ์รัน ${toolName}` : 'Claude กำลังรอให้คุณเลือกคำตอบหรือกดยืนยัน');
+        (toolName
+          ? `ขอสิทธิ์รัน ${toolName}`
+          : 'Claude กำลังรอให้คุณเลือกคำตอบหรือกดยืนยัน');
 
       session.status = 'needs_input';
       session.statusLabel = 'รอคุณเลือกตอบ / Approve';
       session.pendingAction = summarizeText(cmdDetail, 120);
       session.tldr = `⚠️ รอการตัดสินใจจากคุณ: ${summarizeText(cmdDetail, 160)}`;
 
-      // Provide standard Claude Code permission choices if console scanner hasn't already populated more specific choices
       if (!session.interactivePrompt) {
         session.interactivePrompt = {
           question: `อนุญาตให้ดำเนินการ "${summarizeText(cmdDetail, 90)}" หรือไม่?`,
           context: toolName ? [`Tool: ${toolName}`] : [],
           currentIndex: 1,
           options: [
-            { index: 1, number: '1', label: 'Yes (อนุญาตครั้งนี้)', active: true },
+            {
+              index: 1,
+              number: '1',
+              label: 'Yes (อนุญาตครั้งนี้)',
+              active: true,
+            },
             {
               index: 2,
               number: '2',
@@ -495,40 +837,24 @@ class StateStore extends EventEmitter {
       }
       pushTimeline('ทำงานครบรอบคำสั่งแล้ว พร้อมรับคำสั่งถัดไป', 'Done', 'success');
     } else if (hookEvent === 'SessionEnd') {
-      session.status = 'done';
-      session.statusLabel = 'ปิด Session แล้ว';
+      session.lifecycle = 'history';
+      session.isProcessAlive = false;
+      session.closedAt = now;
+      session.pid = null;
+      session.status = 'closed';
+      session.statusLabel = 'ปิด Tab ไปแล้ว • กู้คืนได้';
       session.pendingAction = null;
       session.interactivePrompt = null;
       session.currentTool = 'Closed';
-      pushTimeline('ปิด Session Terminal แล้ว', 'SessionEnd', 'info');
+      pushTimeline(
+        'ปิด Session Terminal แล้ว (บันทึกไว้ในประวัติ สามารถกด Resume ได้)',
+        'SessionEnd',
+        'info'
+      );
     }
 
-    if (session.transcriptPath) {
-      const parsed = parseTranscriptTail(session.transcriptPath);
-      if (parsed) {
-        if (
-          parsed.lastAssistantText &&
-          (hookEvent === 'Stop' || hookEvent === 'PostToolUse')
-        ) {
-          session.tldr = parsed.lastAssistantText;
-        }
-        if (parsed.lastUserText && session.goal === 'รอคำสั่งเริ่มต้น...') {
-          session.goal = parsed.lastUserText;
-        }
-        if (parsed.subAgents && parsed.subAgents.length > 0) {
-          for (const tSub of parsed.subAgents) {
-            const existing = session.subAgents.find((s) => s.id === tSub.id);
-            if (!existing) {
-              session.subAgents.push(tSub);
-            } else if (tSub.state === 'done') {
-              existing.state = 'done';
-              existing.tool = 'Completed';
-              if (tSub.resultSummary) existing.resultSummary = tSub.resultSummary;
-            }
-          }
-        }
-      }
-    }
+    this._enrichSessionFromTranscript(session);
+    this._deduplicateSessionsByCwd();
 
     this._emitChange('hook_event', { sessionId: session.id, hookEvent });
     return session;
@@ -556,301 +882,84 @@ class StateStore extends EventEmitter {
   updateSession(sessionId, patch = {}) {
     const session = this.sessions.get(sessionId);
     if (!session) return null;
+    if (patch.room && patch.room !== session.room) {
+      patch.customNamed = true;
+    }
     Object.assign(session, patch, { updatedAt: new Date().toISOString() });
     this._emitChange('session_updated', { sessionId });
     return session;
   }
 
-  removeSession(sessionId) {
-    const deleted = this.sessions.delete(sessionId);
-    if (deleted) {
+  archiveOrRemoveSession(sessionId, permanent = false) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    if (permanent || session.lifecycle === 'history') {
+      this.sessions.delete(sessionId);
       this._emitChange('session_removed', { sessionId });
+      return true;
     }
-    return deleted;
+    session.lifecycle = 'history';
+    session.isProcessAlive = false;
+    session.closedAt = new Date().toISOString();
+    session.updatedAt = new Date().toISOString();
+    session.status = 'closed';
+    session.statusLabel = 'เก็บเข้าประวัติแล้ว • กู้คืนได้';
+    session.interactivePrompt = null;
+    session.pendingAction = null;
+    this._emitChange('session_archived', { sessionId });
+    return true;
   }
 
-  clearAll() {
-    this.sessions.clear();
-    this._emitChange('cleared', {});
-  }
-
-  seedDemoSessions() {
-    // Keep any real live `claude-pid-*` sessions that were already discovered!
-    const liveSessions = Array.from(this.sessions.values()).filter(
-      (s) => s.pid && String(s.id).startsWith('claude-pid-')
-    );
-    this.sessions.clear();
-    for (const live of liveSessions) {
-      this.sessions.set(live.id, live);
-    }
-
-    const now = new Date().toISOString();
-
-    const demoData = [
-      {
-        id: 'room-auth-oauth2',
-        room: 'Room 01 • auth-service',
-        cli: 'claude (pane #1)',
-        cwd: 'C:\\Repo\\agent-mission-control',
-        branch: 'feat/oauth-pkce',
-        dirtyFiles: 4,
-        paneId: '1',
-        status: 'needs_input',
-        statusLabel: 'รอคุณเลือกตอบ (3 ตัวเลือก)',
-        goal: 'เพิ่มระบบ OAuth2 PKCE และแยก Middleware ตรวจสอบ JWT Refresh Token',
-        tldr: 'แก้ไฟล์ src/auth/pkce.ts เสร็จแล้ว กำลังรอให้คุณเลือกอนุมัติการรัน npm run test:integration',
-        pendingAction: 'Do you want to run integration tests for OAuth2 PKCE flow?',
-        interactivePrompt: {
-          question: 'Do you want to proceed with running npm run test:integration?',
-          context: [
-            'Bash command: npm run test:integration -- --grep "PKCE flow"',
-            'Directory: C:\\Repo\\agent-mission-control',
-          ],
-          currentIndex: 1,
-          options: [
-            { index: 1, number: '1', label: 'Yes (รันชุดทดสอบนี้ทันที)', active: true },
-            {
-              index: 2,
-              number: '2',
-              label: "Yes, and don't ask again for npm test commands",
-              active: false,
-            },
-            {
-              index: 3,
-              number: '3',
-              label: 'No, skip tests and review code diff first (esc)',
-              active: false,
-            },
-          ],
-          footer: 'Enter to confirm · Esc to cancel',
-        },
-        stageIndex: 2,
-        currentTool: 'Bash (Waiting Choice)',
-        modifiedFiles: [
-          'src/auth/pkce.ts',
-          'src/middleware/jwt.ts',
-          'test/auth.integration.test.ts',
-        ],
-        subAgents: [
-          {
-            id: 'sub-101',
-            name: 'Sub-Agent: Security Auditor',
-            role: 'ตรวจสอบช่องโหว่ CSRF และ Token Leakage ใน OAuth Callback',
-            subagentType: 'security-review',
-            state: 'done',
-            tool: 'Completed (ไม่พบช่องโหว่)',
-            startedAt: now,
-          },
-          {
-            id: 'sub-102',
-            name: 'Sub-Agent: Integration Test Runner',
-            role: 'เตรียม Mock OAuth Provider และรันชุดทดสอบ',
-            subagentType: 'test-runner',
-            state: 'waiting',
-            tool: 'Waiting Selection',
-            startedAt: now,
-          },
-        ],
-        recentEvents: [
-          {
-            id: 'ev-1',
-            timestamp: now,
-            event: 'PermissionRequest',
-            title: 'รอเลือกตัวเลือก: รันคำสั่ง npm run test:integration',
-            badge: '3 Options',
-            level: 'warning',
-          },
-          {
-            id: 'ev-2',
-            timestamp: now,
-            event: 'PreToolUse',
-            title: 'แก้ไขไฟล์ src/auth/pkce.ts เพิ่ม code_verifier validation',
-            badge: 'Edit: pkce.ts',
-            level: 'info',
-          },
-        ],
-      },
-      {
-        id: 'room-payment-webhook',
-        room: 'Room 02 • payment-api',
-        cli: 'claude (pane #2)',
-        cwd: 'C:\\Repo\\agent-mission-control',
-        branch: 'feat/stripe-retry-queue',
-        dirtyFiles: 6,
-        paneId: '2',
-        status: 'working',
-        statusLabel: 'กำลังทำงาน (2 Sub-agents)',
-        goal: 'สร้างระบบรับ Stripe Webhook พร้อม Dead-Letter Queue เวลาประมวลผลล้มเหลว',
-        tldr: 'แตก Sub-agent 2 ตัวทำงานขนานกัน: ตัวแรกกำลังเขียน Webhook Signature Verifier ส่วนตัวที่สองกำลังสร้างตาราง Retry Queue',
-        pendingAction: null,
-        interactivePrompt: null,
-        stageIndex: 1,
-        currentTool: 'Sub-Agent: Webhook Coder',
-        modifiedFiles: [
-          'src/webhooks/stripe-handler.ts',
-          'src/queue/retry-worker.ts',
-          'prisma/schema.prisma',
-        ],
-        subAgents: [
-          {
-            id: 'sub-201',
-            name: 'Sub-Agent: Webhook Handler Coder',
-            role: 'เขียนระบบตรวจลายเซ็น Stripe และ Idempotency Key',
-            subagentType: 'coder',
-            state: 'working',
-            tool: 'Edit: stripe-handler.ts',
-            startedAt: now,
-          },
-          {
-            id: 'sub-202',
-            name: 'Sub-Agent: Queue & Fixture Builder',
-            role: 'จำลอง Payload payment_intent.succeeded และสร้าง BullMQ Worker',
-            subagentType: 'coder',
-            state: 'working',
-            tool: 'Write: retry-worker.ts',
-            startedAt: now,
-          },
-          {
-            id: 'sub-203',
-            name: 'Sub-Agent: Codebase Explorer',
-            role: 'สำรวจโครงสร้าง Event Bus เดิมของระบบจ่ายเงิน',
-            subagentType: 'explore',
-            state: 'done',
-            tool: 'Completed',
-            startedAt: now,
-          },
-        ],
-        recentEvents: [
-          {
-            id: 'ev-3',
-            timestamp: now,
-            event: 'PreToolUse',
-            title: 'แตก Sub-Agent: Queue & Fixture Builder',
-            badge: 'Sub-Agent',
-            level: 'primary',
-          },
-          {
-            id: 'ev-4',
-            timestamp: now,
-            event: 'PreToolUse',
-            title: 'กำลังแก้ไขไฟล์ src/webhooks/stripe-handler.ts',
-            badge: 'Edit: stripe-handler.ts',
-            level: 'info',
-          },
-        ],
-      },
-      {
-        id: 'room-frontend-perf',
-        room: 'Room 03 • dashboard-ui',
-        cli: 'claude (pane #3)',
-        cwd: 'C:\\Repo\\agent-mission-control',
-        branch: 'fix/chart-rerender',
-        dirtyFiles: 2,
-        paneId: '3',
-        status: 'working',
-        statusLabel: 'กำลังรันเทส E2E',
-        goal: 'แก้อาการกราฟกระพริบและลด Re-render หน้า Real-time Analytics',
-        tldr: 'แยก State ของ Filter ออกจาก Chart Canvas เรียบร้อย กำลังรัน Playwright E2E เพื่อตรวจค่า FPS และ Memory Leak',
-        pendingAction: null,
-        interactivePrompt: null,
-        stageIndex: 2,
-        currentTool: 'Bash: npx playwright test',
-        modifiedFiles: [
-          'src/components/AnalyticsChart.tsx',
-          'src/hooks/useRealtimeStream.ts',
-        ],
-        subAgents: [
-          {
-            id: 'sub-301',
-            name: 'Sub-Agent: UI Performance Verifier',
-            role: 'รัน Playwright ตรวจสอบการกระพริบของ Canvas ตอนข้อมูลไหลเข้า',
-            subagentType: 'verifier',
-            state: 'working',
-            tool: 'Bash: npx playwright test',
-            startedAt: now,
-          },
-        ],
-        recentEvents: [
-          {
-            id: 'ev-5',
-            timestamp: now,
-            event: 'PreToolUse',
-            title: 'กำลังรันทดสอบ Playwright E2E บนหน้า Analytics',
-            badge: 'Bash: playwright',
-            level: 'info',
-          },
-        ],
-      },
-      {
-        id: 'room-db-index',
-        room: 'Room 04 • db-optimizer',
-        cli: 'claude (pane #4)',
-        cwd: 'C:\\Repo\\agent-mission-control',
-        branch: 'chore/orders-composite-idx',
-        dirtyFiles: 1,
-        paneId: '4',
-        status: 'done',
-        statusLabel: 'เสร็จสิ้น • รอคำสั่งถัดไป',
-        goal: 'วิเคราะห์ Slow Query ตาราง orders และสร้าง Composite Index',
-        tldr: 'สร้าง Migration เพิ่ม Index (tenant_id, status, created_at) และวัดผลด้วย EXPLAIN ANALYZE แล้ว เวลา Query ลดลงจาก 420ms เหลือ 18ms พร้อมเปิด PR',
-        pendingAction: null,
-        interactivePrompt: null,
-        stageIndex: 3,
-        currentTool: 'Ready',
-        modifiedFiles: ['migrations/20261125_add_orders_composite_idx.sql'],
-        subAgents: [
-          {
-            id: 'sub-401',
-            name: 'Sub-Agent: SQL Query Benchmarker',
-            role: 'เปรียบเทียบ Execution Plan ก่อนและหลังใส่ Composite Index',
-            subagentType: 'analyzer',
-            state: 'done',
-            tool: 'Completed (เร็วขึ้น 95%)',
-            startedAt: now,
-          },
-        ],
-        recentEvents: [
-          {
-            id: 'ev-6',
-            timestamp: now,
-            event: 'Stop',
-            title: 'ทำงานครบรอบคำสั่งแล้ว พร้อมเปิด Pull Request',
-            badge: 'Done',
-            level: 'success',
-          },
-        ],
-      },
-    ];
-
-    for (const item of demoData) {
-      if (!this.sessions.has(item.id)) {
-        this.sessions.set(item.id, {
-          ...item,
-          createdAt: now,
-          updatedAt: now,
-        });
+  clearHistoryOnly() {
+    for (const [id, s] of this.sessions.entries()) {
+      if (s.lifecycle === 'history' && !s.pinned) {
+        this.sessions.delete(id);
       }
     }
-
-    this._emitChange('demo_seeded', {});
-    return this.getSnapshot();
+    this._emitChange('history_cleared', {});
   }
 
   getSnapshot() {
     const list = Array.from(this.sessions.values()).sort((a, b) => {
-      const rank = { needs_input: 0, error: 1, working: 2, idle: 3, done: 4 };
+      if (a.lifecycle !== b.lifecycle) {
+        return a.lifecycle === 'live' ? -1 : 1;
+      }
+      if (Boolean(a.pinned) !== Boolean(b.pinned)) {
+        return a.pinned ? -1 : 1;
+      }
+      const rank = {
+        needs_input: 0,
+        error: 1,
+        working: 2,
+        idle: 3,
+        done: 4,
+        closed: 5,
+      };
       const rA = rank[a.status] ?? 5;
       const rB = rank[b.status] ?? 5;
       if (rA !== rB) return rA - rB;
       return new Date(b.updatedAt) - new Date(a.updatedAt);
     });
 
+    const liveList = list.filter((s) => s.lifecycle === 'live');
+    const historyList = list.filter((s) => s.lifecycle === 'history');
+    const projects = Array.from(
+      new Set(list.map((s) => s.project || 'General'))
+    ).sort();
+    const categories = Array.from(
+      new Set(list.map((s) => s.category || 'General'))
+    ).sort();
+
     const metrics = {
       totalRooms: list.length,
-      needsInput: list.filter((s) => s.status === 'needs_input').length,
-      working: list.filter((s) => s.status === 'working').length,
-      done: list.filter((s) => s.status === 'done').length,
-      activeSubAgents: list.reduce(
+      liveRooms: liveList.length,
+      historyRooms: historyList.length,
+      pinnedRooms: list.filter((s) => s.pinned).length,
+      needsInput: liveList.filter((s) => s.status === 'needs_input').length,
+      working: liveList.filter((s) => s.status === 'working').length,
+      done: liveList.filter((s) => s.status === 'done' || s.status === 'idle')
+        .length,
+      activeSubAgents: liveList.reduce(
         (sum, s) =>
           sum +
           (Array.isArray(s.subAgents)
@@ -869,6 +978,8 @@ class StateStore extends EventEmitter {
     return {
       stages: STAGES,
       metrics,
+      projects,
+      categories,
       sessions: list,
     };
   }

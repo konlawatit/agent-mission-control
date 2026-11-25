@@ -7,18 +7,27 @@ let appState = {
   ],
   metrics: {
     totalRooms: 0,
+    liveRooms: 0,
+    historyRooms: 0,
+    pinnedRooms: 0,
     needsInput: 0,
     working: 0,
     done: 0,
     activeSubAgents: 0,
     totalSubAgents: 0,
   },
+  projects: [],
+  categories: [],
   sessions: [],
   hooks: { installed: false, installedEvents: [] },
 };
 
 let selectedSessionId = null;
 let viewMode = 'split'; // 'split' | 'grid'
+let activeTab = 'live'; // 'live' | 'needs_input' | 'history' | 'by_project' | 'pinned' | 'all'
+let searchQuery = '';
+let selectedProject = 'ALL';
+let selectedCategory = 'ALL';
 
 function escapeHtml(str) {
   return String(str || '')
@@ -35,6 +44,22 @@ function escapeJsAttr(str) {
     .replace(/"/g, '&quot;');
 }
 
+function formatRelativeTime(isoStr) {
+  if (!isoStr) return '';
+  const diffSec = Math.max(
+    0,
+    Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000)
+  );
+  if (diffSec < 15) return 'เมื่อสักครู่';
+  if (diffSec < 60) return `${diffSec} วินาทีที่แล้ว`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} นาทีที่แล้ว`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr} ชั่วโมงที่แล้ว`;
+  const diffDay = Math.floor(diffHr / 24);
+  return `${diffDay} วันที่แล้ว`;
+}
+
 function showToast(msg) {
   const el = document.getElementById('toast');
   if (!el) return;
@@ -43,7 +68,7 @@ function showToast(msg) {
   clearTimeout(window.__toastTimer);
   window.__toastTimer = setTimeout(() => {
     el.style.display = 'none';
-  }, 4000);
+  }, 4200);
 }
 
 async function fetchInitialState() {
@@ -52,9 +77,8 @@ async function fetchInitialState() {
     const data = await res.json();
     if (data.ok) {
       appState = { ...appState, ...data };
-      if (!selectedSessionId && appState.sessions.length > 0) {
-        selectedSessionId = appState.sessions[0].id;
-      }
+      // If no live rooms exist yet but history exists, keep tab on 'live' or switch if needed
+      ensureValidSelection();
       renderAll();
     }
   } catch (err) {
@@ -79,14 +103,10 @@ function connectSSE() {
       if (payload.snapshot) {
         appState.stages = payload.snapshot.stages || appState.stages;
         appState.metrics = payload.snapshot.metrics || appState.metrics;
+        appState.projects = payload.snapshot.projects || [];
+        appState.categories = payload.snapshot.categories || [];
         appState.sessions = payload.snapshot.sessions || [];
-        if (
-          (!selectedSessionId ||
-            !appState.sessions.some((s) => s.id === selectedSessionId)) &&
-          appState.sessions.length > 0
-        ) {
-          selectedSessionId = appState.sessions[0].id;
-        }
+        ensureValidSelection();
         renderAll();
       }
     } catch (err) {
@@ -100,6 +120,63 @@ function connectSSE() {
         '<span class="dot warning"></span><span>Reconnecting...</span>';
     }
   };
+}
+
+function getFilteredSessions() {
+  return appState.sessions.filter((s) => {
+    // 1. Tab filter
+    if (activeTab === 'live' && s.lifecycle !== 'live') return false;
+    if (
+      activeTab === 'needs_input' &&
+      !(s.lifecycle === 'live' && s.status === 'needs_input')
+    ) {
+      return false;
+    }
+    if (activeTab === 'history' && s.lifecycle !== 'history') return false;
+    if (activeTab === 'pinned' && !s.pinned) return false;
+
+    // 2. Project filter
+    if (selectedProject !== 'ALL' && s.project !== selectedProject) {
+      return false;
+    }
+
+    // 3. Category filter
+    if (selectedCategory !== 'ALL' && s.category !== selectedCategory) {
+      return false;
+    }
+
+    // 4. Search filter
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      const hay = [
+        s.room,
+        s.project,
+        s.category,
+        s.cwd,
+        s.branch,
+        s.goal,
+        s.tldr,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+
+    return true;
+  });
+}
+
+function ensureValidSelection() {
+  const filtered = getFilteredSessions();
+  if (
+    filtered.length > 0 &&
+    (!selectedSessionId || !filtered.some((s) => s.id === selectedSessionId))
+  ) {
+    selectedSessionId = filtered[0].id;
+  } else if (filtered.length === 0) {
+    selectedSessionId = null;
+  }
 }
 
 function renderHooksButton() {
@@ -148,52 +225,143 @@ function renderMetrics() {
   if (!el) return;
 
   el.innerHTML = `
-    <div class="metric-card ${m.needsInput > 0 ? 'alert-border' : ''}">
+    <div class="metric-card" onclick="switchTab('live')">
       <div>
-        <div class="metric-label">⚠️ รอคุณเลือกตอบ / Approve (Attention)</div>
+        <div class="metric-label">🟢 เปิดอยู่ตอนนี้ (Live Sessions)</div>
+        <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">Terminal Tab ที่กำลังทำงานอยู่</div>
+      </div>
+      <div class="metric-value" style="color: var(--success);">
+        ${m.liveRooms || 0}
+      </div>
+    </div>
+
+    <div class="metric-card ${m.needsInput > 0 ? 'alert-border' : ''}" onclick="switchTab('needs_input')">
+      <div>
+        <div class="metric-label">⚠️ รอคุณเลือกตอบ / Approve</div>
         <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">คลิกเลือกตัวเลือกจากหน้าเว็บได้ทันที</div>
       </div>
       <div class="metric-value" style="color: ${m.needsInput > 0 ? 'var(--warning)' : 'var(--text)'};">
-        ${m.needsInput}
+        ${m.needsInput || 0}
       </div>
     </div>
 
-    <div class="metric-card">
+    <div class="metric-card" onclick="switchTab('history')">
       <div>
-        <div class="metric-label">⚡ ห้องที่กำลังรันงาน (Active Rooms)</div>
-        <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">จากทั้งหมด ${m.totalRooms} ห้องที่เปิดอยู่</div>
+        <div class="metric-label">🕘 เคยเปิดไว้ / ปิดไปแล้ว (History)</div>
+        <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">เผื่อเผลอปิด กด Resume กู้คืนได้ทันที</div>
+      </div>
+      <div class="metric-value" style="color: #94a3b8;">
+        ${m.historyRooms || 0}
+      </div>
+    </div>
+
+    <div class="metric-card" onclick="switchTab('by_project')">
+      <div>
+        <div class="metric-label">📁 โปรเจกต์ทั้งหมด & Sub-Agents</div>
+        <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">${(appState.projects || []).length} โปรเจกต์ • ${m.activeSubAgents || 0} Active Sub-Agents</div>
       </div>
       <div class="metric-value" style="color: var(--primary);">
-        ${m.working} <span style="font-size:14px; color:var(--text-muted);">/ ${m.totalRooms}</span>
-      </div>
-    </div>
-
-    <div class="metric-card">
-      <div>
-        <div class="metric-label">🤖 Sub-Agents ที่กำลังทำงาน</div>
-        <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">แตก Task ขนานรวม ${m.totalSubAgents} ตัว</div>
-      </div>
-      <div class="metric-value" style="color: var(--purple);">
-        ${m.activeSubAgents}
-      </div>
-    </div>
-
-    <div class="metric-card">
-      <div>
-        <div class="metric-label">✅ ห้องที่เสร็จรอบคำสั่ง (Ready)</div>
-        <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">พร้อมตรวจผลหรือสั่งงานต่อ</div>
-      </div>
-      <div class="metric-value" style="color: var(--success);">
-        ${m.done}
+        ${(appState.projects || []).length}
       </div>
     </div>
   `;
 }
 
-/**
- * Renders interactive multiple-choice buttons for a session waiting on a Claude TUI menu
- * (such as `Try the new fullscreen renderer? 1. Yes, try it / 2. Not now`, permission prompts, etc.)
- */
+function renderTabsAndFilters() {
+  const m = appState.metrics;
+  const tabsBar = document.getElementById('tabs-bar');
+  if (tabsBar) {
+    const tabs = [
+      { id: 'live', label: '🟢 เปิดอยู่ตอนนี้ (Live)', count: m.liveRooms || 0 },
+      {
+        id: 'needs_input',
+        label: '⚠️ รอเลือกตอบ',
+        count: m.needsInput || 0,
+      },
+      {
+        id: 'history',
+        label: '🕘 ประวัติที่ปิดแล้ว (History)',
+        count: m.historyRooms || 0,
+      },
+      {
+        id: 'by_project',
+        label: '📁 แยกตามโปรเจกต์',
+        count: (appState.projects || []).length,
+      },
+      {
+        id: 'pinned',
+        label: '📌 ปักหมุด',
+        count: m.pinnedRooms || 0,
+      },
+      { id: 'all', label: '🌐 ทั้งหมด', count: m.totalRooms || 0 },
+    ];
+
+    tabsBar.innerHTML = tabs
+      .map(
+        (t) => `
+        <button class="tab-btn ${activeTab === t.id ? 'active' : ''}"
+                onclick="switchTab('${t.id}')">
+          <span>${t.label}</span>
+          <span class="tab-count">${t.count}</span>
+        </button>
+      `
+      )
+      .join('');
+  }
+
+  // Update project & category select options
+  const projSelect = document.getElementById('project-filter');
+  if (projSelect) {
+    const current = selectedProject;
+    projSelect.innerHTML =
+      `<option value="ALL">📁 ทุกโปรเจกต์ (${(appState.projects || []).length})</option>` +
+      (appState.projects || [])
+        .map(
+          (p) =>
+            `<option value="${escapeHtml(p)}" ${current === p ? 'selected' : ''}>📁 ${escapeHtml(p)}</option>`
+        )
+        .join('');
+  }
+
+  const catSelect = document.getElementById('category-filter');
+  if (catSelect) {
+    const current = selectedCategory;
+    catSelect.innerHTML =
+      `<option value="ALL">🏷️ ทุกหมวดหมู่ (${(appState.categories || []).length})</option>` +
+      (appState.categories || [])
+        .map(
+          (c) =>
+            `<option value="${escapeHtml(c)}" ${current === c ? 'selected' : ''}>🏷️ ${escapeHtml(c)}</option>`
+        )
+        .join('');
+  }
+}
+
+window.switchTab = function (tabId) {
+  activeTab = tabId;
+  ensureValidSelection();
+  renderTabsAndFilters();
+  renderWorkspace();
+};
+
+window.handleSearchChange = function (val) {
+  searchQuery = val || '';
+  ensureValidSelection();
+  renderWorkspace();
+};
+
+window.handleProjectFilter = function (val) {
+  selectedProject = val || 'ALL';
+  ensureValidSelection();
+  renderWorkspace();
+};
+
+window.handleCategoryFilter = function (val) {
+  selectedCategory = val || 'ALL';
+  ensureValidSelection();
+  renderWorkspace();
+};
+
 function buildInteractiveChoiceBoxHtml(s, compact = false) {
   const prompt = s.interactivePrompt;
   if (!prompt || !Array.isArray(prompt.options) || prompt.options.length === 0) {
@@ -294,7 +462,7 @@ function renderAttentionBanner() {
   const el = document.getElementById('attention-section');
   if (!el) return;
   const waitingRooms = appState.sessions.filter(
-    (s) => s.status === 'needs_input'
+    (s) => s.lifecycle === 'live' && s.status === 'needs_input'
   );
   if (waitingRooms.length === 0) {
     el.style.display = 'none';
@@ -372,7 +540,9 @@ function buildPipelineHtml(session) {
         .map((st, idx) => {
           const isDone = idx < session.stageIndex || session.status === 'done';
           const isCurrent =
-            idx === session.stageIndex && session.status !== 'done';
+            idx === session.stageIndex &&
+            session.status !== 'done' &&
+            session.lifecycle === 'live';
           const cls = isCurrent ? 'current' : isDone ? 'done' : '';
           const prefix = isDone ? '✓ ' : isCurrent ? '● ' : '';
           return `<div class="stage-step ${cls}">${prefix}${escapeHtml(st.label)}</div>`;
@@ -384,26 +554,30 @@ function buildPipelineHtml(session) {
 
 function buildRoomCardHtml(s, isDetailedGrid = false) {
   const isSelected = s.id === selectedSessionId;
-  const dotClass =
-    s.status === 'needs_input'
-      ? 'warning'
-      : s.status === 'working'
-      ? 'primary'
-      : 'success';
-  const cardBorderClass =
-    s.status === 'needs_input'
-      ? 'needs-input'
-      : s.status === 'working'
-      ? 'working'
-      : 'done';
+  const isHistory = s.lifecycle === 'history';
+  const dotClass = isHistory
+    ? 'closed'
+    : s.status === 'needs_input'
+    ? 'warning'
+    : s.status === 'working'
+    ? 'primary'
+    : 'success';
+  const cardBorderClass = isHistory
+    ? 'closed-card'
+    : s.status === 'needs_input'
+    ? 'needs-input'
+    : s.status === 'working'
+    ? 'working'
+    : 'done';
 
   const activeSubs = (s.subAgents || []).filter(
     (sub) => sub.state === 'working' || sub.state === 'waiting'
   ).length;
 
-  // Quick inline buttons on the card itself if interactivePrompt is active
   const inlineChoicesHtml =
-    s.interactivePrompt && Array.isArray(s.interactivePrompt.options)
+    !isHistory &&
+    s.interactivePrompt &&
+    Array.isArray(s.interactivePrompt.options)
       ? `
         <div style="display:flex; flex-direction:column; gap:6px; padding:9px 11px; border-radius:8px; background:rgba(245, 158, 11, 0.1); border:1px solid rgba(245, 158, 11, 0.45);">
           <div style="font-size:12px; font-weight:700; color:#fbbf24;">
@@ -426,17 +600,38 @@ function buildRoomCardHtml(s, isDetailedGrid = false) {
       `
       : '';
 
+  const historyActionHtml = isHistory
+    ? `
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:4px;">
+        <span style="font-size:11.5px; color:var(--text-muted);">
+          🕘 ปิดเมื่อ ${formatRelativeTime(s.closedAt || s.updatedAt)}
+        </span>
+        <button class="btn btn-success" style="padding:5px 11px; font-size:12px;"
+                onclick="event.stopPropagation(); resumeSession('${escapeJsAttr(s.id)}')">
+          🔄 กู้คืน / เปิดต่อใน Terminal
+        </button>
+      </div>
+    `
+    : '';
+
   return `
     <div class="room-card ${cardBorderClass} ${isSelected ? 'selected' : ''}"
          onclick="selectSession('${escapeJsAttr(s.id)}')">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
         <div style="display:flex; align-items:center; gap:8px; font-weight:700; font-size:15px;">
           <span class="dot ${dotClass}"></span>
-          <span>${escapeHtml(s.room)}</span>
+          <span>${s.pinned ? '📌 ' : ''}${escapeHtml(s.room)}</span>
         </div>
-        <span class="status-badge ${escapeHtml(s.status)}">
-          ${escapeHtml(s.statusLabel)}
-        </span>
+        <div style="display:flex; align-items:center; gap:6px;">
+          <span class="pill" style="font-size:11px; padding:1px 8px;">🏷️ ${escapeHtml(s.category || 'General')}</span>
+          <span class="status-badge ${escapeHtml(s.status)}">
+            ${escapeHtml(s.statusLabel)}
+          </span>
+        </div>
+      </div>
+
+      <div style="font-size:12px; color:var(--text-muted);" class="mono">
+        📁 ${escapeHtml(s.project || '')} • ${escapeHtml(s.cwd || '')}
       </div>
 
       <div style="font-size:13px; color:var(--text); font-weight:500;">
@@ -452,25 +647,11 @@ function buildRoomCardHtml(s, isDetailedGrid = false) {
         ${escapeHtml(s.tldr)}
       </div>
 
-      ${
-        isDetailedGrid && s.subAgents && s.subAgents.length > 0
-          ? `<div style="display:flex; flex-direction:column; gap:5px;">
-              ${s.subAgents
-                .map(
-                  (sub) => `
-                <div style="display:flex; justify-content:space-between; font-size:12px; background:var(--bg); padding:6px 10px; border-radius:6px; border:1px solid var(--border);">
-                  <span>🤖 <b>${escapeHtml(sub.name)}</b> — ${escapeHtml(sub.role)}</span>
-                  <span class="mono" style="color:${sub.state === 'working' ? 'var(--primary)' : 'var(--success)'};">[${escapeHtml(sub.tool)}]</span>
-                </div>`
-                )
-                .join('')}
-            </div>`
-          : ''
-      }
+      ${historyActionHtml}
 
-      <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; color:var(--text-muted);" class="mono">
+      <div style="display:flex; justify-content:space-between; align-items:center; font-size:11.5px; color:var(--text-muted);" class="mono">
         <span>🌿 ${escapeHtml(s.branch)} ${s.dirtyFiles ? `(${s.dirtyFiles} modified)` : ''}</span>
-        <span>${s.pid ? `🟢 PID ${s.pid} • ` : ''}🤖 ${(s.subAgents || []).length} Sub (${activeSubs} active)</span>
+        <span>${s.pid ? `🟢 PID ${s.pid} • ` : ''}อัปเดต ${formatRelativeTime(s.updatedAt)}</span>
       </div>
     </div>
   `;
@@ -479,11 +660,23 @@ function buildRoomCardHtml(s, isDetailedGrid = false) {
 function buildInspectorHtml(s) {
   if (!s) {
     return `
-      <div class="inspector" style="text-align:center; padding:48px; color:var(--text-muted);">
-        ยังไม่มีห้องที่เลือก กดปุ่ม <b>"+ เปิดห้อง Agent ใหม่"</b> หรือ <b>"🔄 สแกนหน้าจอ Terminal ทันที"</b> ด้านบนได้เลยครับ
+      <div class="inspector" style="text-align:center; padding:48px 24px; color:var(--text-muted);">
+        <div style="font-size:32px; margin-bottom:10px;">🎛️</div>
+        <div style="font-size:15px; font-weight:600; color:var(--text); margin-bottom:6px;">
+          ไม่พบ Session ในมุมมอง/ตัวกรองนี้
+        </div>
+        <div style="font-size:13px; max-width:460px; margin:0 auto 16px;">
+          เมื่อคุณเปิด <code>claude</code> ใน Windows Terminal หรือ PowerShell ระบบจะตรวจจับและบันทึกห้องให้อัตโนมัติ และหากเผลอปิด Tab ระบบจะย้ายมาเก็บไว้ในแท็บ <b>"🕘 ประวัติที่ปิดแล้ว (History)"</b>
+        </div>
+        <div style="display:flex; justify-content:center; gap:10px;">
+          <button class="btn btn-primary" onclick="openSpawnModal()">+ เปิดห้อง Agent ใหม่</button>
+          <button class="btn" onclick="scanTerminalsNow()">🔄 สแกนหน้าจอ Terminal ทันที</button>
+        </div>
       </div>
     `;
   }
+
+  const isHistory = s.lifecycle === 'history';
 
   const subAgentsHtml =
     s.subAgents && s.subAgents.length > 0
@@ -529,7 +722,7 @@ function buildInspectorHtml(s) {
   const eventsHtml =
     s.recentEvents && s.recentEvents.length > 0
       ? s.recentEvents
-          .slice(0, 6)
+          .slice(0, 8)
           .map(
             (ev) => `
           <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--border); font-size:12.5px;">
@@ -545,16 +738,41 @@ function buildInspectorHtml(s) {
     ? `
       <div class="section-box">
         <div class="section-title">
-          <span>🖥️ หน้าจอ Terminal ล่าสุด (Live Console Screen Buffer — PID ${escapeHtml(s.pid || 'N/A')})</span>
-          <div style="display:flex; gap:6px;">
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">↑</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">↓</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">↵ Enter</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">Esc</button>
-            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="scanTerminalsNow()">🔄 รีเฟรชจอ</button>
-          </div>
+          <span>🖥️ หน้าจอ Terminal ล่าสุด (${isHistory ? 'ภาพหน้าจอก่อนปิด Tab' : `Live Console Buffer — PID ${escapeHtml(s.pid || 'N/A')}`})</span>
+          ${
+            !isHistory
+              ? `<div style="display:flex; gap:6px;">
+                  <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">↑</button>
+                  <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">↓</button>
+                  <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">↵ Enter</button>
+                  <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">Esc</button>
+                  <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="scanTerminalsNow()">🔄 รีเฟรชจอ</button>
+                </div>`
+              : ''
+          }
         </div>
         <div class="terminal-preview">${escapeHtml(s.screenPreview)}</div>
+      </div>
+    `
+    : '';
+
+  const recoveryBannerHtml = isHistory
+    ? `
+      <div class="choice-card" style="border-color: var(--success); background: linear-gradient(135deg, rgba(16, 185, 129, 0.12), rgba(19, 26, 39, 0.96));">
+        <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px;">
+          <div>
+            <div style="font-weight:700; font-size:15px; color:#34d399;">
+              🕘 Session นี้ถูกปิดหน้าต่าง Terminal ไปแล้ว (${formatRelativeTime(s.closedAt || s.updatedAt)})
+            </div>
+            <div style="font-size:12.5px; color:var(--text-muted); margin-top:3px;">
+              ระบบจดจำโฟลเดอร์โปรเจกต์ <code>${escapeHtml(s.cwd)}</code> และประวัติไว้ครบถ้วน กดปุ่มด้านขวาเพื่อเปิด Terminal และคุยต่อจากจุดเดิมได้ทันที
+            </div>
+          </div>
+          <button class="btn btn-success" style="padding:10px 16px; font-size:13.5px;"
+                  onclick="resumeSession('${escapeJsAttr(s.id)}')">
+            🔄 กู้คืน / เปิดต่อใน Terminal (Resume Session)
+          </button>
+        </div>
       </div>
     `
     : '';
@@ -564,34 +782,49 @@ function buildInspectorHtml(s) {
       <!-- Room Header -->
       <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; gap:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
         <div>
-          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-            <h2 style="font-size:19px; font-weight:700;">${escapeHtml(s.room)}</h2>
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <h2 style="font-size:19px; font-weight:700;">${s.pinned ? '📌 ' : ''}${escapeHtml(s.room)}</h2>
+            <span class="pill">🏷️ ${escapeHtml(s.category || 'General')}</span>
             <span class="pill mono">${escapeHtml(s.cli)}</span>
             <span class="pill mono">🌿 ${escapeHtml(s.branch)}</span>
-            ${s.pid ? `<span class="pill mono" style="color:var(--success);">🟢 Connected PID ${s.pid}</span>` : ''}
+            ${
+              s.pid
+                ? `<span class="pill mono" style="color:var(--success);">🟢 Live PID ${s.pid}</span>`
+                : `<span class="pill mono" style="color:#94a3b8;">🕘 Saved in History</span>`
+            }
           </div>
-          <div class="mono" style="font-size:12px; color:var(--text-muted); margin-top:4px;">
-            📁 ${escapeHtml(s.cwd || 'Local Workspace')} • Session ID: ${escapeHtml(s.id)}
+          <div class="mono" style="font-size:12px; color:var(--text-muted); margin-top:5px;">
+            📁 ${escapeHtml(s.cwd || 'Local Workspace')} • เปิดใช้งานแล้ว ${s.openCount || 1} ครั้ง • อัปเดตล่าสุด ${formatRelativeTime(s.updatedAt)}
           </div>
         </div>
-        <div style="display:flex; gap:8px;">
-          <button class="btn" onclick="openRoomTerminal('${escapeJsAttr(s.id)}')">
-            🖥️ เปิดใน Windows Terminal Tab
+        <div style="display:flex; flex-wrap:wrap; gap:6px;">
+          <button class="btn" onclick="togglePinRoom('${escapeJsAttr(s.id)}', ${!s.pinned})">
+            ${s.pinned ? '📌 เลิกปักหมุด' : '📌 ปักหมุดกันลืม'}
           </button>
-          <button class="btn" onclick="removeRoom('${escapeJsAttr(s.id)}')">
-            🗑️ ปิดการ์ดห้องนี้
+          <button class="btn" onclick="openEditModal('${escapeJsAttr(s.id)}')">
+            ✏️ เปลี่ยนชื่อ / หมวดหมู่
           </button>
+          <button class="btn btn-success" onclick="resumeSession('${escapeJsAttr(s.id)}')">
+            🔄 เปิดต่อใน Terminal (Resume)
+          </button>
+          ${
+            !isHistory
+              ? `<button class="btn" onclick="archiveRoom('${escapeJsAttr(s.id)}')">📥 เก็บเข้าประวัติ</button>`
+              : `<button class="btn" onclick="removeRoomPermanent('${escapeJsAttr(s.id)}')">🗑️ ลบถาวร</button>`
+          }
         </div>
       </div>
 
-      <!-- Interactive Choice Card (Shows prominent selectable options whenever Claude asks a multiple-choice / TUI question) -->
-      ${buildInteractiveChoiceBoxHtml(s, false)}
+      ${recoveryBannerHtml}
+
+      <!-- Interactive Choice Card -->
+      ${!isHistory ? buildInteractiveChoiceBoxHtml(s, false) : ''}
 
       <!-- Current Goal & Workflow Stage -->
       <div>
         <div class="section-title">
-          <span>📊 ขั้นตอนการทำงานปัจจุบัน (Workflow Pipeline)</span>
-          <span class="mono" style="color:var(--primary);">Active Tool: ${escapeHtml(s.currentTool || 'Idle')}</span>
+          <span>📊 ขั้นตอนการทำงาน (Workflow Pipeline)</span>
+          <span class="mono" style="color:var(--primary);">Status: ${escapeHtml(s.currentTool || 'Idle')}</span>
         </div>
         ${buildPipelineHtml(s)}
       </div>
@@ -613,7 +846,7 @@ function buildInspectorHtml(s) {
       <!-- Sub-Agent Hierarchy Tree -->
       <div class="section-box">
         <div class="section-title">
-          <span>🌳 โครงสร้าง Sub-Agents ที่ทำงานอยู่ใน Session นี้ (${(s.subAgents || []).length} ตัว)</span>
+          <span>🌳 โครงสร้าง Sub-Agents ใน Session นี้ (${(s.subAgents || []).length} ตัว)</span>
           <span>Main Agent → Child Tasks</span>
         </div>
         ${subAgentsHtml}
@@ -626,7 +859,7 @@ function buildInspectorHtml(s) {
           ${filesHtml}
         </div>
         <div class="section-box">
-          <div class="section-title"><span>⚡ กิจกรรมล่าสุด (Structured Events)</span></div>
+          <div class="section-title"><span>⚡ ประวัติเหตุการณ์ (Session Timeline)</span></div>
           ${eventsHtml}
         </div>
       </div>
@@ -634,7 +867,7 @@ function buildInspectorHtml(s) {
       <!-- Central Command Center -->
       <div class="section-box" style="background:var(--surface-elevated);">
         <div class="section-title">
-          <span>⌨️ สั่งการไปยัง ${escapeHtml(s.room)} โดยตรง (ส่งเข้า Console Tab ทันที)</span>
+          <span>⌨️ สั่งการไปยัง ${escapeHtml(s.room)} โดยตรง</span>
           <label style="display:flex; align-items:center; gap:6px; text-transform:none; font-weight:500; cursor:pointer;">
             <input type="checkbox" id="headless-toggle" />
             <span>รันผ่าน Claude Headless Resume (--resume)</span>
@@ -657,9 +890,6 @@ function buildInspectorHtml(s) {
           <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', 'สรุปสิ่งที่แก้ไขไปทั้งหมดพร้อมตรวจสอบ git status')">
             📝 ขอสรุปงานที่ทำเสร็จแล้ว
           </button>
-          <button class="btn" onclick="simulateSubAgent('${escapeJsAttr(s.id)}')">
-            🤖 จำลองการแตก Sub-Agent
-          </button>
         </div>
 
         <div class="cmd-bar">
@@ -675,27 +905,89 @@ function buildInspectorHtml(s) {
   `;
 }
 
+function buildGroupedByProjectHtml(sessions) {
+  if (sessions.length === 0) {
+    return buildInspectorHtml(null);
+  }
+  const groups = new Map();
+  for (const s of sessions) {
+    const key = s.project || 'General';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+
+  let html = '';
+  for (const [projName, items] of groups.entries()) {
+    const liveCount = items.filter((i) => i.lifecycle === 'live').length;
+    const histCount = items.filter((i) => i.lifecycle === 'history').length;
+    const sampleCwd = items[0] ? items[0].cwd : '';
+
+    html += `
+      <div class="project-group">
+        <div class="project-group-header">
+          <div>
+            <strong style="font-size:15px;">📁 โปรเจกต์: ${escapeHtml(projName)}</strong>
+            <span class="mono" style="font-size:12px; color:var(--text-muted); margin-left:10px;">${escapeHtml(sampleCwd)}</span>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <span class="pill" style="color:var(--success);">🟢 เปิดอยู่ ${liveCount}</span>
+            <span class="pill">🕘 ประวัติ ${histCount}</span>
+          </div>
+        </div>
+        <div class="grid-layout">
+          ${items.map((s) => buildRoomCardHtml(s, true)).join('')}
+        </div>
+      </div>
+    `;
+  }
+  return html;
+}
+
 function renderWorkspace() {
   const container = document.getElementById('main-workspace');
   if (!container) return;
 
+  const filtered = getFilteredSessions();
+
+  if (activeTab === 'by_project') {
+    container.innerHTML = buildGroupedByProjectHtml(filtered);
+    return;
+  }
+
   if (viewMode === 'grid') {
-    container.innerHTML = `
-      <div class="grid-layout">
-        ${appState.sessions.map((s) => buildRoomCardHtml(s, true)).join('')}
-      </div>
-    `;
+    container.innerHTML =
+      filtered.length > 0
+        ? `<div class="grid-layout">${filtered
+            .map((s) => buildRoomCardHtml(s, true))
+            .join('')}</div>`
+        : buildInspectorHtml(null);
     return;
   }
 
   const activeSession =
-    appState.sessions.find((s) => s.id === selectedSessionId) ||
-    appState.sessions[0];
+    filtered.find((s) => s.id === selectedSessionId) || filtered[0] || null;
+
+  const clearHistoryBtnHtml =
+    activeTab === 'history' && filtered.length > 0
+      ? `<div style="display:flex; justify-content:space-between; align-items:center; padding:4px 4px 8px;">
+          <span style="font-size:12px; color:var(--text-muted);">🕘 รายการ Session ที่เคยเปิดไว้ (กด Resume เพื่อเปิดต่อใน Terminal)</span>
+          <button class="btn" style="padding:4px 10px; font-size:11.5px;" onclick="clearUnpinnedHistory()">🗑️ ล้างประวัติที่ไม่ได้ปักหมุด</button>
+        </div>`
+      : '';
 
   container.innerHTML = `
     <div class="split-layout">
-      <div class="room-list">
-        ${appState.sessions.map((s) => buildRoomCardHtml(s, false)).join('')}
+      <div>
+        ${clearHistoryBtnHtml}
+        <div class="room-list">
+          ${
+            filtered.length > 0
+              ? filtered.map((s) => buildRoomCardHtml(s, false)).join('')
+              : `<div class="section-box" style="text-align:center; padding:24px; color:var(--text-muted);">
+                  ไม่มีรายการในแท็บ "${escapeHtml(activeTab)}"
+                </div>`
+          }
+        </div>
       </div>
       <div>
         ${buildInspectorHtml(activeSession)}
@@ -708,14 +1000,17 @@ function renderAll() {
   renderHooksButton();
   renderMetrics();
   renderAttentionBanner();
+  renderTabsAndFilters();
   renderWorkspace();
 }
 
 window.selectSession = function (sessionId) {
   selectedSessionId = sessionId;
-  if (viewMode === 'grid') {
+  if (viewMode === 'grid' || activeTab === 'by_project') {
     viewMode = 'split';
+    if (activeTab === 'by_project') activeTab = 'all';
   }
+  renderTabsAndFilters();
   renderWorkspace();
 };
 
@@ -811,54 +1106,96 @@ window.submitCommand = async function (sessionId) {
   await sendQuickCommand(sessionId, text, false);
 };
 
-window.simulateSubAgent = async function (sessionId) {
-  const session = appState.sessions.find((s) => s.id === sessionId);
-  if (!session) return;
-  await fetch('/api/hook', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      session_id: sessionId,
-      cwd: session.cwd,
-      hook_event_name: 'PreToolUse',
-      tool_name: 'Task',
-      tool_use_id: `sub-${Date.now()}`,
-      tool_input: {
-        description: 'Parallel Code Reviewer & Test Writer',
-        subagent_type: 'code-reviewer',
-        prompt: 'ตรวจสอบ Edge Cases และเขียน Unit Test ครอบคลุมฟังก์ชันล่าสุด',
-      },
-    }),
-  });
-  showToast(`🤖 แตก Sub-Agent ตัวใหม่ใน ${session.room} เรียบร้อย!`);
-};
-
-window.openRoomTerminal = async function (sessionId) {
+window.resumeSession = async function (sessionId) {
   try {
-    const res = await fetch('/api/session/open-terminal', {
+    const res = await fetch('/api/session/resume', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId }),
+      body: JSON.stringify({ sessionId, resume: true }),
     });
     const data = await res.json();
-    showToast(`🖥️ ${data.message}`);
+    showToast(`🔄 ${data.message}`);
+    activeTab = 'live';
+    renderTabsAndFilters();
   } catch (err) {
-    showToast('❌ ไม่สามารถเปิด Terminal: ' + err.message);
+    showToast('❌ กู้คืน Session ไม่สำเร็จ: ' + err.message);
   }
 };
 
-window.removeRoom = async function (sessionId) {
+window.togglePinRoom = async function (sessionId, pinnedState) {
+  await fetch('/api/session/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId,
+      patch: { pinned: Boolean(pinnedState) },
+    }),
+  });
+  showToast(
+    pinnedState
+      ? '📌 ปักหมุดห้องนี้ไว้ในรายการสำคัญแล้ว'
+      : '📌 ยกเลิกการปักหมุดแล้ว'
+  );
+};
+
+window.openEditModal = function (sessionId) {
+  const s = appState.sessions.find((item) => item.id === sessionId);
+  if (!s) return;
+  document.getElementById('edit-session-id').value = s.id;
+  document.getElementById('edit-room-name').value = s.room || '';
+  document.getElementById('edit-room-category').value = s.category || 'General';
+  document.getElementById('edit-room-goal').value = s.goal || '';
+  document.getElementById('edit-modal').classList.add('open');
+};
+
+window.closeEditModal = function () {
+  document.getElementById('edit-modal').classList.remove('open');
+};
+
+window.submitEditRoom = async function () {
+  const sessionId = document.getElementById('edit-session-id').value;
+  const room = document.getElementById('edit-room-name').value.trim();
+  const category =
+    document.getElementById('edit-room-category').value.trim() || 'General';
+  const goal = document.getElementById('edit-room-goal').value.trim();
+
+  await fetch('/api/session/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId,
+      patch: { room, category, goal },
+    }),
+  });
+  closeEditModal();
+  showToast('✅ บันทึกชื่อห้องและหมวดหมู่เรียบร้อย');
+};
+
+window.archiveRoom = async function (sessionId) {
+  await fetch('/api/session/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'archive', sessionId }),
+  });
+  showToast('📥 เก็บห้องเข้าแท็บ "🕘 ประวัติที่ปิดแล้ว" เรียบร้อย');
+};
+
+window.removeRoomPermanent = async function (sessionId) {
   await fetch('/api/session/update', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'remove', sessionId }),
   });
-  showToast('🗑️ ปิดการ์ดห้องเรียบร้อย');
+  showToast('🗑️ ลบประวัติห้องนี้ถาวรแล้ว');
 };
 
-window.seedDemoData = async function () {
-  await fetch('/api/demo/seed', { method: 'POST' });
-  showToast('🧪 โหลดข้อมูลจำลองพร้อมห้องที่มีตัวเลือก Interactive เรียบร้อย');
+window.clearUnpinnedHistory = async function () {
+  await fetch('/api/session/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'clear-history' }),
+  });
+  showToast('🗑️ ล้างประวัติห้องที่ไม่ได้ปักหมุดเรียบร้อย');
 };
 
 window.openSpawnModal = function () {
@@ -871,6 +1208,8 @@ window.closeSpawnModal = function () {
 
 window.submitSpawnRoom = async function () {
   const room = document.getElementById('spawn-room').value.trim();
+  const category =
+    document.getElementById('spawn-category').value.trim() || 'Development';
   const cwd = document.getElementById('spawn-cwd').value.trim();
   const goal = document.getElementById('spawn-goal').value.trim();
   const openTerminal = document.getElementById('spawn-open-wt').checked;
@@ -881,15 +1220,18 @@ window.submitSpawnRoom = async function () {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       room,
+      category,
       cwd,
       goal,
       openTerminal,
+      autoRunClaude: openTerminal,
       runHeadless,
     }),
   });
   const data = await res.json();
   if (data.ok && data.session) {
     selectedSessionId = data.session.id;
+    activeTab = 'live';
     closeSpawnModal();
     showToast(`🚀 เปิดห้อง "${data.session.room}" เรียบร้อย!`);
   }

@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { execSync } = require('child_process');
 
 /**
@@ -37,32 +38,89 @@ function getGitMetadata(cwd) {
 }
 
 /**
- * Parses the tail of a Claude Code transcript (.jsonl) file to extract:
- * - Latest human-readable assistant response (for Auto-TL;DR without reading terminal scrollback)
- * - Latest user prompt (if not already captured)
+ * Auto-discovers the most recent Claude Code UTF-8 `.jsonl` transcript file for a workspace `cwd`
+ * inside `~/.claude/projects/<project-slug>/*.jsonl`.
+ */
+function findLatestTranscriptForCwd(cwd) {
+  if (!cwd) return null;
+  try {
+    const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+    if (!fs.existsSync(projectsDir)) return null;
+
+    // Claude Code converts path like `C:\Job\Application Developer Test\queue-ticket-system`
+    // into a slug folder name by replacing `:` and `\` and spaces with `-`
+    const normCwd = String(cwd).replace(/[\\\/]+$/, '');
+    const expectedSlug = normCwd.replace(/[:\\\/\s_]+/g, '-').toLowerCase();
+    const folderBase = path.basename(normCwd).toLowerCase();
+
+    const dirs = fs.readdirSync(projectsDir, { withFileTypes: true });
+    let bestFile = null;
+    let bestMtime = 0;
+
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue;
+      const dNameLower = d.name.toLowerCase();
+      if (
+        dNameLower === expectedSlug ||
+        dNameLower.endsWith(folderBase.replace(/[\s_]+/g, '-')) ||
+        dNameLower.includes(folderBase.replace(/[\s_]+/g, '-'))
+      ) {
+        const fullDir = path.join(projectsDir, d.name);
+        const files = fs
+          .readdirSync(fullDir)
+          .filter((f) => f.endsWith('.jsonl'));
+        for (const f of files) {
+          const fullFile = path.join(fullDir, f);
+          const stat = fs.statSync(fullFile);
+          if (stat.mtimeMs > bestMtime) {
+            bestMtime = stat.mtimeMs;
+            bestFile = fullFile;
+          }
+        }
+      }
+    }
+
+    return bestFile;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parses the tail of a Claude Code transcript (.jsonl) file in pure UTF-8 to extract:
+ * - Latest human-readable assistant response (for Auto-TL;DR)
+ * - Clean UTF-8 conversation log (`utf8Preview`) with 100% intact Thai vowels & tone marks!
+ * - Latest user prompt
  * - Active or completed Task (sub-agent) invocations
  */
-function parseTranscriptTail(transcriptPath) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) {
+function parseTranscriptTail(transcriptPath, cwd = null) {
+  const targetPath =
+    transcriptPath && fs.existsSync(transcriptPath)
+      ? transcriptPath
+      : findLatestTranscriptForCwd(cwd);
+
+  if (!targetPath || !fs.existsSync(targetPath)) {
     return null;
   }
 
   try {
-    const stat = fs.statSync(transcriptPath);
-    const maxBytes = 128 * 1024; // Read last 128KB for speed
+    const stat = fs.statSync(targetPath);
+    const maxBytes = 160 * 1024;
     const start = Math.max(0, stat.size - maxBytes);
     const length = stat.size - start;
     const buffer = Buffer.alloc(length);
 
-    const fd = fs.openSync(transcriptPath, 'r');
+    const fd = fs.openSync(targetPath, 'r');
     fs.readSync(fd, buffer, 0, length, start);
     fs.closeSync(fd);
 
     const raw = buffer.toString('utf8');
     const lines = raw.split(/\r?\n/).filter((line) => line.trim().startsWith('{'));
 
+    let lastAssistantFullText = null;
     let lastAssistantText = null;
     let lastUserText = null;
+    const conversationLines = [];
     const subAgentsMap = new Map();
 
     for (const line of lines) {
@@ -78,11 +136,15 @@ function parseTranscriptTail(transcriptPath) {
       const content = msg.content;
 
       if (role === 'user' && typeof content === 'string' && content.trim()) {
-        lastUserText = content.trim();
+        if (!content.trim().startsWith('<')) {
+          lastUserText = content.trim();
+          conversationLines.push(`🧑 คุณ: ${content.trim()}`);
+        }
       } else if (role === 'user' && Array.isArray(content)) {
         for (const block of content) {
           if (block.type === 'text' && block.text && !block.text.startsWith('<')) {
             lastUserText = block.text.trim();
+            conversationLines.push(`🧑 คุณ: ${block.text.trim()}`);
           }
           if (block.type === 'tool_result' && block.tool_use_id) {
             if (subAgentsMap.has(block.tool_use_id)) {
@@ -105,11 +167,30 @@ function parseTranscriptTail(transcriptPath) {
       if (role === 'assistant' && Array.isArray(content)) {
         for (const block of content) {
           if (block.type === 'text' && block.text && block.text.trim()) {
+            lastAssistantFullText = block.text.trim();
             lastAssistantText = block.text.trim();
+            conversationLines.push(`🤖 Claude:\n${block.text.trim()}`);
+          }
+          if (block.type === 'tool_use') {
+            const input = block.input || {};
+            const fileOrCmd =
+              input.command ||
+              input.file_path ||
+              input.path ||
+              input.description ||
+              input.pattern ||
+              '';
+            if (block.name) {
+              conversationLines.push(
+                `🔧 [Tool: ${block.name}] ${summarizeText(fileOrCmd, 100)}`
+              );
+            }
           }
           if (
             block.type === 'tool_use' &&
-            (block.name === 'Task' || block.name === 'Agent' || block.name === 'dispatch_agent')
+            (block.name === 'Task' ||
+              block.name === 'Agent' ||
+              block.name === 'dispatch_agent')
           ) {
             const input = block.input || {};
             const subName =
@@ -117,10 +198,9 @@ function parseTranscriptTail(transcriptPath) {
               input.subagent_type ||
               input.name ||
               'Sub-Agent Task';
-            const subRole =
-              input.prompt
-                ? summarizeText(input.prompt, 110)
-                : input.subagent_type || 'Autonomous Sub-task';
+            const subRole = input.prompt
+              ? summarizeText(input.prompt, 110)
+              : input.subagent_type || 'Autonomous Sub-task';
             subAgentsMap.set(block.id, {
               id: block.id,
               name: `Sub-Agent: ${subName}`,
@@ -135,9 +215,16 @@ function parseTranscriptTail(transcriptPath) {
       }
     }
 
+    const recentLog = conversationLines.slice(-8).join('\n\n');
+
     return {
-      lastAssistantText: lastAssistantText ? summarizeText(lastAssistantText, 240) : null,
+      transcriptPath: targetPath,
+      lastAssistantFullText,
+      lastAssistantText: lastAssistantText
+        ? summarizeText(lastAssistantText, 260)
+        : null,
       lastUserText: lastUserText ? summarizeText(lastUserText, 160) : null,
+      utf8Preview: recentLog || lastAssistantFullText || null,
       subAgents: Array.from(subAgentsMap.values()),
     };
   } catch {
@@ -169,7 +256,11 @@ function inferWorkflowFromTool(toolName, toolInput = {}) {
     '';
   const shortFile = filePath ? path.basename(String(filePath)) : '';
 
-  if (['Read', 'Glob', 'Grep', 'LS', 'WebSearch', 'WebFetch', 'TodoWrite'].includes(name)) {
+  if (
+    ['Read', 'Glob', 'Grep', 'LS', 'WebSearch', 'WebFetch', 'TodoWrite'].includes(
+      name
+    )
+  ) {
     const detail = shortFile
       ? `กำลังอ่านและสำรวจ ${shortFile}`
       : toolInput.pattern
@@ -238,6 +329,7 @@ function inferWorkflowFromTool(toolName, toolInput = {}) {
 
 module.exports = {
   getGitMetadata,
+  findLatestTranscriptForCwd,
   parseTranscriptTail,
   summarizeText,
   inferWorkflowFromTool,

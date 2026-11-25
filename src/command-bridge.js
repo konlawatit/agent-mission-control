@@ -17,7 +17,9 @@ class CommandBridge {
       throw new Error(`Session ${sessionId} not found`);
     }
 
-    const targetIndex = Number(optionPayload.targetIndex || optionPayload.index || 1);
+    const targetIndex = Number(
+      optionPayload.targetIndex || optionPayload.index || 1
+    );
     const currentIndex = Number(
       optionPayload.currentIndex ||
         (session.interactivePrompt && session.interactivePrompt.currentIndex) ||
@@ -26,7 +28,6 @@ class CommandBridge {
     const numberStr = String(optionPayload.number || targetIndex);
     const labelStr = optionPayload.label || `ตัวเลือกที่ ${numberStr}`;
 
-    // 1. If we have a real Windows Console PID, inject the selection directly into CONIN$
     if (session.pid && this.consoleScanner) {
       const res = await this.consoleScanner.selectOption(
         session.pid,
@@ -50,7 +51,6 @@ class CommandBridge {
       }
     }
 
-    // 2. If WezTerm Pane is available, send the option number + Enter
     if (session.paneId) {
       const wezSent = await this._tryWezTermSend(session.paneId, numberStr);
       if (wezSent) {
@@ -69,7 +69,6 @@ class CommandBridge {
       }
     }
 
-    // 3. Fallback / Demo room state update
     this.store.enqueueCommand(session.id, numberStr);
     this.store.updateSession(session.id, {
       status: 'working',
@@ -109,7 +108,7 @@ class CommandBridge {
     return {
       ok: false,
       transport: 'none',
-      message: `ห้องนี้เป็นห้องจำลอง หรือยังไม่ได้เชื่อมต่อ PID ของ claude.exe`,
+      message: `ไม่พบ Process claude.exe ที่กำลังเปิดอยู่ของห้องนี้ (สามารถกดปุ่ม "🔄 กู้คืน / เปิดต่อใน Terminal" ได้ครับ)`,
     };
   }
 
@@ -131,7 +130,6 @@ class CommandBridge {
     const isApproval =
       options.isApproval || /^(y|yes|approve|ok|1)$/i.test(trimmed);
 
-    // 1. If the session currently has an interactive prompt and the user typed a number (1, 2, 3) or clicked Approve
     if (session.interactivePrompt && /^[1-9]$/.test(trimmed)) {
       const idx = Number(trimmed);
       const matchedOpt = (session.interactivePrompt.options || []).find(
@@ -145,7 +143,6 @@ class CommandBridge {
       });
     }
 
-    // 2. If we have a live Windows Console PID (`claude.exe`), inject text + Enter directly into CONIN$!
     if (!options.runHeadless && session.pid && this.consoleScanner) {
       const sent = await this.consoleScanner.sendText(session.pid, trimmed);
       if (sent && sent.ok) {
@@ -223,7 +220,14 @@ class CommandBridge {
     return new Promise((resolve) => {
       execFile(
         'wezterm',
-        ['cli', 'send-text', '--pane-id', String(paneId), '--no-paste', `${text}\r`],
+        [
+          'cli',
+          'send-text',
+          '--pane-id',
+          String(paneId),
+          '--no-paste',
+          `${text}\r`,
+        ],
         { timeout: 2000 },
         (err) => {
           resolve(!err);
@@ -237,8 +241,11 @@ class CommandBridge {
       session.cwd && fs.existsSync(session.cwd) ? session.cwd : process.cwd();
 
     const args = ['-p', promptText, '--output-format', 'stream-json', '--verbose'];
-    if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(session.id)) {
-      args.unshift('--resume', session.id);
+    const resumeId =
+      session.claudeSessionId ||
+      (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(session.id) ? session.id : null);
+    if (resumeId) {
+      args.unshift('--resume', resumeId);
     }
 
     try {
@@ -320,6 +327,12 @@ class CommandBridge {
     }
   }
 
+  /**
+   * Opens or resumes a Session in a new Windows Terminal tab!
+   * If `options.resume` is true:
+   * - Uses `claude --resume <claudeSessionId>` if a specific UUID was recorded,
+   * - Or `claude --continue` to automatically resume the latest conversation in that folder!
+   */
   openTerminalTab(sessionId, options = {}) {
     const session = this.store.sessions.get(sessionId);
     const cwd =
@@ -327,10 +340,36 @@ class CommandBridge {
       options.cwd ||
       process.cwd();
     const roomTitle = (session && session.room) || options.room || 'Agent Room';
-    const commandToRun = options.command || 'claude';
+
+    let claudeCmd = options.command || 'claude';
+    if (options.resume) {
+      const resumeId =
+        (session && session.claudeSessionId) ||
+        (session && /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(session.id)
+          ? session.id
+          : null);
+      claudeCmd = resumeId
+        ? `claude --resume ${resumeId}`
+        : `claude --continue`;
+    }
+
+    if (session && options.resume) {
+      this.store.updateSession(session.id, {
+        lifecycle: 'live',
+        status: 'idle',
+        statusLabel: 'กำลังกู้คืน Session ใน Terminal...',
+        closedAt: null,
+        tldr: `กำลังเปิดหน้าต่าง Terminal ที่ ${cwd} พร้อมคำสั่ง "${claudeCmd}"`,
+      });
+    }
 
     return new Promise((resolve) => {
       if (process.platform === 'win32') {
+        const safeRoom = roomTitle.replace(/'/g, "''");
+        const psScript = options.autoRunClaude || options.resume
+          ? `$env:AMC_ROOM='${safeRoom}'; Write-Host '🎛️ Resuming Session in Agent Mission Control: ${safeRoom}' -ForegroundColor Cyan; ${claudeCmd}`
+          : `$env:AMC_ROOM='${safeRoom}'; Write-Host '🎛️ Connected to Agent Mission Control: ${safeRoom} (พิมพ์ claude หรือ claude --continue เพื่อเริ่มงาน)' -ForegroundColor Cyan`;
+
         execFile(
           'wt.exe',
           [
@@ -344,14 +383,20 @@ class CommandBridge {
             'powershell.exe',
             '-NoExit',
             '-Command',
-            `$env:AMC_ROOM='${roomTitle.replace(/'/g, "''")}'; Write-Host '🎛️ Connected to Agent Mission Control: ${roomTitle}' -ForegroundColor Cyan`,
+            psScript,
           ],
           (wtErr) => {
+            if (this.consoleScanner) {
+              setTimeout(() => this.consoleScanner.scanOnce(), 1500);
+            }
             if (!wtErr) {
               return resolve({
                 ok: true,
                 launcher: 'windows-terminal',
-                message: `เปิด Tab "${roomTitle}" ใน Windows Terminal แล้ว`,
+                command: claudeCmd,
+                message: options.resume
+                  ? `กู้คืนห้อง "${roomTitle}" (${claudeCmd}) ใน Windows Terminal Tab ใหม่แล้ว!`
+                  : `เปิด Tab "${roomTitle}" ใน Windows Terminal แล้ว`,
               });
             }
             spawn(
@@ -363,7 +408,7 @@ class CommandBridge {
                 'powershell.exe',
                 '-NoExit',
                 '-Command',
-                `Set-Location '${cwd}'; $env:AMC_ROOM='${roomTitle}'`,
+                `Set-Location '${cwd}'; ${psScript}`,
               ],
               { cwd, detached: true, stdio: 'ignore' }
             ).unref();
@@ -371,6 +416,7 @@ class CommandBridge {
             resolve({
               ok: true,
               launcher: 'powershell',
+              command: claudeCmd,
               message: `เปิดหน้าต่าง PowerShell สำหรับ "${roomTitle}" แล้ว`,
             });
           }
@@ -379,7 +425,7 @@ class CommandBridge {
         resolve({
           ok: false,
           launcher: 'manual',
-          message: `กรุณาเปิด Terminal ที่โฟลเดอร์ ${cwd} แล้วรัน ${commandToRun}`,
+          message: `กรุณาเปิด Terminal ที่โฟลเดอร์ ${cwd} แล้วรัน ${claudeCmd}`,
         });
       }
     });

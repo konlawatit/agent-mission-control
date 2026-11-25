@@ -22,10 +22,9 @@ const MIME_TYPES = {
 
 function createMissionControlServer(options = {}) {
   const store = options.store || new StateStore(options);
-  const scanner =
-    options.disableScanner
-      ? null
-      : new ConsoleScanner(store, { intervalMs: options.scanIntervalMs || 1800 });
+  const scanner = options.disableScanner
+    ? null
+    : new ConsoleScanner(store, { intervalMs: options.scanIntervalMs || 1800 });
   const bridge = new CommandBridge(store, scanner);
   const publicDir = path.resolve(__dirname, '..', 'public');
   const sseClients = new Set();
@@ -165,7 +164,10 @@ function createMissionControlServer(options = {}) {
         if (!body.sessionId) {
           return sendJson(res, 400, { ok: false, error: 'Missing sessionId' });
         }
-        const result = await bridge.selectInteractiveOption(body.sessionId, body);
+        const result = await bridge.selectInteractiveOption(
+          body.sessionId,
+          body
+        );
         return sendJson(res, 200, result);
       }
 
@@ -193,7 +195,7 @@ function createMissionControlServer(options = {}) {
         });
       }
 
-      // 7. Poll pending commands (for `amc run` CLI wrapper)
+      // 7. Poll pending commands
       if (req.method === 'GET' && pathname === '/api/session/commands') {
         const sessionId = parsedUrl.searchParams.get('sessionId');
         const commands = sessionId ? store.dequeueCommands(sessionId) : [];
@@ -224,14 +226,14 @@ function createMissionControlServer(options = {}) {
       // 9. Create / Spawn a New Agent Room
       if (req.method === 'POST' && pathname === '/api/session/spawn') {
         const body = await readJsonBody(req);
-        const sessionId = body.sessionId || `room-${Date.now()}`;
+        const sessionId = body.sessionId || `session-${Date.now()}`;
         const cwd = body.cwd || process.cwd();
-        const roomName =
-          body.room ||
-          `Room ${String(store.sessions.size + 1).padStart(2, '0')} • ${path.basename(cwd)}`;
+        const folderName = path.basename(cwd) || 'Workspace';
+        const roomName = body.room || folderName;
 
         const session = store.getOrCreateSession(sessionId, {
           room: roomName,
+          category: body.category || undefined,
           cwd,
           cli: body.cli || 'claude-code',
           goal: body.goal || 'เปิดห้องทำงานใหม่จาก Mission Control',
@@ -239,11 +241,16 @@ function createMissionControlServer(options = {}) {
           statusLabel: body.goal ? 'กำลังเริ่มงาน' : 'พร้อมรับคำสั่ง',
         });
 
+        if (body.category) {
+          store.updateSession(session.id, { category: body.category });
+        }
+
         let launchResult = null;
         if (body.openTerminal) {
           launchResult = await bridge.openTerminalTab(session.id, {
             cwd,
             room: roomName,
+            autoRunClaude: Boolean(body.autoRunClaude),
           });
         }
         if (body.goal && body.runHeadless) {
@@ -261,35 +268,41 @@ function createMissionControlServer(options = {}) {
         });
       }
 
-      // 10. Open / Focus Windows Terminal Tab for an existing Room
-      if (req.method === 'POST' && pathname === '/api/session/open-terminal') {
+      // 10. Open or Resume Session in Windows Terminal Tab
+      if (
+        req.method === 'POST' &&
+        (pathname === '/api/session/open-terminal' ||
+          pathname === '/api/session/resume')
+      ) {
         const body = await readJsonBody(req);
-        const result = await bridge.openTerminalTab(body.sessionId, body);
+        const result = await bridge.openTerminalTab(body.sessionId, {
+          ...body,
+          resume:
+            pathname === '/api/session/resume' ? true : Boolean(body.resume),
+        });
         return sendJson(res, 200, result);
       }
 
-      // 11. Update or Remove a Session Room
+      // 11. Update, Archive, Pin, or Remove a Session Room
       if (req.method === 'POST' && pathname === '/api/session/update') {
         const body = await readJsonBody(req);
-        if (body.action === 'remove' && body.sessionId) {
-          store.removeSession(body.sessionId);
+        if (body.action === 'archive' && body.sessionId) {
+          store.archiveOrRemoveSession(body.sessionId, false);
           return sendJson(res, 200, { ok: true });
         }
-        if (body.action === 'clear-all') {
-          store.clearAll();
+        if (body.action === 'remove' && body.sessionId) {
+          store.archiveOrRemoveSession(body.sessionId, true);
+          return sendJson(res, 200, { ok: true });
+        }
+        if (body.action === 'clear-history') {
+          store.clearHistoryOnly();
           return sendJson(res, 200, { ok: true });
         }
         const updated = store.updateSession(body.sessionId, body.patch || {});
         return sendJson(res, 200, { ok: true, session: updated });
       }
 
-      // 12. Seed Demo Multi-Agent Rooms
-      if (req.method === 'POST' && pathname === '/api/demo/seed') {
-        const snapshot = store.seedDemoSessions();
-        return sendJson(res, 200, { ok: true, ...snapshot });
-      }
-
-      // 13. Check / Install Claude Code Hooks
+      // 12. Check / Install Claude Code Hooks
       if (req.method === 'GET' && pathname === '/api/hooks/status') {
         return sendJson(res, 200, { ok: true, ...checkHooksStatus() });
       }
@@ -302,7 +315,7 @@ function createMissionControlServer(options = {}) {
         return sendJson(res, 200, { ok: true, ...status });
       }
 
-      // 14. Static Files
+      // 13. Static Files
       let filePath =
         pathname === '/'
           ? path.join(publicDir, 'index.html')

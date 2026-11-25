@@ -26,7 +26,8 @@ process.stdin.on('end', () => {
     payload = { raw: rawInput };
   }
 
-  // Enrich with terminal environment metadata
+  // Note: Do NOT send `process.ppid` as `pid` here, because Claude spawns an intermediate shell
+  // to run hooks, so `process.ppid` is a temporary shell PID that differs from `claude.exe`'s PID!
   const enriched = {
     ...payload,
     hook_event_name:
@@ -35,7 +36,6 @@ process.stdin.on('end', () => {
     pane_id: process.env.WEZTERM_PANE || process.env.TMUX_PANE || null,
     wt_session: process.env.WT_SESSION || null,
     room: process.env.AMC_ROOM || null,
-    pid: process.ppid || process.pid,
     timestamp: new Date().toISOString(),
   };
 
@@ -60,7 +60,6 @@ process.stdin.on('end', () => {
   );
 
   req.on('error', () => {
-    // Fallback: append event to local spool so Mission Control can pick it up later
     try {
       const dataDir = path.join(os.homedir(), '.agent-mission-control');
       if (!fs.existsSync(dataDir)) {
@@ -71,9 +70,7 @@ process.stdin.on('end', () => {
         body + '\n',
         'utf8'
       );
-    } catch {
-      // Ignore
-    }
+    } catch {}
     process.exit(0);
   });
 

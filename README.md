@@ -57,8 +57,7 @@ npm start
 | `amc uninstall-hooks` | ถอนการติดตั้ง Claude Hooks ออกจาก `~/.claude/settings.json` |
 | `npm run status` หรือ `amc status` | แสดงตารางสรุปสถานะของทุกห้อง, TL;DR และ Sub-Agents บนหน้าจอ Terminal |
 | `amc run --room "ชื่อห้อง" claude` | เปิดรัน Claude (หรือ Agent ตัวอื่น) ภายใต้ Wrapper ที่เชื่อมกับ Dashboard โดยตรง |
-| `npm run demo` หรือ `amc demo` | เปิด Dashboard พร้อมโหลดข้อมูลจำลอง 4 ห้องเพื่อทดสอบระบบ |
-| `npm test` | รันชุดทดสอบตรวจสอบความถูกต้องของ State Store, Sub-agent Tracker และ Hooks |
+| `npm test` | รันชุดทดสอบ State Store, Sub-agent Tracker, Hooks และชุดทดสอบความปลอดภัย (token, Host/Origin, command injection, XSS) |
 
 ---
 
@@ -82,6 +81,19 @@ npm start
 จากหน้าเว็บ Mission Control คุณสามารถพิมพ์คำสั่งหรือกดปุ่มลัด (**Approve**, **สั่งรัน Test**, **ขอสรุปงาน**) เพื่อส่งกลับไปที่ Session ได้ผ่าน:
 - **WezTerm IPC**: หากคุณใช้ WezTerm ระบบจะตรวจจับ `WEZTERM_PANE` อัตโนมัติและส่งคีย์บอร์ดเข้า Tab นั้นทันที
 - **Claude Headless Resume (`--resume`)**: สั่งรันต่อจาก `session_id` เดิมของ Claude CLI ในโฟลเดอร์นั้นโดยไม่ต้องสลับหน้าต่างไปพิมพ์ใน Terminal
+
+---
+
+## 🔒 ความปลอดภัย (Security Model)
+
+Mission Control ส่งคีย์และคำสั่งเข้า Terminal ของ Claude และเปิด Terminal ใหม่ได้ จึงต้องป้องกันไม่ให้ใครสั่งการเซิร์ฟเวอร์นี้ได้นอกจากคุณเอง:
+
+- **API Token**: ตอนเริ่มทำงานครั้งแรก เซิร์ฟเวอร์จะสร้าง token แบบสุ่มเก็บไว้ที่ `~/.agent-mission-control/token` ทุก `/api/*` ต้องแนบ header `X-AMC-Token` (Hook, `amc status` และหน้าเว็บจัดการให้อัตโนมัติ) หากต้องการเปลี่ยน token ให้ลบไฟล์นี้แล้วรีสตาร์ทเซิร์ฟเวอร์
+- **รับเฉพาะ Host และ Origin ของเครื่องตัวเอง**: เซิร์ฟเวอร์ปฏิเสธ request ที่ `Host`/`Origin` ไม่ใช่ `127.0.0.1` / `localhost` / `[::1]` (กัน DNS rebinding และเว็บไซต์อื่นที่พยายามยิง request เข้ามา) และไม่มี CORS แบบ `*`
+- **ไม่ต่อ string เป็นคำสั่ง shell**: คำสั่งที่เปิด Terminal ถูกสร้างฝั่งเซิร์ฟเวอร์เท่านั้น ส่วนชื่อห้องและ path จะส่งเข้า PowerShell เป็น literal ที่ quote แล้วผ่าน `-EncodedCommand` ส่วนโหมด Headless ส่ง prompt ผ่าน stdin
+- **หน้าเว็บไม่มี inline JS ที่ฝังข้อมูล**: ปุ่มต่างๆ ใช้ `data-act` และ event delegation ข้อความจากหน้าจอ Terminal จึงถูกแปลงเป็นโค้ดไม่ได้
+
+> ⚠️ อย่าเปลี่ยนให้เซิร์ฟเวอร์ listen บน `0.0.0.0` หรือเปิดพอร์ต 4310 ออกนอกเครื่อง
 
 ---
 

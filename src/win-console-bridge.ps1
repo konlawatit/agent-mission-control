@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet("scan", "read", "send-key", "send-text", "select-option")]
+    [ValidateSet("scan", "read", "send-key", "send-text", "select-option", "serve")]
     [string]$Action,
 
     [int]$TargetPid = 0,
@@ -335,109 +335,148 @@ public class WinConsoleBridge {
 }
 "@
 
-function Emit-Result($obj) {
-    $json = ConvertTo-Json -InputObject $obj -Depth 6 -Compress
-    if ($OutputFile -ne "") {
-        [System.IO.File]::WriteAllText($OutputFile, $json, (New-Object System.Text.UTF8Encoding($false)))
-    } else {
-        [System.Console]::Out.WriteLine($json)
-    }
-}
 
 Add-Type -TypeDefinition $code -Language CSharp
 
-if ($Action -eq "scan") {
-    $procs = @(Get-Process -Name "claude" -ErrorAction SilentlyContinue)
-    $seenConsolePids = New-Object 'System.Collections.Generic.HashSet[uint32]'
-    $results = @()
+function Invoke-BridgeAction {
+    param(
+        [string]$Action,
+        [int]$TargetPid = 0,
+        [string]$Value = "",
+        [int]$CurrentIndex = 1,
+        [int]$TargetIndex = 1
+    )
 
-    foreach ($p in $procs) {
-        $procId = [uint32]$p.Id
-        if ($seenConsolePids.Contains($procId)) {
-            continue
-        }
+    if ($Action -eq "scan") {
+        $procs = @(Get-Process -Name "claude" -ErrorAction SilentlyContinue)
+        $seenConsolePids = New-Object 'System.Collections.Generic.HashSet[uint32]'
+        $results = @()
 
-        $consolePids = [WinConsoleBridge]::GetConsolePids($procId)
-        foreach ($cp in $consolePids) {
-            [void]$seenConsolePids.Add([uint32]$cp)
-        }
+        foreach ($p in $procs) {
+            $procId = [uint32]$p.Id
+            if ($seenConsolePids.Contains($procId)) {
+                continue
+            }
 
-        $cwd = [WinConsoleBridge]::GetProcessCwd($procId)
-        $screen = [WinConsoleBridge]::ReadConsoleText($procId, 45)
-        if ($null -ne $screen) {
-            $results += @{
-                pid = $p.Id
-                cwd = $cwd
-                consolePids = $consolePids
-                title = $p.MainWindowTitle
-                startTime = if ($p.StartTime) { $p.StartTime.ToString("o") } else { "" }
-                screen = $screen
+            $consolePids = [WinConsoleBridge]::GetConsolePids($procId)
+            foreach ($cp in $consolePids) {
+                [void]$seenConsolePids.Add([uint32]$cp)
+            }
+
+            $cwd = [WinConsoleBridge]::GetProcessCwd($procId)
+            $screen = [WinConsoleBridge]::ReadConsoleText($procId, 45)
+            if ($null -ne $screen) {
+                $results += @{
+                    pid = $p.Id
+                    cwd = $cwd
+                    consolePids = $consolePids
+                    title = $p.MainWindowTitle
+                    startTime = if ($p.StartTime) { $p.StartTime.ToString("o") } else { "" }
+                    screen = $screen
+                }
             }
         }
+        return @{ ok = $true; items = $results }
     }
-    Emit-Result @{ ok = $true; items = $results }
-    exit 0
-}
 
-if ($Action -eq "read" -and $TargetPid -gt 0) {
-    $cwd = [WinConsoleBridge]::GetProcessCwd([uint32]$TargetPid)
-    $screen = [WinConsoleBridge]::ReadConsoleText([uint32]$TargetPid, 45)
-    Emit-Result @{ ok = ($null -ne $screen); pid = $TargetPid; cwd = $cwd; screen = $screen }
-    exit 0
-}
+    if ($TargetPid -le 0) {
+        return @{ ok = $false; error = "TargetPid is required" }
+    }
 
-if ($Action -eq "send-key" -and $TargetPid -gt 0) {
-    $ok = $false
-    switch ($Value.ToLower()) {
-        "enter"  { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x0D, "`r") }
-        "esc"    { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x1B, [char]27) }
-        "escape" { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x1B, [char]27) }
-        "up"     { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x26, [char]0) }
-        "down"   { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x28, [char]0) }
-        "tab"    { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x09, "`t") }
-        "space"  { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x20, " ") }
-        default  {
-            if ($Value.Length -eq 1) {
-                $ch = $Value[0]
-                $vk = [uint16][char]::ToUpper($ch)
-                $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, $vk, $ch)
-            } else {
-                $ok = [WinConsoleBridge]::SendTextAndEnter([uint32]$TargetPid, $Value, $false)
+    if ($Action -eq "read") {
+        $cwd = [WinConsoleBridge]::GetProcessCwd([uint32]$TargetPid)
+        $screen = [WinConsoleBridge]::ReadConsoleText([uint32]$TargetPid, 45)
+        return @{ ok = ($null -ne $screen); pid = $TargetPid; cwd = $cwd; screen = $screen }
+    }
+
+    if ($Action -eq "send-key") {
+        $ok = $false
+        switch ($Value.ToLower()) {
+            "enter"  { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x0D, "`r") }
+            "esc"    { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x1B, [char]27) }
+            "escape" { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x1B, [char]27) }
+            "up"     { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x26, [char]0) }
+            "down"   { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x28, [char]0) }
+            "tab"    { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x09, "`t") }
+            "space"  { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x20, " ") }
+            default  {
+                if ($Value.Length -eq 1) {
+                    $ch = $Value[0]
+                    $vk = [uint16][char]::ToUpper($ch)
+                    $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, $vk, $ch)
+                } else {
+                    $ok = [WinConsoleBridge]::SendTextAndEnter([uint32]$TargetPid, $Value, $false)
+                }
             }
         }
+        return @{ ok = $ok; pid = $TargetPid; key = $Value }
     }
-    Emit-Result @{ ok = $ok; pid = $TargetPid; key = $Value }
-    exit 0
-}
 
-if ($Action -eq "select-option" -and $TargetPid -gt 0) {
-    $ok = $false
-    if ($CurrentIndex -gt 0 -and $TargetIndex -gt 0) {
-        $delta = $TargetIndex - $CurrentIndex
-        if ($delta -gt 0) {
-            for ($i = 0; $i -lt $delta; $i++) {
-                [void][WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x28, [char]0)
-                Start-Sleep -Milliseconds 45
-            }
-        } elseif ($delta -lt 0) {
+    if ($Action -eq "select-option") {
+        $ok = $false
+        if ($CurrentIndex -gt 0 -and $TargetIndex -gt 0) {
+            $delta = $TargetIndex - $CurrentIndex
+            $vk = if ($delta -gt 0) { 0x28 } else { 0x26 }
             for ($i = 0; $i -lt [Math]::Abs($delta); $i++) {
-                [void][WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x26, [char]0)
+                [void][WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, $vk, [char]0)
                 Start-Sleep -Milliseconds 45
             }
+            Start-Sleep -Milliseconds 45
+            $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x0D, "`r")
+        } else {
+            $ch = if ($Value.Length -ge 1) { $Value[0] } else { '1' }
+            $vk = [uint16][char]::ToUpper($ch)
+            $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, $vk, $ch)
         }
-        Start-Sleep -Milliseconds 45
-        $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x0D, "`r")
-    } else {
-        $ch = if ($Value.Length -ge 1) { $Value[0] } else { '1' }
-        $vk = [uint16][char]::ToUpper($ch)
-        $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, $vk, $ch)
+        return @{ ok = $ok; pid = $TargetPid; selected = $TargetIndex }
     }
-    Emit-Result @{ ok = $ok; pid = $TargetPid; selected = $TargetIndex }
+
+    if ($Action -eq "send-text") {
+        $ok = [WinConsoleBridge]::SendTextAndEnter([uint32]$TargetPid, $Value, $true)
+        return @{ ok = $ok; pid = $TargetPid }
+    }
+
+    return @{ ok = $false; error = "Unknown action: $Action" }
+}
+
+if ($Action -eq "serve") {
+    # Long-lived mode: the C# above is compiled once, then one JSON request per stdin line
+    # is answered with one JSON line on stdout. The pipe streams are opened up front because
+    # AttachConsole/FreeConsole swap the console handles that [Console]::In/Out would use.
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), $utf8)
+    $writer = New-Object System.IO.StreamWriter([Console]::OpenStandardOutput(), $utf8)
+    $writer.AutoFlush = $true
+    $writer.WriteLine((ConvertTo-Json -InputObject @{ id = 0; ok = $true; ready = $true } -Compress))
+
+    while ($true) {
+        $line = $reader.ReadLine()
+        if ($null -eq $line) { break }
+        if ($line.Trim() -eq "") { continue }
+        $id = $null
+        try {
+            $req = ConvertFrom-Json -InputObject $line
+            $id = $req.id
+            $result = Invoke-BridgeAction -Action ([string]$req.action) `
+                -TargetPid ([int]$req.targetPid) `
+                -Value ([string]$req.value) `
+                -CurrentIndex ([int]$req.currentIndex) `
+                -TargetIndex ([int]$req.targetIndex)
+        } catch {
+            $result = @{ ok = $false; error = $_.Exception.Message }
+        }
+        $result.id = $id
+        $writer.WriteLine((ConvertTo-Json -InputObject $result -Depth 6 -Compress))
+    }
     exit 0
 }
 
-if ($Action -eq "send-text" -and $TargetPid -gt 0) {
-    $ok = [WinConsoleBridge]::SendTextAndEnter([uint32]$TargetPid, $Value, $true)
-    Emit-Result @{ ok = $ok; pid = $TargetPid }
-    exit 0
+$oneShot = Invoke-BridgeAction -Action $Action -TargetPid $TargetPid -Value $Value `
+    -CurrentIndex $CurrentIndex -TargetIndex $TargetIndex
+$json = ConvertTo-Json -InputObject $oneShot -Depth 6 -Compress
+if ($OutputFile -ne "") {
+    [System.IO.File]::WriteAllText($OutputFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+} else {
+    [System.Console]::Out.WriteLine($json)
 }
+exit 0

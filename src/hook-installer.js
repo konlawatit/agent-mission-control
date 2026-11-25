@@ -7,6 +7,7 @@ const HOOK_EVENTS = [
   'UserPromptSubmit',
   'PreToolUse',
   'PostToolUse',
+  'PermissionRequest',
   'Notification',
   'SubagentStop',
   'Stop',
@@ -90,7 +91,6 @@ function installClaudeHooks() {
     try {
       settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     } catch {
-      // Backup unreadable file before modifying
       fs.copyFileSync(settingsPath, `${settingsPath}.bak`);
       settings = {};
     }
@@ -105,7 +105,6 @@ function installClaudeHooks() {
       settings.hooks[evt] = [];
     }
 
-    // Remove any older claude-hook.js entry to avoid duplicates
     settings.hooks[evt] = settings.hooks[evt].filter((entry) => {
       const innerHooks = Array.isArray(entry.hooks) ? entry.hooks : [entry];
       return !innerHooks.some(
@@ -115,7 +114,7 @@ function installClaudeHooks() {
     });
 
     const hookEntry =
-      evt === 'PreToolUse' || evt === 'PostToolUse'
+      evt === 'PreToolUse' || evt === 'PostToolUse' || evt === 'PermissionRequest'
         ? {
             matcher: '*',
             hooks: [

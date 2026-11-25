@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const { StateStore } = require('./state-store');
 const { CommandBridge } = require('./command-bridge');
+const { ConsoleScanner } = require('./console-scanner');
 const {
   checkHooksStatus,
   installClaudeHooks,
@@ -21,9 +22,17 @@ const MIME_TYPES = {
 
 function createMissionControlServer(options = {}) {
   const store = options.store || new StateStore(options);
-  const bridge = new CommandBridge(store);
+  const scanner =
+    options.disableScanner
+      ? null
+      : new ConsoleScanner(store, { intervalMs: options.scanIntervalMs || 1800 });
+  const bridge = new CommandBridge(store, scanner);
   const publicDir = path.resolve(__dirname, '..', 'public');
   const sseClients = new Set();
+
+  if (scanner) {
+    scanner.start();
+  }
 
   // Ingest any offline events spooled while server was closed
   const offlineFile = path.join(
@@ -40,17 +49,12 @@ function createMissionControlServer(options = {}) {
       for (const line of lines) {
         try {
           store.processHookEvent(JSON.parse(line));
-        } catch {
-          // Ignore malformed line
-        }
+        } catch {}
       }
       fs.unlinkSync(offlineFile);
-    } catch {
-      // Ignore
-    }
+    } catch {}
   }
 
-  // Broadcast state updates to all connected browser dashboards via SSE
   store.on('change', (eventPayload) => {
     const data = JSON.stringify(eventPayload);
     for (const res of sseClients) {
@@ -106,7 +110,10 @@ function createMissionControlServer(options = {}) {
       return res.end();
     }
 
-    const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const parsedUrl = new URL(
+      req.url,
+      `http://${req.headers.host || 'localhost'}`
+    );
     const pathname = parsedUrl.pathname;
 
     try {
@@ -152,14 +159,48 @@ function createMissionControlServer(options = {}) {
         });
       }
 
-      // 4. Poll pending commands (for `amc run` CLI wrapper)
+      // 4. Select an Interactive Multiple-Choice Option (1, 2, 3...)
+      if (req.method === 'POST' && pathname === '/api/session/select-option') {
+        const body = await readJsonBody(req);
+        if (!body.sessionId) {
+          return sendJson(res, 400, { ok: false, error: 'Missing sessionId' });
+        }
+        const result = await bridge.selectInteractiveOption(body.sessionId, body);
+        return sendJson(res, 200, result);
+      }
+
+      // 5. Send Special Terminal Navigation Key (up, down, enter, esc)
+      if (req.method === 'POST' && pathname === '/api/session/send-key') {
+        const body = await readJsonBody(req);
+        if (!body.sessionId || !body.key) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: 'Missing sessionId or key',
+          });
+        }
+        const result = await bridge.sendTerminalKey(body.sessionId, body.key);
+        return sendJson(res, 200, result);
+      }
+
+      // 6. Trigger Immediate Console Scan
+      if (req.method === 'POST' && pathname === '/api/console/scan') {
+        if (scanner) {
+          await scanner.scanOnce();
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          ...store.getSnapshot(),
+        });
+      }
+
+      // 7. Poll pending commands (for `amc run` CLI wrapper)
       if (req.method === 'GET' && pathname === '/api/session/commands') {
         const sessionId = parsedUrl.searchParams.get('sessionId');
         const commands = sessionId ? store.dequeueCommands(sessionId) : [];
         return sendJson(res, 200, { ok: true, commands });
       }
 
-      // 5. Dispatch Command / Approval from Dashboard to a Session
+      // 8. Dispatch Command / Approval from Dashboard to a Session
       if (req.method === 'POST' && pathname === '/api/session/command') {
         const body = await readJsonBody(req);
         if (!body.sessionId || !body.command) {
@@ -180,13 +221,14 @@ function createMissionControlServer(options = {}) {
         return sendJson(res, 200, result);
       }
 
-      // 6. Create / Spawn a New Agent Room
+      // 9. Create / Spawn a New Agent Room
       if (req.method === 'POST' && pathname === '/api/session/spawn') {
         const body = await readJsonBody(req);
         const sessionId = body.sessionId || `room-${Date.now()}`;
         const cwd = body.cwd || process.cwd();
         const roomName =
-          body.room || `Room ${String(store.sessions.size + 1).padStart(2, '0')} • ${path.basename(cwd)}`;
+          body.room ||
+          `Room ${String(store.sessions.size + 1).padStart(2, '0')} • ${path.basename(cwd)}`;
 
         const session = store.getOrCreateSession(sessionId, {
           room: roomName,
@@ -219,14 +261,14 @@ function createMissionControlServer(options = {}) {
         });
       }
 
-      // 7. Open / Focus Windows Terminal Tab for an existing Room
+      // 10. Open / Focus Windows Terminal Tab for an existing Room
       if (req.method === 'POST' && pathname === '/api/session/open-terminal') {
         const body = await readJsonBody(req);
         const result = await bridge.openTerminalTab(body.sessionId, body);
         return sendJson(res, 200, result);
       }
 
-      // 8. Update or Remove a Session Room
+      // 11. Update or Remove a Session Room
       if (req.method === 'POST' && pathname === '/api/session/update') {
         const body = await readJsonBody(req);
         if (body.action === 'remove' && body.sessionId) {
@@ -241,13 +283,13 @@ function createMissionControlServer(options = {}) {
         return sendJson(res, 200, { ok: true, session: updated });
       }
 
-      // 9. Seed Demo Multi-Agent Rooms
+      // 12. Seed Demo Multi-Agent Rooms
       if (req.method === 'POST' && pathname === '/api/demo/seed') {
         const snapshot = store.seedDemoSessions();
         return sendJson(res, 200, { ok: true, ...snapshot });
       }
 
-      // 10. Check / Install Claude Code Hooks
+      // 13. Check / Install Claude Code Hooks
       if (req.method === 'GET' && pathname === '/api/hooks/status') {
         return sendJson(res, 200, { ok: true, ...checkHooksStatus() });
       }
@@ -260,13 +302,12 @@ function createMissionControlServer(options = {}) {
         return sendJson(res, 200, { ok: true, ...status });
       }
 
-      // 11. Static Files (public/index.html, public/app.js)
+      // 14. Static Files
       let filePath =
         pathname === '/'
           ? path.join(publicDir, 'index.html')
           : path.join(publicDir, pathname);
 
-      // Prevent directory traversal
       if (!filePath.startsWith(publicDir)) {
         res.writeHead(403);
         return res.end('Forbidden');
@@ -288,7 +329,11 @@ function createMissionControlServer(options = {}) {
     }
   });
 
-  return { server, store, bridge };
+  server.on('close', () => {
+    if (scanner) scanner.stop();
+  });
+
+  return { server, store, bridge, scanner };
 }
 
 module.exports = { createMissionControlServer };

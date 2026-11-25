@@ -39,7 +39,6 @@
       min-height: 100vh;
     }
 
-    /* Top Header */
     .topbar {
       display: flex;
       flex-wrap: wrap;
@@ -59,6 +58,7 @@
       display: flex;
       align-items: center;
       gap: 12px;
+      flex-wrap: wrap;
     }
 
     .brand h1 {
@@ -123,12 +123,12 @@
       background: var(--primary-hover);
     }
     .btn-warning {
-      background: rgba(245, 158, 11, 0.15);
+      background: rgba(245, 158, 11, 0.16);
       border-color: var(--warning);
       color: #fbbf24;
     }
     .btn-warning:hover {
-      background: rgba(245, 158, 11, 0.25);
+      background: rgba(245, 158, 11, 0.28);
     }
     .btn-success {
       background: rgba(16, 185, 129, 0.15);
@@ -136,7 +136,81 @@
       color: #34d399;
     }
 
-    /* Metrics Strip */
+    /* Interactive Option Buttons */
+    .choice-card {
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(19, 26, 39, 0.96));
+      border: 1.5px solid var(--warning);
+      border-radius: 11px;
+      padding: 15px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+    }
+
+    .choice-options-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .choice-btn {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      text-align: left;
+      padding: 10px 14px;
+      border-radius: 9px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 13.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+    .choice-btn:hover {
+      border-color: var(--primary);
+      background: rgba(59, 130, 246, 0.14);
+      transform: translateX(2px);
+    }
+    .choice-btn.active-cursor {
+      border-color: var(--warning);
+      background: rgba(245, 158, 11, 0.14);
+    }
+
+    .choice-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      background: var(--surface-elevated);
+      border: 1px solid var(--border);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      margin-right: 10px;
+      color: #fbbf24;
+      flex-shrink: 0;
+    }
+
+    .terminal-preview {
+      background: #070a10;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.45;
+      color: #cbd5e1;
+      white-space: pre-wrap;
+      overflow-x: auto;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+
     .container {
       max-width: 1560px;
       margin: 0 auto;
@@ -175,23 +249,19 @@
       color: var(--text-muted);
     }
 
-    /* Attention Queue Banner */
     .attention-banner {
       background: rgba(245, 158, 11, 0.1);
       border: 1px solid var(--warning);
       border-radius: 10px;
-      padding: 12px 16px;
+      padding: 13px 16px;
       display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
+      flex-direction: column;
+      gap: 10px;
     }
 
-    /* Main Split / Grid Views */
     .split-layout {
       display: grid;
-      grid-template-columns: 440px 1fr;
+      grid-template-columns: 450px 1fr;
       gap: 18px;
       align-items: start;
     }
@@ -203,11 +273,10 @@
 
     .grid-layout {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(370px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
       gap: 16px;
     }
 
-    /* Room Cards */
     .room-list {
       display: flex;
       flex-direction: column;
@@ -266,7 +335,6 @@
       background: rgba(16, 185, 129, 0.1);
     }
 
-    /* Workflow Pipeline Bar */
     .pipeline-bar {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
@@ -295,7 +363,6 @@
       background: rgba(59, 130, 246, 0.14);
     }
 
-    /* Inspector Panel */
     .inspector {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -323,6 +390,8 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 6px;
     }
 
     .subagent-row {
@@ -366,7 +435,6 @@
       border-color: var(--primary);
     }
 
-    /* Modal */
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -410,7 +478,6 @@
   </style>
 </head>
 <body>
-  <!-- Top Command Header -->
   <header class="topbar">
     <div class="brand">
       <h1>🎛️ Agent Mission Control</h1>
@@ -424,11 +491,14 @@
     </div>
 
     <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+      <button class="btn" onclick="scanTerminalsNow()">
+        🔄 สแกนหน้าจอ Terminal ทันที
+      </button>
       <button class="btn" id="view-toggle-btn" onclick="toggleViewMode()">
         🗂️ สลับมุมมอง: Split / Grid
       </button>
       <button class="btn" onclick="seedDemoData()">
-        🧪 โหลดห้องจำลอง (4 Rooms)
+        🧪 โหลดห้องจำลอง
       </button>
       <button class="btn btn-primary" onclick="openSpawnModal()">
         + เปิดห้อง Agent ใหม่
@@ -437,17 +507,11 @@
   </header>
 
   <main class="container">
-    <!-- Top Overview Metrics -->
     <section class="metrics-grid" id="metrics-section"></section>
-
-    <!-- Attention Queue Banner (Shows only when any tab needs approval/input) -->
     <section id="attention-section" style="display: none;"></section>
-
-    <!-- Main Dynamic Layout (Split View or All-Rooms Grid View) -->
     <section id="main-workspace"></section>
   </main>
 
-  <!-- Modal: Spawn New Agent Room -->
   <div class="modal-backdrop" id="spawn-modal">
     <div class="modal-card">
       <div style="display:flex; justify-content:space-between; align-items:center;">

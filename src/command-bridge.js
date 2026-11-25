@@ -1,23 +1,120 @@
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 
-/**
- * Bi-Directional Command Bridge for Agent Mission Control.
- * Supports 4 ways to send commands or open a specific session from the dashboard:
- * 1. Wrapper Queue (`amc run`): Immediate delivery to active wrapped terminal tab.
- * 2. WezTerm CLI IPC (`wezterm cli send-text --pane-id <id>`): Direct keystroke injection into terminal pane.
- * 3. Claude Session Resume (`claude --resume <session_id> -p "<command>" --output-format stream-json`):
- *    Runs or continues the session in the background and streams progress directly into Mission Control.
- * 4. Open / Focus Windows Terminal or PowerShell in the room's workspace (`wt.exe` / `powershell`).
- */
 class CommandBridge {
-  constructor(stateStore) {
+  constructor(stateStore, consoleScanner = null) {
     this.store = stateStore;
-    this.activeProcesses = new Map(); // sessionId -> ChildProcess
+    this.consoleScanner = consoleScanner;
+    this.activeProcesses = new Map();
   }
 
   /**
-   * Dispatches a command or approval to a session using the best available transport.
+   * Selects an interactive TUI option (1, 2, 3...) directly inside a running Claude CLI tab!
+   */
+  async selectInteractiveOption(sessionId, optionPayload = {}) {
+    const session = this.store.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    const targetIndex = Number(optionPayload.targetIndex || optionPayload.index || 1);
+    const currentIndex = Number(
+      optionPayload.currentIndex ||
+        (session.interactivePrompt && session.interactivePrompt.currentIndex) ||
+        1
+    );
+    const numberStr = String(optionPayload.number || targetIndex);
+    const labelStr = optionPayload.label || `ตัวเลือกที่ ${numberStr}`;
+
+    // 1. If we have a real Windows Console PID, inject the selection directly into CONIN$
+    if (session.pid && this.consoleScanner) {
+      const res = await this.consoleScanner.selectOption(
+        session.pid,
+        currentIndex,
+        targetIndex,
+        numberStr
+      );
+      if (res && res.ok) {
+        this.store.updateSession(session.id, {
+          status: 'working',
+          statusLabel: `เลือก [${numberStr}. ${labelStr}] แล้ว`,
+          pendingAction: null,
+          interactivePrompt: null,
+          tldr: `✓ ส่งการเลือก "${numberStr}. ${labelStr}" เข้าหน้าจอ Terminal (PID ${session.pid}) เรียบร้อย`,
+        });
+        return {
+          ok: true,
+          transport: 'win32-console-input',
+          message: `เลือก "${numberStr}. ${labelStr}" ส่งเข้า Terminal (PID ${session.pid}) สำเร็จ!`,
+        };
+      }
+    }
+
+    // 2. If WezTerm Pane is available, send the option number + Enter
+    if (session.paneId) {
+      const wezSent = await this._tryWezTermSend(session.paneId, numberStr);
+      if (wezSent) {
+        this.store.updateSession(session.id, {
+          status: 'working',
+          statusLabel: `เลือก [${numberStr}. ${labelStr}] แล้ว`,
+          pendingAction: null,
+          interactivePrompt: null,
+          tldr: `✓ ส่งตัวเลือก "${numberStr}. ${labelStr}" เข้า WezTerm Pane #${session.paneId} เรียบร้อย`,
+        });
+        return {
+          ok: true,
+          transport: 'wezterm-ipc',
+          message: `เลือก "${numberStr}. ${labelStr}" ส่งเข้า WezTerm Pane #${session.paneId} สำเร็จ!`,
+        };
+      }
+    }
+
+    // 3. Fallback / Demo room state update
+    this.store.enqueueCommand(session.id, numberStr);
+    this.store.updateSession(session.id, {
+      status: 'working',
+      statusLabel: `เลือก [${numberStr}. ${labelStr}] แล้ว`,
+      pendingAction: null,
+      interactivePrompt: null,
+      tldr: `✓ เลือกคำตอบ "${numberStr}. ${labelStr}" เรียบร้อย กำลังดำเนินการต่อใน ${session.room}`,
+    });
+
+    return {
+      ok: true,
+      transport: 'mission-control-state',
+      message: `เลือก "${numberStr}. ${labelStr}" ใน ${session.room} เรียบร้อย`,
+    };
+  }
+
+  /**
+   * Sends a special TUI navigation key (up, down, enter, esc, space, 1, 2, 3) to the terminal tab.
+   */
+  async sendTerminalKey(sessionId, keyName) {
+    const session = this.store.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    if (session.pid && this.consoleScanner) {
+      const res = await this.consoleScanner.sendKey(session.pid, keyName);
+      if (res && res.ok) {
+        return {
+          ok: true,
+          transport: 'win32-console-key',
+          message: `ส่งปุ่ม [${keyName.toUpperCase()}] เข้า Terminal (PID ${session.pid}) สำเร็จ`,
+        };
+      }
+    }
+
+    return {
+      ok: false,
+      transport: 'none',
+      message: `ห้องนี้เป็นห้องจำลอง หรือยังไม่ได้เชื่อมต่อ PID ของ claude.exe`,
+    };
+  }
+
+  /**
+   * Dispatches a text command or approval to a session using the best available transport.
    */
   async dispatchCommand(sessionId, commandText, options = {}) {
     const session = this.store.getOrCreateSession(sessionId, {
@@ -30,12 +127,42 @@ class CommandBridge {
       throw new Error('Command text cannot be empty');
     }
 
-    const mode = options.mode || 'auto'; // 'auto' | 'wrapper' | 'wezterm' | 'claude-resume'
+    const mode = options.mode || 'auto';
     const isApproval =
-      options.isApproval ||
-      /^(y|yes|approve|ok|1)$/i.test(trimmed);
+      options.isApproval || /^(y|yes|approve|ok|1)$/i.test(trimmed);
 
-    // Update UI state immediately so user gets instant visual feedback
+    // 1. If the session currently has an interactive prompt and the user typed a number (1, 2, 3) or clicked Approve
+    if (session.interactivePrompt && /^[1-9]$/.test(trimmed)) {
+      const idx = Number(trimmed);
+      const matchedOpt = (session.interactivePrompt.options || []).find(
+        (o) => o.index === idx || o.number === trimmed
+      );
+      return this.selectInteractiveOption(session.id, {
+        targetIndex: idx,
+        currentIndex: session.interactivePrompt.currentIndex || 1,
+        number: trimmed,
+        label: matchedOpt ? matchedOpt.label : `ตัวเลือก ${trimmed}`,
+      });
+    }
+
+    // 2. If we have a live Windows Console PID (`claude.exe`), inject text + Enter directly into CONIN$!
+    if (!options.runHeadless && session.pid && this.consoleScanner) {
+      const sent = await this.consoleScanner.sendText(session.pid, trimmed);
+      if (sent && sent.ok) {
+        this.store.processHookEvent({
+          session_id: session.id,
+          cwd: session.cwd,
+          hook_event_name: 'UserPromptSubmit',
+          prompt: trimmed,
+        });
+        return {
+          ok: true,
+          transport: 'win32-console-input',
+          message: `ส่งคำสั่ง "${trimmed}" เข้าหน้าจอ Claude Terminal (PID ${session.pid}) โดยตรงเรียบร้อย!`,
+        };
+      }
+    }
+
     this.store.processHookEvent({
       session_id: session.id,
       cwd: session.cwd,
@@ -45,10 +172,8 @@ class CommandBridge {
         : trimmed,
     });
 
-    // 1. Always enqueue into wrapper queue in case `amc run` is polling this room
     this.store.enqueueCommand(session.id, trimmed);
 
-    // 2. If WezTerm Pane ID is available and mode is auto or wezterm, try WezTerm IPC
     if ((mode === 'auto' || mode === 'wezterm') && session.paneId) {
       const wezSent = await this._tryWezTermSend(session.paneId, trimmed);
       if (wezSent) {
@@ -60,7 +185,6 @@ class CommandBridge {
       }
     }
 
-    // 3. If wrapperConnected is true, the `amc run` wrapper will pick it up from the queue
     if ((mode === 'auto' || mode === 'wrapper') && session.wrapperConnected) {
       return {
         ok: true,
@@ -69,7 +193,6 @@ class CommandBridge {
       };
     }
 
-    // 4. If mode === 'claude-resume' or user explicitly wants background execution via Claude CLI
     if (mode === 'claude-resume' || options.runHeadless) {
       this._spawnClaudeHeadless(session, trimmed);
       return {
@@ -79,12 +202,12 @@ class CommandBridge {
       };
     }
 
-    // Default fallback: queued + update state (works for both demo rooms and hook-tracked tabs)
     if (isApproval) {
       this.store.updateSession(session.id, {
         status: 'working',
         statusLabel: 'ได้รับ Approve • กำลังรันต่อ',
         pendingAction: null,
+        interactivePrompt: null,
         tldr: `อนุมัติคำสั่งเรียบร้อย กำลังดำเนินการต่อใน ${session.room}`,
       });
     }
@@ -109,15 +232,11 @@ class CommandBridge {
     });
   }
 
-  /**
-   * Spawns a new Claude Code headless/streaming turn or resumes an existing session.
-   */
   _spawnClaudeHeadless(session, promptText) {
     const cwd =
       session.cwd && fs.existsSync(session.cwd) ? session.cwd : process.cwd();
 
     const args = ['-p', promptText, '--output-format', 'stream-json', '--verbose'];
-    // Only pass --resume if session.id looks like a real UUID from Claude Code
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(session.id)) {
       args.unshift('--resume', session.id);
     }
@@ -145,9 +264,7 @@ class CommandBridge {
           try {
             const evt = JSON.parse(line);
             this._handleClaudeStreamJson(session.id, evt);
-          } catch {
-            // Ignore partial line
-          }
+          } catch {}
         }
       });
 
@@ -174,7 +291,11 @@ class CommandBridge {
 
   _handleClaudeStreamJson(sessionId, evt) {
     if (!evt || typeof evt !== 'object') return;
-    if (evt.type === 'assistant' && evt.message && Array.isArray(evt.message.content)) {
+    if (
+      evt.type === 'assistant' &&
+      evt.message &&
+      Array.isArray(evt.message.content)
+    ) {
       for (const block of evt.message.content) {
         if (block.type === 'tool_use') {
           this.store.processHookEvent({
@@ -199,10 +320,6 @@ class CommandBridge {
     }
   }
 
-  /**
-   * Opens a new Terminal window/tab in the session's workspace directory
-   * (Windows Terminal `wt.exe` if available, fallback to PowerShell / cmd).
-   */
   openTerminalTab(sessionId, options = {}) {
     const session = this.store.sessions.get(sessionId);
     const cwd =
@@ -214,7 +331,6 @@ class CommandBridge {
 
     return new Promise((resolve) => {
       if (process.platform === 'win32') {
-        // Try Windows Terminal (wt.exe) first so it opens as a nice tab
         execFile(
           'wt.exe',
           [
@@ -238,7 +354,6 @@ class CommandBridge {
                 message: `เปิด Tab "${roomTitle}" ใน Windows Terminal แล้ว`,
               });
             }
-            // Fallback to start powershell
             spawn(
               'cmd.exe',
               [

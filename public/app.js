@@ -28,6 +28,13 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+function escapeJsAttr(str) {
+  return String(str || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '&quot;');
+}
+
 function showToast(msg) {
   const el = document.getElementById('toast');
   if (!el) return;
@@ -36,7 +43,7 @@ function showToast(msg) {
   clearTimeout(window.__toastTimer);
   window.__toastTimer = setTimeout(() => {
     el.style.display = 'none';
-  }, 3800);
+  }, 4000);
 }
 
 async function fetchInitialState() {
@@ -115,13 +122,25 @@ async function handleInstallHooks() {
       appState.hooks = data;
       renderHooksButton();
       showToast(
-        `✅ ผูก Claude Code Hooks เข้ากับ ${data.settingsPath} สำเร็จ! ทุก Tab ที่เปิดจะส่งสถานะมาที่นี่อัตโนมัติ`
+        `✅ ผูก Claude Code Hooks เข้ากับ ${data.settingsPath} สำเร็จ!`
       );
     }
   } catch (err) {
     showToast('❌ ติดตั้ง Hooks ไม่สำเร็จ: ' + err.message);
   }
 }
+
+window.scanTerminalsNow = async function () {
+  try {
+    const res = await fetch('/api/console/scan', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      showToast('🔄 สแกนหน้าจอ Claude Terminal ทุก Tab เรียบร้อย!');
+    }
+  } catch (err) {
+    showToast('❌ สแกนไม่สำเร็จ: ' + err.message);
+  }
+};
 
 function renderMetrics() {
   const m = appState.metrics;
@@ -131,8 +150,8 @@ function renderMetrics() {
   el.innerHTML = `
     <div class="metric-card ${m.needsInput > 0 ? 'alert-border' : ''}">
       <div>
-        <div class="metric-label">⚠️ รอคุณตัดสินใจ (Attention Queue)</div>
-        <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">ห้องที่ติด Permission / รอคำสั่ง</div>
+        <div class="metric-label">⚠️ รอคุณเลือกตอบ / Approve (Attention)</div>
+        <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">คลิกเลือกตัวเลือกจากหน้าเว็บได้ทันที</div>
       </div>
       <div class="metric-value" style="color: ${m.needsInput > 0 ? 'var(--warning)' : 'var(--text)'};">
         ${m.needsInput}
@@ -171,6 +190,106 @@ function renderMetrics() {
   `;
 }
 
+/**
+ * Renders interactive multiple-choice buttons for a session waiting on a Claude TUI menu
+ * (such as `Try the new fullscreen renderer? 1. Yes, try it / 2. Not now`, permission prompts, etc.)
+ */
+function buildInteractiveChoiceBoxHtml(s, compact = false) {
+  const prompt = s.interactivePrompt;
+  if (!prompt || !Array.isArray(prompt.options) || prompt.options.length === 0) {
+    if (!s.pendingAction) return '';
+    return `
+      <div class="attention-banner">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+          <div>
+            <strong style="color:#fbbf24;">⚠️ รอการยืนยัน:</strong>
+            <span class="mono" style="margin-left:8px;">${escapeHtml(s.pendingAction)}</span>
+          </div>
+          <div style="display:flex; gap:6px;">
+            <button class="btn btn-warning" onclick="event.stopPropagation(); quickApprove('${escapeJsAttr(s.id)}')">
+              ✓ Approve (y)
+            </button>
+            <button class="btn" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">
+              ↵ กด Enter
+            </button>
+            <button class="btn" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">
+              Esc ยกเลิก
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  const currentIdx = prompt.currentIndex || 1;
+  const contextHtml =
+    !compact && Array.isArray(prompt.context) && prompt.context.length > 0
+      ? `<div style="font-size:12.5px; color:var(--text-muted); display:flex; flex-direction:column; gap:2px; padding-left:4px;">
+          ${prompt.context.map((line) => `<div>${escapeHtml(line)}</div>`).join('')}
+        </div>`
+      : '';
+
+  const optionsHtml = prompt.options
+    .map((opt) => {
+      const isCursor = opt.active || opt.index === currentIdx;
+      return `
+        <button class="choice-btn ${isCursor ? 'active-cursor' : ''}"
+                onclick="event.stopPropagation(); selectChoiceOption('${escapeJsAttr(s.id)}', ${opt.index}, ${currentIdx}, '${escapeJsAttr(opt.number)}', '${escapeJsAttr(opt.label)}')">
+          <div style="display:flex; align-items:center;">
+            <span class="choice-num">${escapeHtml(opt.number)}</span>
+            <span>${escapeHtml(opt.label)}</span>
+          </div>
+          <span class="mono" style="font-size:11.5px; color:${isCursor ? '#fbbf24' : 'var(--text-muted)'};">
+            ${isCursor ? '❯ เลือกอยู่ (คลิกเพื่อกดยืนยัน)' : 'คลิกเพื่อเลือกข้อนี้ ↵'}
+          </span>
+        </button>
+      `;
+    })
+    .join('');
+
+  const keypadHtml = !compact
+    ? `
+      <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; padding-top:6px; border-top:1px solid rgba(245, 158, 11, 0.25);">
+        <span style="font-size:11.5px; color:var(--text-muted);">
+          💡 ${escapeHtml(prompt.footer || 'คลิกตัวเลือกด้านบน หรือใช้ปุ่มควบคุม TUI ด้านขวา')}
+        </span>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button class="btn" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">
+            ↑ เลื่อนขึ้น
+          </button>
+          <button class="btn" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">
+            ↓ เลื่อนลง
+          </button>
+          <button class="btn btn-warning" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">
+            ↵ กด Enter ยืนยันข้อที่เลือกอยู่
+          </button>
+          <button class="btn" onclick="event.stopPropagation(); sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">
+            Esc ยกเลิก
+          </button>
+        </div>
+      </div>
+    `
+    : '';
+
+  return `
+    <div class="choice-card">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+        <div style="font-weight:700; font-size:14.5px; color:#fbbf24;">
+          ❓ ${escapeHtml(prompt.question)}
+        </div>
+        <span class="pill mono" style="color:#fbbf24; border-color:rgba(245,158,11,0.4);">
+          ${s.pid ? `Live Console PID ${s.pid}` : 'Interactive Prompt'}
+        </span>
+      </div>
+      ${contextHtml}
+      <div class="choice-options-list">
+        ${optionsHtml}
+      </div>
+      ${keypadHtml}
+    </div>
+  `;
+}
+
 function renderAttentionBanner() {
   const el = document.getElementById('attention-section');
   if (!el) return;
@@ -184,24 +303,63 @@ function renderAttentionBanner() {
 
   const target = waitingRooms[0];
   el.style.display = 'block';
-  el.innerHTML = `
-    <div class="attention-banner">
-      <div style="display:flex; align-items:center; gap:10px;">
-        <span class="dot warning"></span>
-        <div>
-          <strong style="color:#fbbf24;">⚠️ ${escapeHtml(target.room)} กำลังรอการอนุมัติจากคุณ:</strong>
-          <span class="mono" style="margin-left:8px; background:rgba(0,0,0,0.35); padding:3px 8px; border-radius:6px;">
-            ${escapeHtml(target.pendingAction || target.tldr)}
-          </span>
+
+  if (target.interactivePrompt) {
+    const p = target.interactivePrompt;
+    const currentIdx = p.currentIndex || 1;
+    el.innerHTML = `
+      <div class="attention-banner">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <span class="dot warning"></span>
+            <strong style="color:#fbbf24; font-size:14.5px;">
+              ⚠️ [${escapeHtml(target.room)}] กำลังรอให้คุณเลือกคำตอบ: "${escapeHtml(p.question)}"
+            </strong>
+          </div>
+          <button class="btn" onclick="selectSession('${escapeJsAttr(target.id)}')">
+            🔍 เปิดดูห้องนี้
+          </button>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:8px;">
+          ${p.options
+            .map(
+              (opt) => `
+              <button class="btn ${opt.active ? 'btn-warning' : ''}"
+                      onclick="selectChoiceOption('${escapeJsAttr(target.id)}', ${opt.index}, ${currentIdx}, '${escapeJsAttr(opt.number)}', '${escapeJsAttr(opt.label)}')">
+                <b>[${escapeHtml(opt.number)}]</b> ${escapeHtml(opt.label)} ${opt.active ? '❯' : ''}
+              </button>
+            `
+            )
+            .join('')}
+          <button class="btn" onclick="sendTerminalKey('${escapeJsAttr(target.id)}', 'esc')">
+            Esc ยกเลิก
+          </button>
         </div>
       </div>
-      <div style="display:flex; gap:8px;">
-        <button class="btn btn-warning" onclick="quickApprove('${escapeHtml(target.id)}')">
-          ✓ Approve & ให้ทำต่อทันที
-        </button>
-        <button class="btn" onclick="selectSession('${escapeHtml(target.id)}')">
-          🔍 ดูรายละเอียดห้องนี้
-        </button>
+    `;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="attention-banner">
+      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span class="dot warning"></span>
+          <div>
+            <strong style="color:#fbbf24;">⚠️ ${escapeHtml(target.room)} กำลังรอการอนุมัติจากคุณ:</strong>
+            <span class="mono" style="margin-left:8px; background:rgba(0,0,0,0.35); padding:3px 8px; border-radius:6px;">
+              ${escapeHtml(target.pendingAction || target.tldr)}
+            </span>
+          </div>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-warning" onclick="quickApprove('${escapeJsAttr(target.id)}')">
+            ✓ Approve & ให้ทำต่อทันที
+          </button>
+          <button class="btn" onclick="selectSession('${escapeJsAttr(target.id)}')">
+            🔍 ดูรายละเอียดห้องนี้
+          </button>
+        </div>
       </div>
     </div>
   `;
@@ -243,9 +401,34 @@ function buildRoomCardHtml(s, isDetailedGrid = false) {
     (sub) => sub.state === 'working' || sub.state === 'waiting'
   ).length;
 
+  // Quick inline buttons on the card itself if interactivePrompt is active
+  const inlineChoicesHtml =
+    s.interactivePrompt && Array.isArray(s.interactivePrompt.options)
+      ? `
+        <div style="display:flex; flex-direction:column; gap:6px; padding:9px 11px; border-radius:8px; background:rgba(245, 158, 11, 0.1); border:1px solid rgba(245, 158, 11, 0.45);">
+          <div style="font-size:12px; font-weight:700; color:#fbbf24;">
+            ❓ ${escapeHtml(s.interactivePrompt.question)}
+          </div>
+          <div style="display:flex; flex-wrap:wrap; gap:6px;">
+            ${s.interactivePrompt.options
+              .map(
+                (opt) => `
+                <button class="btn ${opt.active ? 'btn-warning' : ''}"
+                        style="padding:5px 10px; font-size:12px;"
+                        onclick="event.stopPropagation(); selectChoiceOption('${escapeJsAttr(s.id)}', ${opt.index}, ${s.interactivePrompt.currentIndex || 1}, '${escapeJsAttr(opt.number)}', '${escapeJsAttr(opt.label)}')">
+                  <b>${escapeHtml(opt.number)}.</b> ${escapeHtml(opt.label)}
+                </button>
+              `
+              )
+              .join('')}
+          </div>
+        </div>
+      `
+      : '';
+
   return `
     <div class="room-card ${cardBorderClass} ${isSelected ? 'selected' : ''}"
-         onclick="selectSession('${escapeHtml(s.id)}')">
+         onclick="selectSession('${escapeJsAttr(s.id)}')">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
         <div style="display:flex; align-items:center; gap:8px; font-weight:700; font-size:15px;">
           <span class="dot ${dotClass}"></span>
@@ -261,6 +444,8 @@ function buildRoomCardHtml(s, isDetailedGrid = false) {
       </div>
 
       ${buildPipelineHtml(s)}
+
+      ${inlineChoicesHtml}
 
       <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:9px 11px; font-size:12.5px; color:var(--text-muted);">
         <strong style="color:var(--text);">📌 สรุปล่าสุด (TL;DR):</strong>
@@ -285,7 +470,7 @@ function buildRoomCardHtml(s, isDetailedGrid = false) {
 
       <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; color:var(--text-muted);" class="mono">
         <span>🌿 ${escapeHtml(s.branch)} ${s.dirtyFiles ? `(${s.dirtyFiles} modified)` : ''}</span>
-        <span>🤖 ${(s.subAgents || []).length} Sub-agents (${activeSubs} active)</span>
+        <span>${s.pid ? `🟢 PID ${s.pid} • ` : ''}🤖 ${(s.subAgents || []).length} Sub (${activeSubs} active)</span>
       </div>
     </div>
   `;
@@ -295,7 +480,7 @@ function buildInspectorHtml(s) {
   if (!s) {
     return `
       <div class="inspector" style="text-align:center; padding:48px; color:var(--text-muted);">
-        ยังไม่มีห้องที่เลือก กดปุ่ม <b>"+ เปิดห้อง Agent ใหม่"</b> หรือ <b>"🧪 โหลดห้องจำลอง"</b> ด้านบนได้เลยครับ
+        ยังไม่มีห้องที่เลือก กดปุ่ม <b>"+ เปิดห้อง Agent ใหม่"</b> หรือ <b>"🔄 สแกนหน้าจอ Terminal ทันที"</b> ด้านบนได้เลยครับ
       </div>
     `;
   }
@@ -356,29 +541,51 @@ function buildInspectorHtml(s) {
           .join('')
       : `<div style="color:var(--text-muted); font-size:12px;">ยังไม่มีประวัติ Event</div>`;
 
+  const screenPreviewHtml = s.screenPreview
+    ? `
+      <div class="section-box">
+        <div class="section-title">
+          <span>🖥️ หน้าจอ Terminal ล่าสุด (Live Console Screen Buffer — PID ${escapeHtml(s.pid || 'N/A')})</span>
+          <div style="display:flex; gap:6px;">
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'up')">↑</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'down')">↓</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">↵ Enter</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'esc')">Esc</button>
+            <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="scanTerminalsNow()">🔄 รีเฟรชจอ</button>
+          </div>
+        </div>
+        <div class="terminal-preview">${escapeHtml(s.screenPreview)}</div>
+      </div>
+    `
+    : '';
+
   return `
     <div class="inspector">
       <!-- Room Header -->
       <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; gap:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
         <div>
-          <div style="display:flex; align-items:center; gap:10px;">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
             <h2 style="font-size:19px; font-weight:700;">${escapeHtml(s.room)}</h2>
             <span class="pill mono">${escapeHtml(s.cli)}</span>
             <span class="pill mono">🌿 ${escapeHtml(s.branch)}</span>
+            ${s.pid ? `<span class="pill mono" style="color:var(--success);">🟢 Connected PID ${s.pid}</span>` : ''}
           </div>
           <div class="mono" style="font-size:12px; color:var(--text-muted); margin-top:4px;">
             📁 ${escapeHtml(s.cwd || 'Local Workspace')} • Session ID: ${escapeHtml(s.id)}
           </div>
         </div>
         <div style="display:flex; gap:8px;">
-          <button class="btn" onclick="openRoomTerminal('${escapeHtml(s.id)}')">
+          <button class="btn" onclick="openRoomTerminal('${escapeJsAttr(s.id)}')">
             🖥️ เปิดใน Windows Terminal Tab
           </button>
-          <button class="btn" onclick="removeRoom('${escapeHtml(s.id)}')">
+          <button class="btn" onclick="removeRoom('${escapeJsAttr(s.id)}')">
             🗑️ ปิดการ์ดห้องนี้
           </button>
         </div>
       </div>
+
+      <!-- Interactive Choice Card (Shows prominent selectable options whenever Claude asks a multiple-choice / TUI question) -->
+      ${buildInteractiveChoiceBoxHtml(s, false)}
 
       <!-- Current Goal & Workflow Stage -->
       <div>
@@ -400,21 +607,8 @@ function buildInspectorHtml(s) {
         </div>
       </div>
 
-      ${
-        s.pendingAction
-          ? `
-        <div class="attention-banner">
-          <div>
-            <div style="font-weight:700; color:#fbbf24;">⚠️ คำสั่งที่กำลังรอคุณ Approve ในห้องนี้:</div>
-            <div class="mono" style="margin-top:4px;">${escapeHtml(s.pendingAction)}</div>
-          </div>
-          <button class="btn btn-warning" onclick="quickApprove('${escapeHtml(s.id)}')">
-            ✓ Approve (ส่งสัญญาณอนุญาตเข้า Tab)
-          </button>
-        </div>
-      `
-          : ''
-      }
+      <!-- Live Terminal Screen Buffer Preview -->
+      ${screenPreviewHtml}
 
       <!-- Sub-Agent Hierarchy Tree -->
       <div class="section-box">
@@ -440,34 +634,39 @@ function buildInspectorHtml(s) {
       <!-- Central Command Center -->
       <div class="section-box" style="background:var(--surface-elevated);">
         <div class="section-title">
-          <span>⌨️ สั่งการไปยัง ${escapeHtml(s.room)} โดยตรง (ไม่ต้องสลับหา Tab)</span>
+          <span>⌨️ สั่งการไปยัง ${escapeHtml(s.room)} โดยตรง (ส่งเข้า Console Tab ทันที)</span>
           <label style="display:flex; align-items:center; gap:6px; text-transform:none; font-weight:500; cursor:pointer;">
             <input type="checkbox" id="headless-toggle" />
             <span>รันผ่าน Claude Headless Resume (--resume)</span>
           </label>
         </div>
 
-        <!-- Quick Action Chips -->
         <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px;">
-          <button class="btn" onclick="sendQuickCommand('${escapeHtml(s.id)}', 'y', true)">
-            ✓ ส่ง Approve (y)
+          <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', '1', true)">
+            1️⃣ เลือกข้อ 1
           </button>
-          <button class="btn" onclick="sendQuickCommand('${escapeHtml(s.id)}', 'รันชุดทดสอบ (test) และสรุปผลสั้นๆ ให้หน่อย')">
+          <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', '2', true)">
+            2️⃣ เลือกข้อ 2
+          </button>
+          <button class="btn" onclick="sendTerminalKey('${escapeJsAttr(s.id)}', 'enter')">
+            ↵ ส่งปุ่ม Enter
+          </button>
+          <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', 'รันชุดทดสอบ (test) และสรุปผลสั้นๆ ให้หน่อย')">
             🧪 สั่งรัน Test & สรุปผล
           </button>
-          <button class="btn" onclick="sendQuickCommand('${escapeHtml(s.id)}', 'สรุปสิ่งที่แก้ไขไปทั้งหมดพร้อมตรวจสอบ git status')">
+          <button class="btn" onclick="sendQuickCommand('${escapeJsAttr(s.id)}', 'สรุปสิ่งที่แก้ไขไปทั้งหมดพร้อมตรวจสอบ git status')">
             📝 ขอสรุปงานที่ทำเสร็จแล้ว
           </button>
-          <button class="btn" onclick="simulateSubAgent('${escapeHtml(s.id)}')">
-            🤖 จำลองการแตก Sub-Agent ขนาน
+          <button class="btn" onclick="simulateSubAgent('${escapeJsAttr(s.id)}')">
+            🤖 จำลองการแตก Sub-Agent
           </button>
         </div>
 
         <div class="cmd-bar">
           <input id="cmd-input" class="input-text"
-                 placeholder="พิมพ์คำสั่งส่งเข้า ${escapeHtml(s.room)} แล้วกด Enter..."
-                 onkeydown="if(event.key==='Enter') submitCommand('${escapeHtml(s.id)}')" />
-          <button class="btn btn-primary" onclick="submitCommand('${escapeHtml(s.id)}')">
+                 placeholder="พิมพ์คำสั่งหรือหมายเลขตัวเลือก ส่งเข้า ${escapeHtml(s.room)} แล้วกด Enter..."
+                 onkeydown="if(event.key==='Enter') submitCommand('${escapeJsAttr(s.id)}')" />
+          <button class="btn btn-primary" onclick="submitCommand('${escapeJsAttr(s.id)}')">
             ส่งคำสั่ง ↵
           </button>
         </div>
@@ -525,11 +724,62 @@ window.toggleViewMode = function () {
   renderWorkspace();
 };
 
-window.quickApprove = async function (sessionId) {
-  await sendQuickCommand(sessionId, 'y', true);
+window.selectChoiceOption = async function (
+  sessionId,
+  targetIndex,
+  currentIndex,
+  numberStr,
+  labelStr
+) {
+  try {
+    const res = await fetch('/api/session/select-option', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        targetIndex,
+        currentIndex,
+        number: numberStr,
+        label: labelStr,
+      }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showToast(`✅ ${data.message}`);
+    } else {
+      showToast(`⚠️ ${data.error || data.message}`);
+    }
+  } catch (err) {
+    showToast('❌ ส่งตัวเลือกไม่สำเร็จ: ' + err.message);
+  }
 };
 
-window.sendQuickCommand = async function (sessionId, command, isApproval = false) {
+window.sendTerminalKey = async function (sessionId, keyName) {
+  try {
+    const res = await fetch('/api/session/send-key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        key: keyName,
+      }),
+    });
+    const data = await res.json();
+    showToast(data.ok ? `⌨️ ${data.message}` : `ℹ️ ${data.message}`);
+  } catch (err) {
+    showToast('❌ ส่งปุ่มไม่สำเร็จ: ' + err.message);
+  }
+};
+
+window.quickApprove = async function (sessionId) {
+  await sendQuickCommand(sessionId, '1', true);
+};
+
+window.sendQuickCommand = async function (
+  sessionId,
+  command,
+  isApproval = false
+) {
   const headlessEl = document.getElementById('headless-toggle');
   const runHeadless = headlessEl ? headlessEl.checked : false;
 
@@ -608,7 +858,7 @@ window.removeRoom = async function (sessionId) {
 
 window.seedDemoData = async function () {
   await fetch('/api/demo/seed', { method: 'POST' });
-  showToast('🧪 โหลดข้อมูลจำลอง 4 ห้องพร้อม Sub-Agents เรียบร้อย');
+  showToast('🧪 โหลดข้อมูลจำลองพร้อมห้องที่มีตัวเลือก Interactive เรียบร้อย');
 };
 
 window.openSpawnModal = function () {

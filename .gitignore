@@ -1,0 +1,5 @@
+node_modules/
+.amc-data/
+*.log
+.DS_Store
+Thumbs.db

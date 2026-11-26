@@ -56,8 +56,9 @@ npm start
 
 | คำสั่ง | คำอธิบาย |
 | :--- | :--- |
-| `npm start` หรือ `amc start` | เปิดเซิร์ฟเวอร์ Mission Control และเปิด Web Dashboard บน `http://127.0.0.1:4310` |
-| `npm run install-hooks` หรือ `amc install-hooks` | ผูก Claude Code Lifecycle Hooks เข้ากับ `~/.claude/settings.json` อัตโนมัติ |
+| `npm start` หรือ `amc start` | เปิดเซิร์ฟเวอร์ Mission Control และเปิด Web Dashboard บน `http://127.0.0.1:4310` เซิร์ฟเวอร์จะเชื่อม Claude Code hooks ให้เองระหว่างที่เปิดอยู่ และถอดออกเมื่อปิด |
+| `amc start --no-manage-hooks` | เปิดเซิร์ฟเวอร์โดยไม่แตะ `~/.claude/settings.json` (หรือตั้ง `AMC_MANAGE_HOOKS=0`) ใช้คู่กับสองคำสั่งด้านล่างเมื่ออยากผูก hooks ค้างไว้เอง |
+| `npm run install-hooks` หรือ `amc install-hooks` | ผูก Claude Code Lifecycle Hooks เข้ากับ `~/.claude/settings.json` ด้วยตัวเอง Hooks ที่ติดตั้งแบบนี้จะค้างอยู่แม้ปิดเซิร์ฟเวอร์ และ Claude Code จะขึ้นคำเตือนทุก tool call ระหว่างที่เซิร์ฟเวอร์ไม่ได้เปิด |
 | `amc uninstall-hooks` | ถอนการติดตั้ง Claude Hooks ออกจาก `~/.claude/settings.json` |
 | `npm run install-statusline` หรือ `amc install-statusline` | เชื่อม statusline ของ Claude Code เพื่อส่ง % usage จริงของรอบ 5 ชม. เข้า Mission Control (ถ้ามี statusline เดิม จะยังแสดงเหมือนเดิม) |
 | `amc uninstall-statusline` | คืน statusline เดิมที่ตั้งไว้ก่อนติดตั้ง |
@@ -70,10 +71,15 @@ npm start
 ## 🔄 วิธีการทำงานในชีวิตประจำวัน (3 โหมดการใช้งาน)
 
 ### โหมดที่ 1: เปิด Terminal Tab ปกติของคุณ (Passive Auto-Discovery)
-หลังจากรัน `npm run install-hooks` เพียงครั้งเดียว:
+ระหว่างที่ `npm start` เปิดอยู่ (เซิร์ฟเวอร์เชื่อม hooks ให้เอง ไม่ต้องติดตั้งแยก):
 - คุณเปิด Windows Terminal, PowerShell, WezTerm หรือ VS Code Terminal กี่ Tab ก็ได้ แล้วพิมพ์ `claude` ตามปกติ
-- ทันทีที่ Claude เริ่มทำงาน ตัว Hook (`hooks/claude-hook.js`) จะส่งสถานะห้อง, Git Branch, ขั้นตอน Workflow, Sub-Agents ที่ถูกแตกออกมา และข้อความสรุป Auto-TL;DR ขึ้นไปแสดงบนหน้าเว็บ `http://127.0.0.1:4310` อัตโนมัติ!
-- ถ้าอยากตั้งชื่อห้องให้สื่อความหมายชัดเจนก่อนรัน `claude`:
+- ทันทีที่ Claude เริ่มทำงาน Claude Code จะส่ง event ของตัวเองผ่าน HTTP hook ตรงมาที่เซิร์ฟเวอร์ สถานะห้อง, Git Branch, ขั้นตอน Workflow, Sub-Agents ที่ถูกแตกออกมา และข้อความสรุป Auto-TL;DR จึงขึ้นบนหน้าเว็บ `http://127.0.0.1:4310` อัตโนมัติ
+- HTTP hook ไม่เปิด process ใหม่ต่อ event (ต่างจาก hook แบบ command ที่ต้องรัน `bash` และ `node` ทุกครั้ง) มีเพียง `SessionStart` ที่ยังรัน `hooks/claude-hook.js` หนึ่งครั้งตอนเริ่ม session เพราะ Claude Code ไม่รองรับ HTTP ใน event นี้
+- เมื่อปิดเซิร์ฟเวอร์ hooks จะถูกถอดออก Claude Code จึงไม่เสียอะไรและไม่ขึ้นคำเตือนตอนที่ไม่ได้เปิด Mission Control ถ้าเซิร์ฟเวอร์ถูก kill แบบบังคับ hooks จะค้างอยู่จนกว่าจะเปิดใหม่หรือรัน `amc uninstall-hooks`
+- ต้องใช้ Claude Code รุ่นที่รองรับ hook แบบ `type: "http"` (ทดสอบกับ 2.1.332)
+- Token ที่เขียนลง `~/.claude/settings.json` เป็น token เฉพาะ hook ใช้ส่ง event ได้อย่างเดียว เปิด API ส่วนอื่นของ Mission Control ไม่ได้
+- ถ้าเปิดเซิร์ฟเวอร์มากกว่าหนึ่งตัว (คนละ port) ตัวที่เปิดทีหลังจะเป็นเจ้าของ hooks และการปิดตัวหนึ่งจะไม่ถอด hooks ของอีกตัว
+- ถ้าอยากตั้งชื่อห้องให้สื่อความหมายชัดเจนก่อนรัน `claude` (ต้องเปิด Mission Control ไว้ก่อน เพราะชื่อห้องถูกส่งตอนเริ่ม session):
   ```powershell
   $env:AMC_ROOM="Room 01 • Auth Refactor"; claude
   ```

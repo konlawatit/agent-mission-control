@@ -19,10 +19,13 @@ const {
   uninstallClaudeHooks,
   checkStatuslineStatus,
   installStatusline,
+  HOOK_ENDPOINT_PATH,
 } = require('./hook-installer');
+const { lookupClaudeSession } = require('./claude-sessions');
 const {
   TOKEN_HEADER,
   loadOrCreateToken,
+  deriveHookToken,
   isAllowedHost,
   isAllowedOrigin,
   tokensEqual,
@@ -198,8 +201,96 @@ function createMissionControlServer(options = {}) {
     });
   }
 
+  /**
+   * Body of a Claude Code HTTP hook. Unlike readJsonBody it never rejects: any answer other
+   * than 2xx makes Claude Code show a warning on that tool call, so a body that is too large
+   * (a screenshot in `tool_response`), malformed or not JSON is read to the end and reported
+   * as null.
+   */
+  function readHookBody(req) {
+    return new Promise((resolve) => {
+      const isJson = /^application\/json\b/i.test(String(req.headers['content-type'] || ''));
+      let raw = '';
+      let size = 0;
+      let skip = !isJson;
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => {
+        if (skip) return;
+        size += Buffer.byteLength(chunk);
+        if (size > MAX_BODY_BYTES) {
+          skip = true;
+          raw = '';
+          return;
+        }
+        raw += chunk;
+      });
+      req.on('end', () => {
+        if (skip) return resolve(null);
+        try {
+          const parsed = JSON.parse(raw);
+          resolve(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null);
+        } catch {
+          resolve(null);
+        }
+      });
+      req.on('error', () => resolve(null));
+    });
+  }
+
+  /**
+   * An HTTP hook carries nothing from the claude process's environment, which is where the hook
+   * script (hooks/claude-hook.js) read these from. The pid comes from Claude Code's session
+   * registry; the terminal ids come from headers Claude Code fills from its own environment.
+   */
+  function enrichHttpHookPayload(payload, headers) {
+    const header = (name) => {
+      const value = headers[name];
+      return typeof value === 'string' && value.trim() ? value.trim() : null;
+    };
+    const known = lookupClaudeSession(payload.session_id, {
+      sessionsDir: options.claudeSessionsDir,
+    });
+    if (known) {
+      if (!payload.claude_pid) payload.claude_pid = known.pid;
+      if (!payload.entrypoint) payload.entrypoint = known.entrypoint;
+    }
+    payload.pane_id = header('x-amc-pane') || header('x-amc-tmux-pane');
+    payload.wt_session = header('x-amc-wt-session');
+  }
+
+  /** What a held prompt is told, and when work resumes. */
+  function holdInfo() {
+    const summary = usageGuard.getUsageSummary();
+    const resumeAt = summary.resetAt
+      ? new Date(summary.resetAt).toLocaleTimeString('th-TH', {
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      : '-';
+    return {
+      resumeAt: summary.resetAt,
+      reason: `Mission Control พักงานไว้: usage เหลือ ${summary.remainingPct}% (ต่ำกว่า ${summary.autoPauseThresholdPct}%) จะทำงานต่ออัตโนมัติราว ${resumeAt} หรือกด "ทำต่อเลย" ใน dashboard`,
+    };
+  }
+
+  // The token written into ~/.claude/settings.json for the HTTP hooks: it opens the hook
+  // endpoint and nothing else.
+  const hookToken = deriveHookToken(token);
+
+  /** Hook status for this server: hooks that post to another instance do not count. */
+  function ownHooksStatus() {
+    const address = server.address();
+    return checkHooksStatus(address ? { port: address.port } : {});
+  }
+
   function isAuthorized(req, parsedUrl) {
     if (tokensEqual(req.headers[TOKEN_HEADER], token)) return true;
+    if (
+      parsedUrl.pathname === HOOK_ENDPOINT_PATH &&
+      tokensEqual(req.headers[TOKEN_HEADER], hookToken)
+    ) {
+      return true;
+    }
     // EventSource cannot set headers, so only the SSE stream accepts the token as a query param.
     return (
       parsedUrl.pathname === '/api/events' &&
@@ -267,13 +358,44 @@ function createMissionControlServer(options = {}) {
       if (req.method === 'GET' && pathname === '/api/state') {
         return sendJson(res, 200, {
           ok: true,
-          hooks: checkHooksStatus(),
+          hooks: ownHooksStatus(),
           statusline: checkStatuslineStatus(),
           ...store.getSnapshot(),
         });
       }
 
-      // 3. Receive Claude Hook / Agent Telemetry Event
+      // 3. Claude Code HTTP hooks (`type: "http"`): Claude Code posts the event itself, so no
+      // hook process is started. The answer is Claude Code's hook output: {} or a block decision.
+      if (req.method === 'POST' && pathname === HOOK_ENDPOINT_PATH) {
+        const payload = await readHookBody(req);
+        if (!payload) return sendJson(res, 200, {});
+        enrichHttpHookPayload(payload, req.headers);
+        const automated =
+          isAutomatedEntrypoint(payload.entrypoint) ||
+          isAutomatedEntrypoint(transcriptEntrypoint(payload.transcript_path));
+        if (
+          payload.hook_event_name === 'UserPromptSubmit' &&
+          usageGuard.isHolding() &&
+          !automated
+        ) {
+          return sendJson(res, 200, { decision: 'block', reason: holdInfo().reason });
+        }
+        // Claude Code waits for this answer before it runs the tool: answer first, work after.
+        sendJson(res, 200, {});
+        setImmediate(() => {
+          try {
+            const session = store.processHookEvent(payload);
+            if (!session) return;
+            usageGuard.checkAndEnforce().catch(() => {});
+            store.dequeueCommands(session.id);
+          } catch {
+            // One bad event must not take the server down.
+          }
+        });
+        return;
+      }
+
+      // 3b. Hook script (SessionStart, older installs) and `amc run` wrapper events
       if (req.method === 'POST' && pathname === '/api/hook') {
         const payload = await readJsonBody(req);
         const eventName = payload.hook_event_name || payload.event;
@@ -284,20 +406,7 @@ function createMissionControlServer(options = {}) {
           isAutomatedEntrypoint(transcriptEntrypoint(payload.transcript_path));
         if (eventName === 'UserPromptSubmit' && usageGuard.isHolding() && !automated) {
           // The hook script turns this into a {"decision":"block"} answer for Claude Code.
-          const summary = usageGuard.getUsageSummary();
-          const resumeAt = summary.resetAt
-            ? new Date(summary.resetAt).toLocaleTimeString('th-TH', {
-                hour: '2-digit',
-                minute: '2-digit',
-              })
-            : '-';
-          return sendJson(res, 200, {
-            ok: true,
-            hold: {
-              resumeAt: summary.resetAt,
-              reason: `Mission Control พักงานไว้: usage เหลือ ${summary.remainingPct}% (ต่ำกว่า ${summary.autoPauseThresholdPct}%) จะทำงานต่ออัตโนมัติราว ${resumeAt} หรือกด "ทำต่อเลย" ใน dashboard`,
-            },
-          });
+          return sendJson(res, 200, { ok: true, hold: holdInfo() });
         }
         const session = store.processHookEvent(payload);
         if (!session) return sendJson(res, 200, { ok: true, ignored: 'automated' });
@@ -596,10 +705,11 @@ function createMissionControlServer(options = {}) {
 
       // 12. Check / Install Claude Code Hooks
       if (req.method === 'GET' && pathname === '/api/hooks/status') {
-        return sendJson(res, 200, { ok: true, ...checkHooksStatus() });
+        return sendJson(res, 200, { ok: true, ...ownHooksStatus() });
       }
       if (req.method === 'POST' && pathname === '/api/hooks/install') {
-        const status = installClaudeHooks();
+        // The HTTP hooks must point at this server: its port and its token.
+        const status = installClaudeHooks({ port: server.address().port, token });
         return sendJson(res, 200, { ok: true, ...status });
       }
       if (req.method === 'POST' && pathname === '/api/hooks/uninstall') {

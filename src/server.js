@@ -1095,6 +1095,8 @@ function createMissionControlServer(options = {}) {
         try {
           quest = await questRunner.start(prepared, sessionId);
         } catch (err) {
+          // A room made for this quest alone is not left behind without one.
+          if (roomName !== null) store.archiveOrRemoveSession(sessionId, true);
           return sendQuestError(res, err);
         }
         let launchResult = null;

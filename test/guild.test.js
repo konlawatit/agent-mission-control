@@ -16,7 +16,13 @@ process.env.USERPROFILE = isolatedHome;
 
 const guild = require('../src/guild-classes');
 const { QuestRunner, QuestError, USAGE_REASON, QUEST_FILE } = require('../src/quest-runner');
-const { CommandBridge, headlessClaudeArgs, headlessExitSummary } = require('../src/command-bridge');
+const {
+  CommandBridge,
+  headlessClaudeArgs,
+  headlessExitSummary,
+  headlessErrorSummary,
+  isHeadlessExitSummary,
+} = require('../src/command-bridge');
 const { StateStore } = require('../src/state-store');
 const { createMissionControlServer } = require('../src/server');
 
@@ -367,7 +373,7 @@ async function testTerminalLoopUntilFailed() {
   assert.deepStrictEqual(ctx.clock.pending().map((h) => h.ms), [1500], 'the launch timeout is replaced');
   await ctx.clock.runNext();
   assert.strictEqual(ctx.bridge.calls.length, 1);
-  assert.deepStrictEqual(ctx.bridge.last().opts, {}, 'a terminal quest is typed into its terminal');
+  assert.deepStrictEqual(ctx.bridge.last().opts, { noQueue: true }, 'a terminal quest is typed into its terminal');
   assert.ok(ctx.bridge.last().text.includes('ขั้น 1/3 สืบหาต้นตอ'));
   assert.ok(!/[\r\n]/.test(ctx.bridge.last().text));
   assert.strictEqual(q(ctx, quest.id).state, 'running');
@@ -426,7 +432,7 @@ async function testExistingRoomPassAndTranscriptFallback() {
   assert.strictEqual(quest.state, 'running');
   assert.strictEqual(quest.maxLoops, 1);
   assert.strictEqual(ctx.bridge.calls.length, 1, 'an existing room gets phase 1 at once');
-  assert.deepStrictEqual(ctx.bridge.last().opts, {});
+  assert.deepStrictEqual(ctx.bridge.last().opts, { noQueue: true });
 
   // No message on the Stop: the transcript's last answer is read instead.
   ctx.transcripts.set(id, 'วางแผนแล้ว\nQUEST-VERDICT: DONE');
@@ -1054,7 +1060,7 @@ async function testHttp() {
     res = await post(port, '/api/guild/quests', { heroClassId: 'quick_fix', goal: 'แก้ typo ใน README', sessionId: idle.id });
     assert.strictEqual(res.status, 200, res.raw);
     assert.strictEqual(res.json.quest.launch, 'existing');
-    assert.deepStrictEqual(sent[3].opts, {});
+    assert.deepStrictEqual(sent[3].opts, { noQueue: true });
     assert.strictEqual(sent[3].sessionId, idle.id);
 
     // The terminal could not be opened.
@@ -1083,6 +1089,17 @@ async function testHttp() {
     res = await post(port, '/api/guild/quest-action', { questId: bgQuest.id, action: 'dance' });
     assert.strictEqual(res.status, 400);
 
+    // A quest that fails to start leaves no room of its own behind.
+    const realStart = questRunner.start;
+    questRunner.start = async () => {
+      throw new QuestError(409, 'ทดสอบ');
+    };
+    const roomsBefore = store.sessions.size;
+    res = await post(port, '/api/guild/quests', { heroClassId: 'quick_fix', goal: 'x', cwd: roomDir('orphan') });
+    assert.strictEqual(res.status, 409);
+    assert.strictEqual(store.sessions.size, roomsBefore, 'the room made for it is removed');
+    questRunner.start = realStart;
+
     // 423 while the usage guard holds.
     res = await post(port, '/api/usage/config', { action: 'simulate-low-quota' });
     assert.strictEqual(res.json.ok, true);
@@ -1103,6 +1120,137 @@ async function testHttp() {
   assert.strictEqual(saved.quests.length, 4, 'quests are written on close');
 }
 
+// ---------------------------------------------------------------------------------------------
+// Review fixes: failed background results, overlapping runs, no queued copies, stale
+// transcripts, merged rooms, a hold that lifted while closed, a fresh probe after "ทำต่อ"
+// ---------------------------------------------------------------------------------------------
+async function testReviewFixes() {
+  // A background result that is an error stalls the quest; it is not the phase's answer.
+  {
+    const ctx = setup();
+    const { id, quest } = await startQuest(ctx, { heroClassId: 'full_slayer', launch: 'headless' });
+    ctx.store.stop(id, headlessErrorSummary('Claude AI usage limit reached'));
+    const cur = q(ctx, quest.id);
+    assert.strictEqual(cur.state, 'stalled');
+    assert.strictEqual(cur.phaseIndex, 0, 'the phase did not count as done');
+    assert.ok(cur.stateReason.includes('usage limit'));
+  }
+  {
+    const store = new StateStore({ dataDir: fs.mkdtempSync(path.join(isolatedHome, 'store-err-')), saveDebounceMs: 0 });
+    const bridge = new CommandBridge(store, null);
+    const room = store.getOrCreateSession('session-err', { cwd: roomDir('bridge-err') });
+    const details = [];
+    store.on('change', (e) => e.type === 'hook_event' && details.push(e.detail));
+    bridge._handleClaudeStreamJson(room.id, { type: 'result', subtype: 'success', is_error: true, result: 'Claude AI usage limit reached' });
+    assert.ok(isHeadlessExitSummary(details[details.length - 1].lastAssistantMessage), 'an error result reads as a failure');
+    bridge._handleClaudeStreamJson(room.id, { type: 'result', subtype: 'error_during_execution', result: 'boom' });
+    assert.ok(isHeadlessExitSummary(details[details.length - 1].lastAssistantMessage), 'so does an error subtype');
+    bridge._handleClaudeStreamJson(room.id, { type: 'result', subtype: 'success', is_error: false, result: 'ok\nQUEST-VERDICT: DONE' });
+    assert.strictEqual(details[details.length - 1].lastAssistantMessage, 'ok\nQUEST-VERDICT: DONE');
+
+    // noQueue: a prompt nothing could deliver is not left in the room's queue.
+    const r = await bridge.dispatchCommand(room.id, 'phase prompt', { noQueue: true });
+    assert.strictEqual(r.delivered, false);
+    assert.deepStrictEqual(store.dequeueCommands(room.id), []);
+    const r2 = await bridge.dispatchCommand(room.id, 'ordinary prompt');
+    assert.strictEqual(r2.delivered, false);
+    assert.strictEqual(store.dequeueCommands(room.id).length, 1, 'without noQueue it is queued as before');
+    store.flush();
+  }
+
+  // Background: the previous run still alive after the wait stalls; never two runs at once.
+  {
+    const ctx = setup();
+    const { id, quest } = await startQuest(ctx, { heroClassId: 'full_slayer', launch: 'headless' });
+    ctx.bridge.activeProcesses.set(id, {});
+    ctx.store.stop(id, 'QUEST-VERDICT: DONE');
+    for (let i = 0; i < 200 && q(ctx, quest.id).state === 'running'; i++) await ctx.clock.runNext();
+    assert.strictEqual(q(ctx, quest.id).state, 'stalled');
+    assert.strictEqual(ctx.bridge.calls.length, 1, 'no second run while the first is alive');
+    await expectQuestError(() => ctx.runner.action(quest.id, 'resume'), 409, 'resume waits for the old run');
+    ctx.bridge.activeProcesses.delete(id);
+    await ctx.runner.action(quest.id, 'resume');
+    assert.strictEqual(ctx.bridge.calls.length, 2);
+    assert.ok(ctx.bridge.last().text.includes('ขั้น 2/3'));
+  }
+
+  // A transcript that still ends with the previous answer is not this turn's answer.
+  {
+    const ctx = setup();
+    const { id, quest } = await startQuest(ctx, { heroClassId: 'full_slayer' }, { existing: true });
+    ctx.transcripts.set(id, 'แผนแก้\nQUEST-VERDICT: BLOCKED — ขอ token');
+    ctx.store.stop(id); // no message in the hook: read from the transcript
+    assert.strictEqual(q(ctx, quest.id).state, 'paused');
+    await ctx.runner.action(quest.id, 'resume', 'token อยู่ใน .env');
+    ctx.store.stop(id); // the answer is not in the file yet
+    const cur = q(ctx, quest.id);
+    assert.strictEqual(cur.state, 'running', 'the old BLOCKED is not read again');
+    assert.strictEqual(cur.phaseIndex, 1, 'no verdict on a non-verify phase moves on');
+  }
+
+  // A merged room: the quest follows the room it went into.
+  {
+    const ctx = setup();
+    const { id, quest } = await startQuest(ctx, { heroClassId: 'quick_fix' }, { existing: true });
+    ctx.store.addRoom('room-merged-into', { pid: 9999 });
+    ctx.store.sessions.delete(id);
+    ctx.store.emit('change', { type: 'session_merged', detail: { sessionId: id, into: 'room-merged-into' } });
+    assert.strictEqual(q(ctx, quest.id).sessionId, 'room-merged-into');
+    assert.strictEqual(ctx.store.sessions.get('room-merged-into').quest.id, quest.id);
+    ctx.store.stop('room-merged-into', 'QUEST-VERDICT: DONE');
+    assert.strictEqual(q(ctx, quest.id).state, 'done');
+  }
+  {
+    const store = new StateStore({ dataDir: fs.mkdtempSync(path.join(isolatedHome, 'store-merge-')), saveDebounceMs: 0 });
+    const a = store.getOrCreateSession('room-a', { cwd: roomDir('merge-a') });
+    const b = store.getOrCreateSession('room-b', { cwd: roomDir('merge-b') });
+    Object.assign(a, { claudeSessionId: UUID_C, updatedAt: '2026-11-27T01:00:00.000Z' });
+    Object.assign(b, { claudeSessionId: UUID_C, updatedAt: '2026-11-27T02:00:00.000Z' });
+    const merged = [];
+    store.on('change', (e) => e.type === 'session_merged' && merged.push(e.detail));
+    store._deduplicateSessions();
+    assert.deepStrictEqual(merged, [{ sessionId: 'room-a', into: 'room-b' }]);
+    store.flush();
+  }
+
+  // A usage hold that lifted while Mission Control was closed: the paused quest carries on.
+  {
+    const ctx = setup();
+    const { id, quest } = await startQuest(ctx, { heroClassId: 'full_slayer' }, { existing: true });
+    ctx.usageGuard.holding = true;
+    ctx.store.stop(id, 'QUEST-VERDICT: DONE');
+    await ctx.clock.runNext();
+    assert.strictEqual(q(ctx, quest.id).stateReason, USAGE_REASON);
+    ctx.runner.stop();
+    ctx.usageGuard.holding = false;
+    const runner2 = ctx.make();
+    assert.strictEqual(runner2.get(quest.id).state, 'paused');
+    await ctx.clock.runNext();
+    assert.strictEqual(runner2.get(quest.id).state, 'running');
+    assert.ok(ctx.bridge.last().text.includes('ขั้น 2/3'));
+    runner2.stop();
+  }
+
+  // After "ทำต่อ", a verify turn without a verdict is asked once more before pausing again.
+  {
+    const ctx = setup();
+    const { id, quest } = await startQuest(ctx, { heroClassId: 'full_slayer' }, { existing: true });
+    ctx.store.stop(id, 'QUEST-VERDICT: DONE');
+    await ctx.clock.runNext();
+    ctx.store.stop(id, 'QUEST-VERDICT: DONE');
+    await ctx.clock.runNext();
+    ctx.store.stop(id, 'ไม่มีผล');
+    await ctx.clock.runNext(); // the probe
+    ctx.store.stop(id, 'ก็ยังไม่มี');
+    assert.strictEqual(q(ctx, quest.id).state, 'paused');
+    await ctx.runner.action(quest.id, 'resume');
+    assert.strictEqual(q(ctx, quest.id).probeSent, false);
+    ctx.store.stop(id, 'รันแล้วแต่ลืมบอกผล');
+    assert.strictEqual(q(ctx, quest.id).state, 'running', 'asks for the verdict again instead of pausing');
+    assert.strictEqual(q(ctx, quest.id).probeSent, true);
+  }
+}
+
 async function run() {
   testClasses();
   testParseVerdict();
@@ -1120,6 +1268,7 @@ async function run() {
   await testRoomArchivedRemovedAndNewestMirror();
   await testPersistence();
   await testBridgeAndStore();
+  await testReviewFixes();
   await testHttp();
   console.log('✅ Guild Mode checks passed!');
 }

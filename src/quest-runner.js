@@ -73,6 +73,12 @@ function defaultQuestName(goal) {
   return `${(space >= 20 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
+/** What identifies an answer across Stops: its last few hundred characters. */
+function answerKey(text) {
+  const t = String(text || '').trim();
+  return t ? t.slice(-300) : null;
+}
+
 function lastAssistantTextFromTranscript(session) {
   if (!session || !session.transcriptPath) return null;
   try {
@@ -238,6 +244,8 @@ class QuestRunner {
       waitForIdle: false,
       resumeNote: null,
       lastVerdict: null,
+      // The room's last answer so far: a transcript still ending with it is not this turn's.
+      answerKey: answerKey(this.readTranscriptText(session)),
       log: [],
       createdAt: nowIso,
       updatedAt: nowIso,
@@ -348,6 +356,11 @@ class QuestRunner {
       for (const quest of this._questsFor(sessionId)) {
         if (ACTIVE.has(quest.state)) this._finish(quest, 'stopped', reason, 'warn');
       }
+    } else if (type === 'session_merged' && sessionId && detail.into) {
+      // The room was merged into another one (same Claude session or terminal): follow it.
+      for (const quest of this._questsFor(sessionId)) quest.sessionId = detail.into;
+      const latest = this._latestFor(detail.into);
+      if (latest) this._touch(latest);
     } else if (type === 'quota_resumed') {
       // The hold lifted: quests it paused carry on by themselves.
       for (const quest of this._sorted()) {
@@ -407,10 +420,18 @@ class QuestRunner {
       this._stall(quest, `รัน Claude เบื้องหลังไม่สำเร็จ: ${given}`);
       return;
     }
-    // The hook's own copy first; the transcript and the TL;DR only when it carries no verdict.
+    // The hook's own copy first; the transcript only when that carries no verdict, and only when
+    // it no longer ends with the previous turn's answer (this turn's may not be written yet).
     let verdict = parseVerdict(given);
-    if (!verdict) verdict = parseVerdict(this.readTranscriptText(session) || '');
-    if (!verdict) verdict = parseVerdict((session && session.tldr) || '');
+    let answer = given;
+    if (!verdict) {
+      const fromFile = this.readTranscriptText(session) || '';
+      if (fromFile && answerKey(fromFile) !== quest.answerKey) {
+        verdict = parseVerdict(fromFile);
+        if (!answer) answer = fromFile;
+      }
+    }
+    if (answer) quest.answerKey = answerKey(answer);
     quest.lastVerdict = verdict;
     const phase = quest.plan[quest.phaseIndex];
 
@@ -493,7 +514,15 @@ class QuestRunner {
       this._touch(quest);
       return;
     }
+    if (this._headlessBusy(quest)) {
+      throw new QuestError(409, 'งานเบื้องหลังรอบก่อนยังไม่ปิด รอสักครู่แล้วกด "ทำต่อ" อีกครั้ง');
+    }
     await this._dispatch(quest, { resume: true, note });
+  }
+
+  /** A background quest's previous `claude -p` process is still running. */
+  _headlessBusy(quest) {
+    return Boolean(quest.headless && this.bridge.activeProcesses && this.bridge.activeProcesses.has(quest.sessionId));
   }
 
   /** Sends the current phase (or the verdict probe) to the room. */
@@ -526,6 +555,7 @@ class QuestRunner {
     quest.waitForIdle = false;
     quest.resumeNote = null;
     quest.phaseSent = true; // set first: a very fast Stop may arrive before the answer below
+    if (!probe) quest.probeSent = false; // a phase sent afresh may ask for its verdict once again
     const loopText = quest.maxLoops > 1 && phase.kind !== 'investigate' ? ` · รอบ ${quest.loop}/${quest.maxLoops}` : '';
     this._log(
       quest,
@@ -539,7 +569,13 @@ class QuestRunner {
 
     let result;
     try {
-      result = await this.bridge.dispatchCommand(quest.sessionId, prompt, quest.headless ? { ...HEADLESS_OPTIONS } : {});
+      // noQueue: an undelivered phase stalls here and is sent again on "ทำต่อ"; a copy left in
+      // the room's queue could reach the terminal later by itself.
+      result = await this.bridge.dispatchCommand(
+        quest.sessionId,
+        prompt,
+        quest.headless ? { ...HEADLESS_OPTIONS } : { noQueue: true }
+      );
     } catch (err) {
       result = { ok: false, delivered: false, message: err && err.message };
     }
@@ -559,9 +595,13 @@ class QuestRunner {
   _fireDispatch(questId, opts, waited) {
     const quest = this.quests.get(questId);
     if (!quest || (quest.state !== 'running' && quest.state !== 'launching') || quest.awaitingTurn) return;
-    const busy = quest.headless && this.bridge.activeProcesses && this.bridge.activeProcesses.has(quest.sessionId);
-    if (busy && waited < this.headlessWaitMs) {
-      this._setTimer(quest, 500, () => this._fireDispatch(questId, opts, waited + 500));
+    if (this._headlessBusy(quest)) {
+      if (waited < this.headlessWaitMs) {
+        this._setTimer(quest, 500, () => this._fireDispatch(questId, opts, waited + 500));
+        return;
+      }
+      // Never two runs at once: the old one's exit would end the new phase.
+      this._stall(quest, 'งานเบื้องหลังรอบก่อนยังไม่ปิด รอให้จบแล้วกด "ทำต่อ"');
       return;
     }
     this._dispatch(quest, opts).catch(() => {});
@@ -786,6 +826,7 @@ class QuestRunner {
       waitForIdle: Boolean(raw.waitForIdle),
       resumeNote: text(raw.resumeNote, MAX_NOTE),
       lastVerdict: verdict,
+      answerKey: text(raw.answerKey, 400),
       log: (Array.isArray(raw.log) ? raw.log : [])
         .filter((e) => e && typeof e.text === 'string')
         .slice(-MAX_LOG)
@@ -829,6 +870,9 @@ class QuestRunner {
         this._stall(quest, 'Mission Control เริ่มใหม่ระหว่างที่งานเบื้องหลังกำลังรัน ตรวจผลในห้องแล้วกด "ทำต่อ"');
       } else if (quest.state === 'running' && !quest.awaitingTurn && !quest.waitForIdle) {
         this._scheduleDispatch(quest, this.phaseGapMs, { probe: quest.probeSent && quest.phaseSent });
+      } else if (quest.state === 'paused' && quest.stateReason === USAGE_REASON && !this._holding()) {
+        // The hold lifted while Mission Control was closed: no quota_resumed will come for it.
+        this._setTimer(quest, this.phaseGapMs, () => this._resume(quest, null).catch(() => {}));
       }
     }
     const rooms = new Set(Array.from(this.quests.values(), (q) => q.sessionId));

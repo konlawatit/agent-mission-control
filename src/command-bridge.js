@@ -41,14 +41,21 @@ function resolveResumeId(session) {
 // these constants (never a caller's string) are ever added to the command line.
 const HEADLESS_PERMISSION_MODES = new Set(['acceptEdits']);
 const HEADLESS_EXIT_PREFIX = 'Process จบการทำงานด้วยรหัส';
+const HEADLESS_ERROR_PREFIX = 'Claude ตอบกลับเป็นข้อผิดพลาด';
 
 /** The Stop summary of a background run that ended without a result (a crash, a failed start). */
 function headlessExitSummary(code) {
   return `${HEADLESS_EXIT_PREFIX} (exit code ${code})`;
 }
 
+/** The Stop summary of a background run whose result is an error (usage limit, API error). */
+function headlessErrorSummary(text) {
+  return `${HEADLESS_ERROR_PREFIX}: ${String(text || '').trim() || 'ไม่ทราบสาเหตุ'}`;
+}
+
+/** A background run that failed rather than answered: a quest stalls instead of moving on. */
 function isHeadlessExitSummary(text) {
-  return typeof text === 'string' && text.startsWith(HEADLESS_EXIT_PREFIX);
+  return typeof text === 'string' && (text.startsWith(HEADLESS_EXIT_PREFIX) || text.startsWith(HEADLESS_ERROR_PREFIX));
 }
 
 /** Arguments for a background `claude -p` run of a room; the prompt itself goes to stdin. */
@@ -383,9 +390,8 @@ class CommandBridge {
     }
 
     // The wrapper (`amc run`) and hooks pick commands up from the queue on their next poll.
-    this.store.enqueueCommand(session.id, trimmed);
-
     if ((mode === 'auto' || mode === 'wrapper') && session.wrapperConnected) {
+      this.store.enqueueCommand(session.id, trimmed);
       recordPrompt();
       return {
         ok: true,
@@ -395,6 +401,18 @@ class CommandBridge {
       };
     }
 
+    // A caller that handles "not delivered" itself (a guild quest stalls and sends again on
+    // "ทำต่อ") must not leave the prompt queued, or it could arrive later on its own.
+    if (options.noQueue) {
+      return {
+        ok: true,
+        delivered: false,
+        transport: 'none',
+        message: `ยังส่งเข้า Terminal ของ ${session.room} ไม่ได้`,
+      };
+    }
+
+    this.store.enqueueCommand(session.id, trimmed);
     return {
       ok: true,
       delivered: false,
@@ -472,6 +490,9 @@ class CommandBridge {
       });
 
       child.on('close', (code) => {
+        // A newer run of this room took over while this one was exiting: its exit is not the
+        // room's turn ending, and the newer run's entry must stay.
+        if (this.activeProcesses.get(session.id) !== child) return;
         this.activeProcesses.delete(session.id);
         this.store.processHookEvent({
           session_id: session.id,
@@ -520,12 +541,15 @@ class CommandBridge {
         }
       }
     } else if (evt.type === 'result' && evt.result) {
+      // An error result (usage limit, API error) is not an answer: say so, so a quest stalls.
+      const failed = evt.is_error === true || /^error/i.test(String(evt.subtype || ''));
+      const text = failed ? headlessErrorSummary(evt.result) : String(evt.result);
       this.store.processHookEvent({
         session_id: sessionId,
         hook_event_name: 'Stop',
-        summary: String(evt.result).slice(0, 220),
+        summary: text.slice(0, 220),
         // The whole answer, for readers that need its last line (a quest's verdict).
-        last_assistant_message: String(evt.result),
+        last_assistant_message: text,
       });
     }
   }
@@ -635,5 +659,6 @@ module.exports = {
   resolveResumeId,
   headlessClaudeArgs,
   headlessExitSummary,
+  headlessErrorSummary,
   isHeadlessExitSummary,
 };

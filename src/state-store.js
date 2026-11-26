@@ -232,6 +232,8 @@ class StateStore extends EventEmitter {
         const dup = group[i];
         this._mergeSessionInto(primary, dup);
         this.sessions.delete(dup.id);
+        // Whoever keeps a room id (a guild quest) follows the room it was merged into.
+        this.emit('change', { type: 'session_merged', detail: { sessionId: dup.id, into: primary.id } });
       }
     }
   }

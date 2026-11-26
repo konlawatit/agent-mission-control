@@ -241,6 +241,9 @@
     .btn-attn:hover:not(:disabled) { background: oklch(0.79 0.15 66); }
     .btn-hold { background: var(--hold-fill); color: oklch(1 0 0); }
     .btn-hold:hover:not(:disabled) { background: oklch(0.50 0.20 15); }
+    /* Destructive confirm (delete, clear): the deletion rose, white text on hold-fill (5.4:1). */
+    .btn-danger { background: var(--hold-fill); color: oklch(1 0 0); }
+    .btn-danger:hover:not(:disabled) { background: oklch(0.50 0.20 15); }
     .btn-sm { height: 28px; padding: 0 10px; font-size: 12.5px; border-radius: var(--r-xs); }
     .icon-btn {
       display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: var(--r-sm);
@@ -539,6 +542,21 @@
     .ask-submit { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-left: 2px; }
     .ask-note { color: var(--text-2); font-size: 12.5px; }
     .ask-keys { display: flex; align-items: center; gap: 6px; padding-left: 26px; }
+    /* The key row stays reachable: when the card runs past the foot of the room's scrolling
+       column it sticks there on a frosted amber band, and settles back into the card at its end. */
+    @supports (container-type: scroll-state) {
+      .focus-scroll .ask-keys { position: sticky; bottom: 10px; z-index: 1; container-type: scroll-state; }
+      .focus-scroll .ask-keys::before {
+        content: ""; position: absolute; z-index: -1; inset: -10px -16px -12px; opacity: 0; pointer-events: none;
+        background: linear-gradient(var(--attn-soft), var(--attn-soft)), var(--glass-strong);
+        -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+        box-shadow: 0 -12px 20px -16px oklch(0.42 0.16 287 / 0.45), inset 0 1px 0 var(--attn-line), inset 1px 0 0 var(--attn-line), inset -1px 0 0 var(--attn-line);
+        transition: opacity 140ms;
+      }
+      @container scroll-state(stuck: bottom) {
+        .focus-scroll .ask-keys::before { opacity: 1; }
+      }
+    }
     /* Several questions in one prompt: one tab each, then the submit step, as in the terminal. */
     .ask-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
     .ask-tab {
@@ -615,6 +633,24 @@
       box-shadow: var(--shadow-primary);
     }
     .md-user-turn .md-inline-code { background: oklch(1 0 0 / 0.2); color: inherit; }
+    .md-user-p { margin: 0; }
+    .md-user-p + .md-user-p, .md-user-code + .md-user-p { margin-top: 8px; }
+    .md-user-code {
+      margin: 6px 0; padding: 8px 10px; border-radius: var(--r-sm); background: oklch(1 0 0 / 0.16);
+      font: 400 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    /* Files sent with the turn: one chip per file, its full path on hover. */
+    .md-user-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .md-user-files:first-child { margin-top: 0; }
+    .md-user-file {
+      display: inline-flex; align-items: center; gap: 6px; max-width: 100%; height: 26px; padding: 0 10px 0 8px;
+      border-radius: 999px; background: oklch(1 0 0 / 0.16); box-shadow: inset 0 0 0 1px oklch(1 0 0 / 0.24);
+      font-size: 12.5px; font-weight: 600; cursor: default;
+    }
+    .md-user-file svg { flex-shrink: 0; }
+    .md-user-file span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .md-user-turn.is-queued .md-user-file { background: var(--primary-soft); box-shadow: none; }
+    .md-user-turn.is-queued .md-user-code { background: var(--soft); color: var(--text); }
     .md-claude {
       align-self: stretch; max-width: 100%; padding: 12px 16px; border-radius: 6px 18px 18px 18px;
       background: var(--card-sel); box-shadow: var(--shadow-card); color: var(--text-2);
@@ -636,8 +672,11 @@
     .md-table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
     .md-table th, .md-table td { border: 1px solid var(--line); padding: 4px 9px; text-align: left; }
     .md-table th { color: var(--text); background: var(--soft); }
-    .md-tool-line { display: flex; align-items: center; gap: 7px; margin: 4px 0; font-family: var(--font-mono); font-size: 12px; color: var(--text-3); }
+    /* A wrapped command keeps the icon and tool name on its first line. */
+    .md-tool-line { display: flex; align-items: flex-start; gap: 7px; margin: 4px 0; font-family: var(--font-mono); font-size: 12px; color: var(--text-3); }
+    .md-tool-line svg { flex-shrink: 0; margin-top: calc((1.6em - 13px) / 2); }
     .md-tool-line b { flex-shrink: 0; color: var(--work-ink); font-weight: 650; }
+    .md-tool-line span { min-width: 0; overflow-wrap: anywhere; }
 
     /* Composer: a white pill with a round violet send button, as in the reference */
     .composer { padding: 14px 24px 20px 18px; display: flex; flex-direction: column; gap: 10px; }
@@ -880,6 +919,7 @@
     .gs-card-top { display: flex; align-items: baseline; gap: 12px; min-width: 0; padding: 0 4px; }
     .gs-card-title { flex: 1; min-width: 0; font-size: 14.5px; font-weight: 700; letter-spacing: -0.005em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .gs-card-time { flex-shrink: 0; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .gs-time-short { display: none; }
     .gs-card-meta { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 4px; font-size: 12px; color: var(--text-3); }
     .gs-card-meta .pill { flex-shrink: 0; font-variant-numeric: tabular-nums; }
     .gs-proj { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; max-width: 45%; font-weight: 650; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -907,11 +947,15 @@
       .gs-snip { grid-template-columns: minmax(0, 1fr); gap: 2px; }
       .gs-path { display: none; }
       .gs-proj { max-width: none; flex-shrink: 1; }
+      /* The title takes the room (two lines); the date shortens to the time, or day and month. */
+      .gs-card-title { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+      .gs-time-long { display: none; }
+      .gs-time-short { display: inline; }
     }
 
     /* ---------- Popover ---------- */
     .popover {
-      position: fixed; z-index: 60; min-width: 230px; max-width: 320px; padding: 8px; border-radius: var(--r-lg);
+      position: fixed; z-index: 60; min-width: 230px; max-width: min(320px, calc(100vw - 24px)); padding: 8px; border-radius: var(--r-lg);
       background: var(--glass-strong); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px);
       box-shadow: var(--shadow-lift), inset 0 0 0 1px var(--glass-edge);
       animation: pop-in 160ms var(--ease-out);
@@ -924,6 +968,17 @@
     .pop-item .check { margin-left: auto; color: var(--primary-ink); }
     .pop-item .desc { margin-left: auto; color: var(--text-3); font-size: 12px; font-weight: 500; }
     .pop-item.is-danger { color: var(--hold-ink); }
+    /* Model choices: the room's current one is selected (violet ink on primary-soft) with a check. */
+    .pop-choice .check { display: inline-grid; place-items: center; width: 15px; height: 15px; margin-left: 0; flex-shrink: 0; }
+    .pop-choice[aria-pressed="true"], .pop-choice[aria-pressed="true"]:hover { background: var(--primary-soft); color: var(--primary-ink); font-weight: 650; }
+    .pop-choice[aria-pressed="true"] .desc { color: var(--primary-ink); }
+    .pop-note {
+      display: flex; align-items: flex-start; gap: 8px; margin: 2px 2px 6px; padding: 9px 10px; border-radius: var(--r-sm);
+      background: var(--soft); color: var(--text-2); font-size: 12px; line-height: 1.45;
+    }
+    .pop-note svg { flex-shrink: 0; margin-top: 1px; color: var(--text-2); }
+    .pop-note b { display: block; margin-bottom: 1px; color: var(--text); font-size: 12.5px; font-weight: 650; }
+    .pop-foot { padding: 0 8px 4px; font-size: 11.5px; color: var(--text-3); }
     .pop-sep { height: 1px; margin: 6px 4px; background: var(--line); }
     .pop-seg { display: flex; gap: 4px; padding: 2px 6px 6px; }
     .pop-seg button { flex: 1; height: 30px; border-radius: var(--r-xs); background: var(--soft); color: var(--text-2); font-size: 12px; font-weight: 650; }
@@ -952,7 +1007,11 @@
     .viewer-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
     .viewer-head b { font-size: 15px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .viewer-head span { font-size: 12.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .viewer-body { padding: 18px max(22px, calc((100% - 1040px) / 2)) 24px; overflow-y: auto; }
+    .viewer-body { padding: 18px max(22px, calc((100% - 1040px) / 2)) 24px; overflow-y: auto; overscroll-behavior: contain; }
+    /* Behind the viewer: the dashboard dims around the sheet's inset, as behind a dialog. */
+    .scrim { position: fixed; inset: 0; z-index: 51; animation: scrim-in 200ms var(--ease-out); }
+    .scrim[hidden] { display: none; }
+    @keyframes scrim-in { from { opacity: 0; } }
     .viewer-body mark { background: var(--attn-soft); color: inherit; box-shadow: 0 0 0 2px var(--attn-soft); border-radius: 3px; }
     @keyframes ide-in { from { opacity: 0; transform: scale(0.985); } }
     .ide-bar { display: flex; align-items: center; gap: 10px; padding: 0 14px 0 20px; min-width: 0; border-bottom: 1px solid var(--line); }
@@ -991,9 +1050,14 @@
       -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px);
       box-shadow: var(--shadow-shell), inset 0 0 0 1px var(--glass-edge);
     }
-    dialog::backdrop { background: oklch(0.35 0.08 285 / 0.28); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+    dialog::backdrop, .scrim { background: oklch(0.35 0.08 285 / 0.28); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
     dialog form { display: flex; flex-direction: column; gap: 14px; padding: 24px; }
     dialog h2 { font-size: 19px; font-weight: 750; letter-spacing: -0.01em; }
+    /* The page's own confirm (delete, clear, test hold), never window.confirm. */
+    #confirm-dialog { width: min(420px, calc(100vw - 32px)); }
+    #confirm-dialog h2 { line-height: 1.35; overflow-wrap: anywhere; }
+    .confirm-text { margin-top: -6px; font-size: 13.5px; line-height: 1.6; color: var(--text-2); overflow-wrap: anywhere; }
+    .confirm-text[hidden] { display: none; }
     .form-field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--text-2); font-weight: 650; }
     .form-field input[type="text"] { height: 40px; padding: 0 14px; border: 0; border-radius: var(--r); background: var(--soft); color: var(--text); font: inherit; font-size: 13.5px; font-weight: 500; }
     .form-field input[type="text"]:focus { outline: 2px solid var(--ring); }
@@ -1078,7 +1142,10 @@
         -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); box-shadow: var(--shadow-lift), inset 0 0 0 1px var(--glass-edge);
       }
       .panel { position: fixed; top: auto; left: 10px; right: 10px; bottom: 76px; width: auto; height: 70vh; }
-      .ide { inset: 8px; }
+      .ide, .viewer { inset: 8px; }
+      /* On a phone the page scrolls: the key row stays in the card instead of sticking. */
+      .focus:not(.is-expanded) .focus-scroll .ask-keys { position: relative; bottom: auto; }
+      .focus:not(.is-expanded) .focus-scroll .ask-keys::before { display: none; }
       .ide-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
       .ide-files { max-height: 30vh; border-right: 0; border-bottom: 1px solid var(--line); }
       .overview { padding: 18px 14px; }
@@ -1088,6 +1155,7 @@
     @media (max-width: 440px) {
       .step { gap: 5px; font-size: 12px; }
       .step-line { min-width: 6px; margin: 0 5px; }
+      #confirm-dialog .dialog-actions .btn { flex: 1; height: 40px; }
     }
   </style>
 </head>
@@ -1174,6 +1242,17 @@
       <div class="dialog-actions">
         <button class="btn" value="cancel" formnovalidate>ยกเลิก</button>
         <button class="btn btn-primary" value="ok">บันทึก</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" role="alertdialog" aria-labelledby="confirm-title" aria-describedby="confirm-desc">
+    <form method="dialog">
+      <h2 id="confirm-title">ยืนยัน?</h2>
+      <p id="confirm-desc" class="confirm-text" hidden></p>
+      <div class="dialog-actions">
+        <button class="btn" id="confirm-cancel" value="cancel" autofocus>ยกเลิก</button>
+        <button class="btn btn-primary" id="confirm-ok" value="ok">ยืนยัน</button>
       </div>
     </form>
   </dialog>

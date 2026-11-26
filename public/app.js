@@ -199,6 +199,12 @@ function modelLabel(model) {
   return m ? cap(m) : 'Model';
 }
 
+/** The room's effort level when it is known; '' until the server has one. */
+function knownEffort(s) {
+  const e = String((s && s.effort) || '').toLowerCase();
+  return EFFORTS.includes(e) ? e : '';
+}
+
 function freshTokens(s) {
   const t = s.tokenUsage || {};
   if (typeof t.freshTokens === 'number') return t.freshTokens;
@@ -326,6 +332,71 @@ function formatInline(escaped) {
   return out.replace(/\u0000(\d+)\u0000/g, (_, i) => codes[Number(i)] || '');
 }
 
+const USER_MARK = '🧑 คุณ:';
+const QUEUED_MARK = '⏳ รอส่ง:';
+
+/** Whether a line opens a new conversation entry (every transcript line starts with one of these). */
+function isTurnStart(t) {
+  return t.startsWith(USER_MARK) || t.startsWith(QUEUED_MARK) || t.startsWith('🤖 Claude:') || t.startsWith('⏹') || /^🔧\s*\[Tool:/.test(t);
+}
+
+/** A stored attachment's name without the time-and-random prefix the server gives it. */
+function attachmentName(p) {
+  const base = String(p).split(/[\\/]/).pop() || String(p);
+  return base.replace(/^\d{8}-\d{6}-[0-9a-f]{6}-/, '') || base;
+}
+
+/**
+ * One turn the person typed, as a single bubble: every line of it (line breaks and pasted code
+ * kept), and the "ไฟล์แนบ (N):" list the composer appends shown as file chips inside the bubble.
+ */
+function userTurnHtml(lines, queued) {
+  let body = lines;
+  let files = [];
+  const head = lines.findIndex((l) => /^ไฟล์แนบ \(\d+\):$/.test(l.trim()));
+  if (head !== -1) {
+    const rest = lines.slice(head + 1).map((l) => l.trim()).filter(Boolean);
+    if (rest.length && rest.every((l) => l.startsWith('- '))) {
+      files = rest.map((l) => l.slice(2).trim());
+      body = lines.slice(0, head);
+    }
+  }
+  const parts = [];
+  let para = [];
+  let code = null;
+  const flushPara = () => {
+    if (para.length) parts.push(`<p class="md-user-p">${para.join('<br />')}</p>`);
+    para = [];
+  };
+  for (const line of body) {
+    const t = line.trim();
+    if (t.startsWith('```')) {
+      if (code) {
+        parts.push(`<pre class="md-user-code"><code>${escapeHtml(code.join('\n'))}</code></pre>`);
+        code = null;
+      } else {
+        flushPara();
+        code = [];
+      }
+      continue;
+    }
+    if (code) code.push(line);
+    else if (!t) flushPara();
+    else para.push(formatInline(escapeHtml(t)));
+  }
+  if (code) parts.push(`<pre class="md-user-code"><code>${escapeHtml(code.join('\n'))}</code></pre>`);
+  flushPara();
+  if (files.length) {
+    parts.push(
+      `<div class="md-user-files" role="list" aria-label="ไฟล์แนบ ${files.length} ไฟล์">${files
+        .map((p) => `<span class="md-user-file" role="listitem" title="${escapeHtml(p)}">${icon('file', 13)}<span>${escapeHtml(attachmentName(p))}</span></span>`)
+        .join('')}</div>`
+    );
+  }
+  const note = queued ? '<span class="md-queued-note">อยู่ในคิว จะส่งเมื่อ Claude ทำรอบนี้เสร็จ</span>' : '';
+  return `<div class="md-user-turn${queued ? ' is-queued' : ''}">${parts.join('')}${note}</div>`;
+}
+
 function renderMarkdown(raw) {
   if (!raw) return '';
   const lines = String(raw).replace(/\r\n/g, '\n').split('\n');
@@ -339,6 +410,12 @@ function renderMarkdown(raw) {
   const closeGroup = () => {
     if (group && group.length) top.push(`<div class="md-claude">${group.join('')}</div>`);
     group = null;
+  };
+  // A user turn runs until the next entry: all of its lines belong in the bubble.
+  let user = null;
+  const flushUser = () => {
+    if (user) top.push(userTurnHtml(user.lines, user.queued));
+    user = null;
   };
   let fence = false;
   let lang = '';
@@ -365,6 +442,13 @@ function renderMarkdown(raw) {
 
   for (const line of lines) {
     const t = line.trim();
+    if (user) {
+      if (!isTurnStart(t)) {
+        user.lines.push(line);
+        continue;
+      }
+      flushUser();
+    }
     if (t.startsWith('```')) {
       flushTable();
       if (!fence) {
@@ -390,9 +474,10 @@ function renderMarkdown(raw) {
     flushTable();
     if (!t) continue;
 
-    if (t.startsWith('🧑 คุณ:')) {
+    if (t.startsWith(USER_MARK) || t.startsWith(QUEUED_MARK)) {
       closeGroup();
-      top.push(`<div class="md-user-turn">${formatInline(escapeHtml(t.slice('🧑 คุณ:'.length).trim()))}</div>`);
+      const queued = t.startsWith(QUEUED_MARK);
+      user = { queued, lines: [t.slice((queued ? QUEUED_MARK : USER_MARK).length).trim()] };
       continue;
     }
     if (t.startsWith('🤖 Claude:')) {
@@ -405,13 +490,6 @@ function renderMarkdown(raw) {
     if (t.startsWith('⏹')) {
       closeGroup();
       top.push(`<div class="md-stop">${escapeHtml(t)}</div>`);
-      continue;
-    }
-    if (t.startsWith('⏳ รอส่ง:')) {
-      closeGroup();
-      top.push(
-        `<div class="md-user-turn is-queued">${formatInline(escapeHtml(t.slice('⏳ รอส่ง:'.length).trim()))}<span class="md-queued-note">อยู่ในคิว จะส่งเมื่อ Claude ทำรอบนี้เสร็จ</span></div>`
-      );
       continue;
     }
     const tool = t.match(/^🔧\s*\[Tool:\s*([^\]]+)\]\s*(.*)$/);
@@ -452,6 +530,7 @@ function renderMarkdown(raw) {
     }
     push(`<p class="md-p">${formatInline(escapeHtml(line))}</p>`);
   }
+  flushUser();
   flushTable();
   if (fence && code.length) {
     push(`<div class="md-code-block"><pre><code>${escapeHtml(code.join('\n'))}</code></pre></div>`);
@@ -496,6 +575,47 @@ function toast(message, tone = 'ok') {
     el.hidden = true;
   }, tone === 'err' ? 6000 : 3800);
 }
+
+/* ---------- Confirm ---------- */
+// The page's own confirm, in place of window.confirm: once Chrome's "prevent this page from
+// creating additional dialogs" is ticked, window.confirm returns false at once and the action
+// silently does nothing. Resolves true only for the confirm button; Esc, the backdrop and
+// ยกเลิก resolve false. Focus starts on the safe button.
+let confirmResolve = null;
+
+function confirmDialog({ title, body = '', confirmLabel = 'ยืนยัน', cancelLabel = 'ยกเลิก', danger = false }) {
+  const dlg = $('#confirm-dialog');
+  // A newer question replaces an unanswered one, which counts as cancelled.
+  if (confirmResolve) confirmResolve(false);
+  confirmResolve = null;
+  if (dlg.open) dlg.close('cancel');
+  $('#confirm-title').textContent = title;
+  const desc = $('#confirm-desc');
+  desc.textContent = body;
+  desc.hidden = !body;
+  const ok = $('#confirm-ok');
+  ok.textContent = confirmLabel;
+  ok.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`;
+  $('#confirm-cancel').textContent = cancelLabel;
+  dlg.returnValue = '';
+  return new Promise((resolve) => {
+    confirmResolve = resolve;
+    dlg.showModal();
+    $('#confirm-cancel').focus();
+  });
+}
+
+$('#confirm-dialog').addEventListener('close', (e) => {
+  const dlg = e.currentTarget;
+  if (dlg.open) return; // the close of a replaced question, arriving after the new one opened
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  if (resolve) resolve(dlg.returnValue === 'ok');
+});
+// A click on the backdrop lands on the <dialog> itself (its form fills the box): cancel.
+$('#confirm-dialog').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) e.currentTarget.close('cancel');
+});
 
 /** Server messages sometimes start with an emoji marker; the toast carries its own icon. */
 function cleanMsg(msg) {
@@ -834,7 +954,7 @@ function focusHeadHtml(s) {
   const t = s.tokenUsage || {};
   const ctx = contextPct(s);
   const fam = modelFamily(s.model);
-  const effort = String(s.effort || 'high');
+  const effort = knownEffort(s);
   const connected = s.pid || s.paneId || s.wrapperConnected;
   return `
     <div class="title-row">
@@ -849,7 +969,7 @@ function focusHeadHtml(s) {
     <div class="meta-row">
       <span class="chip mono" title="${escapeHtml(s.cwd || '')}">${icon('branch', 14)}<span class="clip">${escapeHtml(s.branch || '-')}</span></span>
       <button class="chip" ${act('openModel', s.id)} title="เปลี่ยน model และ effort (ส่ง /model และ /effort เข้า terminal)" ${s.lifecycle === 'history' ? 'disabled' : ''}>
-        ${icon('spark', 14)}<span>${escapeHtml(fam ? modelLabel(s.model) : 'Model')}</span><span style="color:var(--text-3)">${escapeHtml(effort)}</span>${icon('chevronDown', 14)}
+        ${icon('spark', 14)}<span>${escapeHtml(fam ? modelLabel(s.model) : 'Model')}</span>${effort ? `<span style="color:var(--text-3)">${escapeHtml(effort)}</span>` : ''}${icon('chevronDown', 14)}
       </button>
       <button class="chip num" ${act('openPanel', 'usage')} title="Tokens ใหม่ ${formatTokens(freshTokens(s))} · cache read ${formatTokens(t.cacheReadTokens)} · ค่าใช้จ่ายเทียบราคา API ${formatUsd(t.estimatedCostUsd)}">
         ${icon('tokens', 14)}<span>${formatTokens(freshTokens(s))}</span><span style="color:var(--text-3)">${formatUsd(t.estimatedCostUsd)}</span>
@@ -1107,11 +1227,20 @@ function markText(html, mark) {
 
 function renderViewer({ scroll = null } = {}) {
   let el = $('#viewer');
+  let scrim = $('#viewer-scrim');
   if (!viewer.open) {
     if (el) el.hidden = true;
+    if (scrim) scrim.hidden = true;
     return;
   }
   if (!el) {
+    // A scrim behind the sheet dims the dashboard around its inset and closes it on a click.
+    scrim = document.createElement('div');
+    scrim.id = 'viewer-scrim';
+    scrim.className = 'scrim';
+    scrim.setAttribute('data-act', 'closeViewer');
+    scrim.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(scrim);
     el = document.createElement('div');
     el.id = 'viewer';
     el.className = 'viewer';
@@ -1119,6 +1248,7 @@ function renderViewer({ scroll = null } = {}) {
     el.setAttribute('aria-modal', 'true');
     document.body.appendChild(el);
   }
+  scrim.hidden = false;
   el.hidden = false;
   const body = $('#viewer-body', el);
   const prevTop = body ? body.scrollTop : 0;
@@ -1193,14 +1323,51 @@ function outputText(s) {
   const st = olderFor(s);
   const older = st && st.lines.length ? `${st.lines.join('\n\n')}\n\n` : '';
   // Messages sent while Claude worked wait in its queue: show them where they will land.
-  const queued = (s.queuedMessages || []).map((q) => `⏳ รอส่ง: ${q.replace(/\s*\n\s*/g, ' ')}`).join('\n\n');
+  const queued = (s.queuedMessages || []).map((q) => `${QUEUED_MARK} ${String(q).trim()}`).join('\n\n');
   return older + (s.screenPreview || '') + (queued ? `\n\n${queued}` : '');
+}
+
+// Whether anything precedes the live preview. The server's preview holds the session's last
+// PREVIEW_LINES conversation lines (TAIL_MIN_LINES in transcript-parser), so a shorter preview is
+// usually the whole session; bookkeeping records still put its first entry past byte 0. A one-line
+// page settles it (the preview may also stop short at the server's byte limit), once per start.
+const PREVIEW_LINES = 30;
+const olderProbes = new Map(); // room id -> { from, transcript, none: true | false | null (asking) }
+
+function previewEntryCount(text) {
+  return String(text || '')
+    .split('\n\n')
+    .filter((chunk) => isTurnStart(chunk.trim())).length;
+}
+
+/** true / false, or null while the server is being asked. */
+function olderExists(s) {
+  if (previewEntryCount(s.screenPreview) >= PREVIEW_LINES) return true;
+  const known = olderProbes.get(s.id);
+  if (known && known.from === s.previewFrom && known.transcript === s.transcriptPath) {
+    return known.none === null ? null : !known.none;
+  }
+  const probe = { from: s.previewFrom, transcript: s.transcriptPath, none: null };
+  olderProbes.set(s.id, probe);
+  getJson(`/api/session/conversation?sessionId=${encodeURIComponent(s.id)}&before=${s.previewFrom}&limit=1`).then((r) => {
+    // A failed probe keeps the button: paging back still works or says what went wrong.
+    probe.none = Boolean(r && r.ok && r.done && !(r.lines || []).length);
+    const current = appState.sessions.find((x) => x.id === s.id);
+    if (current && mountedFocusId === s.id) syncOutput(current, true);
+  });
+  return null;
 }
 
 function olderControlHtml(s) {
   const st = olderMsgs.get(s.id);
-  if (!Number.isFinite(s.previewFrom) || s.previewFrom <= 0) return '';
-  if (st && st.done) return `<div class="output-start">เริ่มต้น session</div>`;
+  if (!Number.isFinite(s.previewFrom) || s.previewFrom < 0) return '';
+  const start = `<div class="output-start">เริ่มต้น session</div>`;
+  if (s.previewFrom === 0 || (st && st.done)) return start;
+  if (!st || !st.lines.length) {
+    const older = olderExists(s);
+    if (older === false) return start;
+    if (older === null) return '';
+  }
   return `<div class="output-older"><button class="btn btn-ghost btn-sm" ${act('loadOlder', s.id)} ${st && st.loading ? 'disabled' : ''}>${icon('arrowUp', 14)}${st && st.loading ? 'กำลังโหลด…' : 'โหลดข้อความก่อนหน้า'}</button></div>`;
 }
 
@@ -1904,11 +2071,18 @@ function renderOverview() {
 }
 
 /* ---------- Popovers ---------- */
-function openPopover(anchor, html, kind) {
+// What the open popover belongs to: it closes when its room or view is no longer on screen.
+let popoverOwner = null;
+
+function openPopover(anchor, html, kind, roomId = null) {
   const pop = $('#popover');
   pop.innerHTML = html;
   pop.hidden = false;
   popoverKind = kind;
+  popoverOwner = { anchor, roomId, view: ui.view };
+  // Measure at the left edge: where it last stood may have squeezed it against the screen's edge.
+  pop.style.left = '0px';
+  pop.style.top = '0px';
   const r = anchor.getBoundingClientRect();
   const w = pop.offsetWidth;
   const h = pop.offsetHeight;
@@ -1921,29 +2095,49 @@ function openPopover(anchor, html, kind) {
   if (first) first.focus({ preventScroll: true });
 }
 
-function closePopover() {
+/** Hides the popover and drops its markup, so no stale room actions stay in the page. */
+function closePopover({ restoreFocus = false } = {}) {
   const pop = $('#popover');
-  if (!pop.hidden) {
-    pop.hidden = true;
-    popoverKind = null;
+  const owner = popoverOwner;
+  const hadFocus = pop.contains(document.activeElement);
+  pop.hidden = true;
+  pop.innerHTML = '';
+  popoverKind = null;
+  popoverOwner = null;
+  // Back to the chip or button that opened it (re-rendered meanwhile: its successor), when focus was inside.
+  if (restoreFocus && hadFocus && owner && owner.anchor) {
+    const act = owner.anchor.getAttribute('data-act');
+    const anchor = owner.anchor.isConnected ? owner.anchor : act && document.querySelector(`[data-act="${act}"]`);
+    if (anchor) anchor.focus({ preventScroll: true });
   }
 }
 
+/** A popover outlives neither its room (another one selected) nor its view. */
+function closeStalePopover() {
+  if (!popoverKind || !popoverOwner) return;
+  if (popoverOwner.view !== ui.view || (popoverOwner.roomId && popoverOwner.roomId !== ui.selectedId)) closePopover();
+}
+
+// The current model and effort are marked (nothing while the room's model is still unknown).
+// Claude Code saves a /model or /effort choice as the default for new sessions, so the popover
+// says so before anything is sent.
 function modelPopoverHtml(s) {
   const fam = modelFamily(s.model);
-  const effort = String(s.effort || 'high');
+  const effort = knownEffort(s);
   return `
-    <div class="pop-label">Model</div>
-    ${MODELS.map(
-      (m) => `<button class="pop-item" ${act('setModel', s.id, m.value)}>${icon('spark', 15)}${escapeHtml(m.label)}
-        ${fam === m.family ? `<span class="check">${icon('check', 15)}</span>` : `<span class="desc">${escapeHtml(m.desc)}</span>`}</button>`
-    ).join('')}
+    <div class="pop-note" id="model-note">${icon('info', 15)}<span><b>ค่าที่เลือกจะเป็นค่าเริ่มต้นของ session ใหม่ด้วย</b>Claude Code จำ model และ effort ล่าสุดไว้ใช้กับทุก session ที่เปิดหลังจากนี้</span></div>
+    <div class="pop-label" id="model-label">Model</div>
+    <div role="group" aria-labelledby="model-label">${MODELS.map((m) => {
+      const on = fam === m.family;
+      return `<button class="pop-item pop-choice" aria-pressed="${on}" aria-describedby="model-note" ${act('setModel', s.id, m.value)}>${icon('spark', 15)}${escapeHtml(m.label)}
+        <span class="desc">${escapeHtml(m.desc)}</span><span class="check">${on ? icon('check', 15) : ''}</span></button>`;
+    }).join('')}</div>
     <div class="pop-sep"></div>
-    <div class="pop-label">Effort</div>
-    <div class="pop-seg" role="group" aria-label="Effort">${EFFORTS.map(
-      (e) => `<button aria-pressed="${effort === e}" ${act('setEffort', s.id, e)}>${e}</button>`
+    <div class="pop-label" id="effort-label">Effort</div>
+    <div class="pop-seg" role="group" aria-labelledby="effort-label">${EFFORTS.map(
+      (e) => `<button aria-pressed="${effort === e}" aria-describedby="model-note" ${act('setEffort', s.id, e)}>${e}</button>`
     ).join('')}</div>
-    <div class="help" style="padding:2px 8px 6px">ส่ง /model และ /effort เข้า terminal ของห้องนี้</div>`;
+    <div class="pop-foot">ส่ง /model และ /effort เข้า terminal ของห้องนี้</div>`;
 }
 
 function morePopoverHtml(s) {
@@ -1977,6 +2171,7 @@ function filtersPopoverHtml() {
 /* ---------- Render root ---------- */
 function renderAll() {
   ensureSelection();
+  closeStalePopover();
   $('#work').classList.toggle('is-grid', ui.view === 'grid');
   $('#work').classList.toggle('is-auto', ui.view === 'automation');
   $('#work').classList.toggle('is-search', ui.view === 'search');
@@ -2094,13 +2289,13 @@ const Actions = {
     const s = appState.sessions.find((x) => x.id === id);
     if (!s) return;
     if (popoverKind === 'model') return closePopover();
-    openPopover(el, modelPopoverHtml(s), 'model');
+    openPopover(el, modelPopoverHtml(s), 'model', s.id);
   },
   openMore(id, el) {
     const s = appState.sessions.find((x) => x.id === id);
     if (!s) return;
     if (popoverKind === 'more') return closePopover();
-    openPopover(el, morePopoverHtml(s), 'more');
+    openPopover(el, morePopoverHtml(s), 'more', s.id);
   },
   togglePinnedOnly() {
     ui.pinnedOnly = !ui.pinnedOnly;
@@ -2128,13 +2323,13 @@ const Actions = {
     const r = await postJson('/api/session/model-effort', { sessionId: id, model: value });
     const label = (MODELS.find((m) => m.value === value) || {}).label || value;
     if (!r.ok) return toast(`เปลี่ยน model ไม่สำเร็จ: ${r.data.error || r.status}`, 'err');
-    toast(r.data.delivered ? `ส่ง /model ${value} แล้ว (${label})` : `ยังส่งเข้า terminal ไม่ได้ คำสั่ง /model เข้าคิวไว้`, r.data.delivered ? 'ok' : 'warn');
+    toast(r.data.delivered ? `ส่ง /model ${value} แล้ว (${label}) session ใหม่จะใช้ค่านี้ด้วย` : `ยังส่งเข้า terminal ไม่ได้ คำสั่ง /model เข้าคิวไว้`, r.data.delivered ? 'ok' : 'warn');
   },
   async setEffort(id, value) {
     closePopover();
     const r = await postJson('/api/session/model-effort', { sessionId: id, effort: value });
     if (!r.ok) return toast(`ปรับ effort ไม่สำเร็จ: ${r.data.error || r.status}`, 'err');
-    toast(r.data.delivered ? `ส่ง /effort ${value} แล้ว` : `ยังส่งเข้า terminal ไม่ได้ คำสั่ง /effort เข้าคิวไว้`, r.data.delivered ? 'ok' : 'warn');
+    toast(r.data.delivered ? `ส่ง /effort ${value} แล้ว session ใหม่จะใช้ค่านี้ด้วย` : `ยังส่งเข้า terminal ไม่ได้ คำสั่ง /effort เข้าคิวไว้`, r.data.delivered ? 'ok' : 'warn');
   },
 
   async chooseOption(id, targetIndex, currentIndex, number, label) {
@@ -2431,16 +2626,31 @@ const Actions = {
     if (r.ok) toast('เก็บเข้าประวัติแล้ว');
   },
   async removeRoom(id) {
-    closePopover();
+    closePopover({ restoreFocus: true }); // the dialog then hands focus back to the ⋯ button
     const s = appState.sessions.find((x) => x.id === id);
-    if (!window.confirm(`ลบห้อง "${s ? s.room : id}" ออกจากประวัติถาวร?`)) return;
+    const ok = await confirmDialog({
+      title: `ลบห้อง “${s ? s.room : id}” ถาวร?`,
+      body: 'ห้องนี้จะหายจากประวัติและกู้คืนไม่ได้ บทสนทนาของ Claude Code ไม่ถูกลบ ยังค้นเจอได้ในหน้าค้นหา',
+      confirmLabel: 'ลบถาวร',
+      danger: true,
+    });
+    if (!ok) return;
     const r = await postJson('/api/session/update', { action: 'remove', sessionId: id });
     if (r.ok) toast('ลบแล้ว');
+    else toast(`ลบไม่สำเร็จ: ${r.data.error || r.status}`, 'err');
   },
   async clearHistory() {
-    if (!window.confirm('ล้างห้องในประวัติที่ไม่ได้ปักหมุดทั้งหมด?')) return;
+    const n = appState.sessions.filter((x) => x.lifecycle === 'history' && !x.pinned).length;
+    const ok = await confirmDialog({
+      title: 'ล้างประวัติ?',
+      body: `ห้องในประวัติที่ไม่ได้ปักหมุด ${n} ห้องจะถูกลบและกู้คืนไม่ได้ ห้องที่ปักหมุดไว้ยังอยู่`,
+      confirmLabel: 'ล้างประวัติ',
+      danger: true,
+    });
+    if (!ok) return;
     const r = await postJson('/api/session/update', { action: 'clear-history' });
     if (r.ok) toast('ล้างประวัติแล้ว');
+    else toast(`ล้างประวัติไม่สำเร็จ: ${r.data.error || r.status}`, 'err');
   },
   async resumeRoom(id) {
     closePopover();
@@ -2476,7 +2686,12 @@ const Actions = {
     toast(n ? `ส่งให้ ${n} ห้องทำงานต่อแล้ว` : 'ปลดพักแล้ว');
   },
   async simulateHold() {
-    if (!window.confirm('จำลองว่า usage เหลือ 6.5%? ทุกห้องจะถูกบันทึก checkpoint และพักคำสั่งใหม่จนกว่าจะกด "ทำต่อเลย"')) return;
+    const ok = await confirmDialog({
+      title: 'ทดสอบการพักงาน?',
+      body: 'จำลองว่า usage เหลือ 6.5% ทุกห้องจะถูกบันทึก checkpoint และพักคำสั่งใหม่จนกว่าจะกด “ทำต่อเลย”',
+      confirmLabel: 'เริ่มทดสอบ',
+    });
+    if (!ok) return;
     const r = await postJson('/api/usage/config', { action: 'simulate-low-quota' });
     toast(r.ok ? 'เริ่มพักงาน (จำลอง) แล้ว' : 'จำลองไม่สำเร็จ', r.ok ? 'warn' : 'err');
   },
@@ -2805,10 +3020,12 @@ function isTyping(target) {
 }
 
 document.addEventListener('keydown', (e) => {
+  // An open dialog takes the keys (Esc closes just the dialog); nothing behind it reacts.
+  if (document.querySelector('dialog[open]')) return;
   if (e.key === 'Escape') {
     if (drag.active) return endDrag(false);
     if (viewer.open) return Actions.closeViewer();
-    if (popoverKind) return closePopover();
+    if (popoverKind) return closePopover({ restoreFocus: true });
     if (ide.open) return Actions.closeIde();
     if (ui.expanded) return Actions.toggleExpand();
     if (ui.panel && !isTyping(e.target)) return Actions.togglePanel(ui.panel);
@@ -3353,6 +3570,16 @@ function searchDate(iso) {
   return new Date(iso).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+/** The same date in a few characters, for a phone: the time today, else day and month (and year when not this one). */
+function searchShortDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+  const opts = d.getFullYear() === now.getFullYear() ? { day: 'numeric', month: 'short' } : { day: 'numeric', month: 'short', year: '2-digit' };
+  return d.toLocaleDateString('th-TH', opts);
+}
+
 /** Snippet text with the match marked; `hl` is [start, length] in the text, from the server. */
 function searchSnippetHtml(s) {
   const t = String(s.text || '');
@@ -3384,7 +3611,7 @@ function searchCardHtml(r) {
     <article class="gs-card">
       <div class="gs-card-top">
         <span class="gs-card-title" title="${escapeHtml(r.title)}">${escapeHtml(r.title)}</span>
-        <span class="gs-card-time" title="เริ่ม ${escapeHtml(searchDate(r.startedAt))}">${escapeHtml(searchDate(r.modifiedAt))}</span>
+        <span class="gs-card-time" title="ล่าสุด ${escapeHtml(searchDate(r.modifiedAt))} · เริ่ม ${escapeHtml(searchDate(r.startedAt))}"><span class="gs-time-long">${escapeHtml(searchDate(r.modifiedAt))}</span><span class="gs-time-short">${escapeHtml(searchShortDate(r.modifiedAt))}</span></span>
       </div>
       <div class="gs-card-meta">
         <span class="gs-proj">${icon('folder', 14)}${escapeHtml(r.project)}</span>

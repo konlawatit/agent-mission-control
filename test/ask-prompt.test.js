@@ -285,4 +285,114 @@ const SCREEN_MULTI = [
   store.flush();
 }
 
+// 7. Prompts must not flash: an idle notification is not a question, and a permission prompt
+//    a hook reported is not cleared by a scan that simply hasn't seen it yet.
+{
+  const store = new StateStore({ dataDir: fs.mkdtempSync(path.join(isolatedHome, 'store-')) });
+  const cwd = fs.mkdtempSync(path.join(isolatedHome, 'room-'));
+  const transcript = path.join(isolatedHome, 'perm.jsonl');
+  const at = (ms) => new Date(Date.now() + ms).toISOString();
+  fs.writeFileSync(transcript, [
+    { type: 'user', timestamp: at(-5000), message: { role: 'user', content: 'run the tests' } },
+    { type: 'assistant', timestamp: at(-4000), message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tb', name: 'Bash', input: { command: 'npm test' } }] } },
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const room = store.getOrCreateSession('claude-pid-901', { cwd, pid: 901 });
+  room.transcriptPath = transcript;
+  room.status = 'done';
+
+  // "Claude is waiting for your input", with and without notification_type.
+  store.processHookEvent({ session_id: room.id, cwd, hook_event_name: 'Notification', message: 'Claude is waiting for your input' });
+  assert.strictEqual(room.status, 'done', 'an idle notification does not ask anything');
+  assert.strictEqual(room.interactivePrompt, null, 'no fake approval card');
+  store.processHookEvent({ session_id: room.id, cwd, hook_event_name: 'Notification', notification_type: 'idle_prompt', message: 'x' });
+  assert.notStrictEqual(room.status, 'needs_input');
+
+  // A real permission prompt: kept while the screen has not shown it.
+  store.processHookEvent({ session_id: room.id, cwd, hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'npm test' } });
+  assert.strictEqual(room.status, 'needs_input');
+  const blank = ['Claude Code', '', '✻ Thinking…'].join('\n');
+  store.ingestConsoleScan([{ pid: 901, cwd, screen: blank }]);
+  assert.strictEqual(room.status, 'needs_input', 'not cleared before the terminal draws the prompt');
+  assert.ok(room.interactivePrompt, 'the card stays');
+
+  const promptScreen = ['Bash command', '', '  npm test', '', 'Do you want to proceed?', '❯ 1. Yes', '  2. Yes, and don\'t ask again', '  3. No', '', 'Esc to cancel'].join('\n');
+  store.ingestConsoleScan([{ pid: 901, cwd, screen: promptScreen }]);
+  assert.strictEqual(room.interactivePrompt.question, 'Do you want to proceed?', 'the screen\'s prompt replaces the placeholder');
+  store.ingestConsoleScan([{ pid: 901, cwd, screen: blank }]);
+  assert.notStrictEqual(room.status, 'needs_input', 'answered: seen on screen, then gone');
+
+  // A layout the parser never recognises: cleared once the transcript moves past the prompt.
+  store.processHookEvent({ session_id: room.id, cwd, hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'npm test' } });
+  store.ingestConsoleScan([{ pid: 901, cwd, screen: blank }]);
+  assert.strictEqual(room.status, 'needs_input');
+  fs.appendFileSync(transcript, JSON.stringify({ type: 'user', timestamp: at(3000), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tb', content: 'ok' }] } }) + '\n');
+  store.ingestConsoleScan([{ pid: 901, cwd, screen: blank }]);
+  assert.notStrictEqual(room.status, 'needs_input', 'the tool ran: the prompt is over');
+  store.flush();
+}
+
+// 8. Stops and the input box: what Esc stopped, what waits in Claude's queue, what was put back
+//    into the input box, and what is left unsent there (read from the screen).
+{
+  const { parseTranscriptTailUncached: parseTail } = require('../src/transcript-parser');
+  const file = path.join(isolatedHome, 'queue.jsonl');
+  const ts = (s) => new Date(Date.UTC(2026, 10, 26, 7, 0, s)).toISOString();
+  const lines = [
+    { type: 'user', timestamp: ts(0), message: { role: 'user', content: 'run the tests' } },
+    { type: 'assistant', timestamp: ts(1), message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'npm test' } }] } },
+    { type: 'queue-operation', operation: 'enqueue', timestamp: ts(2), content: 'แล้วสรุปผลให้ด้วย' },
+    { type: 'queue-operation', operation: 'enqueue', timestamp: ts(3), content: '<task-notification>done</task-notification>' },
+    { type: 'user', timestamp: ts(4), message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] } },
+  ];
+  fs.writeFileSync(file, lines.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  let p = parseTail(file, null);
+  assert.ok(p.utf8Preview.includes('⏹ หยุดแล้ว'), 'a stop is shown as a stop');
+  assert.ok(!p.utf8Preview.includes('Request interrupted'), 'not as a message the person typed');
+  assert.strictEqual(p.lastUserText, 'run the tests', 'a stop is not the latest prompt');
+  assert.deepStrictEqual(p.queuedMessages, ['แล้วสรุปผลให้ด้วย'], 'queued messages, without Claude Code\'s own notifications');
+
+  fs.appendFileSync(file, JSON.stringify({ type: 'queue-operation', operation: 'popAll', timestamp: ts(5) }) + '\n');
+  p = parseTail(file, null);
+  assert.deepStrictEqual(p.queuedMessages, [], 'nothing waits once the queue was taken back');
+  assert.strictEqual(p.restoredInput.text, 'แล้วสรุปผลให้ด้วย', 'the text put back into the input box');
+
+  fs.appendFileSync(file, JSON.stringify({ type: 'user', timestamp: ts(6), message: { role: 'user', content: 'แล้วสรุปผลให้ด้วย' } }) + '\n');
+  assert.strictEqual(parseTail(file, null).restoredInput, null, 'sent again: no longer left in the box');
+
+  // The input box on screen: typed text, an empty box, and the empty box's suggestion.
+  const box = (inner) => ['Claude Code', '─'.repeat(60), ...inner, '─'.repeat(60), '  Opus 5.5 · 5h 16%'].join('\n');
+  assert.strictEqual(parseConsoleScreen(box(['❯ ขอ link'])).inputText, 'ขอ link');
+  assert.strictEqual(parseConsoleScreen(box(['❯ first line', '  second line'])).inputText, 'first line\nsecond line');
+  assert.strictEqual(parseConsoleScreen(box(['❯'])).inputText, '');
+  assert.strictEqual(parseConsoleScreen(box(['❯ Try "refactor <filepath>"'])).inputText, '', 'a suggestion is not typed text');
+  assert.strictEqual(parseConsoleScreen(['Claude Code', 'no box here'].join('\n')).inputText, null);
+  assert.strictEqual(parseConsoleScreen(box(['❯ x']).replace('Opus', '· esc to interrupt · Opus')).busy, true);
+
+  // The store keeps it with the exact text when it is something the dashboard typed.
+  const store = new StateStore({ dataDir: fs.mkdtempSync(path.join(isolatedHome, 'store-')) });
+  const cwd = fs.mkdtempSync(path.join(isolatedHome, 'room-'));
+  const room = store.getOrCreateSession('claude-pid-777', { cwd, pid: 777 });
+  room.lastTypedText = 'ทำไมเจอว่ามีจังหวะที่กดส่งข้อความไม่ไป';
+  store.ingestConsoleScan([{ pid: 777, cwd, screen: box(['❯ �ไมเจอ�า��งหวะ�กด�ง�อความไ�ไป']) }]);
+  assert.strictEqual(room.terminalInput.exact, 'ทำไมเจอว่ามีจังหวะที่กดส่งข้อความไม่ไป', 'garbled screen text recognised');
+  store.ingestConsoleScan([{ pid: 777, cwd, screen: box(['❯']) }]);
+  assert.strictEqual(room.terminalInput, null, 'an empty box clears it');
+
+  // A suggested next prompt (dim text in an empty box) has the caret before it, at the start of
+  // the box; typed text has it after. Seen in a real session: "ปิด PR #4321 และลบ branch v5.31 ด้วย".
+  const suggestion = box(['❯ �ด PR #4321 และลบ branch v5.31 �วย']);
+  assert.strictEqual(parseConsoleScreen(suggestion, { cursorRow: 2, cursorCol: 2 }).inputText, '', 'a suggestion is not unsent text');
+  assert.strictEqual(parseConsoleScreen(box(['❯ ขอ link']), { cursorRow: 2, cursorCol: 9 }).inputText, 'ขอ link', 'typed text, caret after it');
+  store.ingestConsoleScan([{ pid: 777, cwd, screen: suggestion, cursorRow: 2, cursorCol: 2 }]);
+  assert.strictEqual(room.terminalInput, null, 'no notice for a suggestion');
+
+  // A permission prompt whose command has Thai: the screen garbles it, the hook has it exactly.
+  store.processHookEvent({ session_id: room.id, cwd, hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'git commit -m "แก้ไขหน้าใบแจ้งหนี้"' } });
+  const permScreen = ['Bash command', '', '  git commit -m "แ�ไขห�าใบแ�ง�"', '', 'Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel'].join('\n');
+  store.ingestConsoleScan([{ pid: 777, cwd, screen: permScreen }]);
+  assert.strictEqual(room.interactivePrompt.context[0], 'git commit -m "แก้ไขหน้าใบแจ้งหนี้"', 'the exact command, not the garbled one');
+  assert.ok(!JSON.stringify(room.interactivePrompt).includes('�'), 'nothing garbled left in the prompt');
+  store.flush();
+}
+
 console.log('✅ Multi-question prompt checks passed!');

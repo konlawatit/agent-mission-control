@@ -389,6 +389,15 @@ function createMissionControlServer(options = {}) {
         }
       }
 
+      // 4c. Empty the terminal's input box (text left unsent there)
+      if (req.method === 'POST' && pathname === '/api/session/clear-input') {
+        const body = await readJsonBody(req);
+        if (!body.sessionId || !store.sessions.has(body.sessionId)) {
+          return sendJson(res, 404, { ok: false, error: 'Session not found' });
+        }
+        return sendJson(res, 200, await bridge.clearTerminalInput(body.sessionId));
+      }
+
       // 4b. Apply a multi-select answer in one go (ticks collected on the dashboard)
       if (req.method === 'POST' && pathname === '/api/session/multi-select') {
         const body = await readJsonBody(req);
@@ -468,6 +477,7 @@ function createMissionControlServer(options = {}) {
             mode: body.mode || 'auto',
             isApproval: Boolean(body.isApproval),
             runHeadless: Boolean(body.runHeadless),
+            clearFirst: Boolean(body.clearFirst),
           }
         );
         return sendJson(res, 200, result);

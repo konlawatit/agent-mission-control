@@ -402,6 +402,18 @@ function renderMarkdown(raw) {
       if (rest) push(`<p class="md-p">${formatInline(escapeHtml(rest))}</p>`);
       continue;
     }
+    if (t.startsWith('⏹')) {
+      closeGroup();
+      top.push(`<div class="md-stop">${escapeHtml(t)}</div>`);
+      continue;
+    }
+    if (t.startsWith('⏳ รอส่ง:')) {
+      closeGroup();
+      top.push(
+        `<div class="md-user-turn is-queued">${formatInline(escapeHtml(t.slice('⏳ รอส่ง:'.length).trim()))}<span class="md-queued-note">อยู่ในคิว จะส่งเมื่อ Claude ทำรอบนี้เสร็จ</span></div>`
+      );
+      continue;
+    }
     const tool = t.match(/^🔧\s*\[Tool:\s*([^\]]+)\]\s*(.*)$/);
     if (tool) {
       push(
@@ -760,6 +772,7 @@ function rcardHtml(s, current = false, group = '') {
 function renderFocus() {
   const el = $('#focus');
   el.classList.toggle('is-expanded', ui.expanded);
+  document.body.classList.toggle('is-focus-expanded', ui.expanded);
   const s = selected();
   if (!s) {
     saveDraft();
@@ -807,7 +820,7 @@ function renderFocus() {
       ? `<div class="tldr"><span class="tldr-label">TL;DR</span><span class="tldr-text" title="${escapeHtml(plainText(s.tldr || s.goal))}">${formatInline(escapeHtml(s.tldr || s.goal))}</span></div>`
       : ''
   );
-  setHTML($('#f-out-head'), outputHeadHtml());
+  setHTML($('#f-out-head'), outputHeadHtml(s));
   syncOutput(s);
   updateComposerState(s);
 }
@@ -1026,14 +1039,20 @@ function askHtml(s) {
   return '';
 }
 
-function outputHeadHtml() {
+function outputHeadHtml(s) {
+  // In focus mode the header is all that is left of the room's chrome: name and status.
+  const st = s && roomState(s);
+  const title =
+    ui.expanded && s
+      ? `${escapeHtml(s.room)}<span class="pill ${st.key === 'idle' || st.key === 'closed' ? '' : `s-${st.key}`}">${escapeHtml(PILL_LABEL[st.key] || st.label)}</span>`
+      : 'Live output';
   return `
-    <span class="output-title">${icon('terminal', 14)}Live output</span>
+    <span class="output-title">${icon('terminal', 14)}${title}</span>
     <button class="icon-btn icon-btn-sm ${ui.mdMode ? '' : 'is-on'}" ${act('toggleMd')} aria-pressed="${!ui.mdMode}" aria-label="แสดงข้อความดิบ" title="${ui.mdMode ? 'แสดงข้อความดิบ (raw)' : 'แสดงแบบจัดรูปแบบ (Markdown)'}">${icon(ui.mdMode ? 'code' : 'text', 15)}</button>
     <button class="btn btn-ghost btn-sm" ${act('fontSize', -1)} aria-label="ตัวอักษรเล็กลง" title="ตัวอักษรเล็กลง">A−</button>
     <button class="btn btn-ghost btn-sm" ${act('fontSize', 1)} aria-label="ตัวอักษรใหญ่ขึ้น" title="ตัวอักษรใหญ่ขึ้น">A+</button>
     <button class="icon-btn icon-btn-sm" ${act('copyOutput')} aria-label="คัดลอก" title="คัดลอกข้อความ">${icon('copy', 15)}</button>
-    <button class="icon-btn icon-btn-sm" ${act('toggleExpand')} aria-pressed="${ui.expanded}" aria-label="ขยาย output" title="${ui.expanded ? 'ย่อกลับ (Esc)' : 'ขยาย output'}">${icon(ui.expanded ? 'collapse' : 'expand', 15)}</button>`;
+    <button class="icon-btn icon-btn-sm" ${act('toggleExpand')} aria-pressed="${ui.expanded}" aria-label="${ui.expanded ? 'ออกจากโหมดเต็มจอ' : 'เต็มจอ'}" title="${ui.expanded ? 'ออกจากโหมดเต็มจอ (Esc)' : 'เต็มจอ อ่านและสั่งงานห้องนี้อย่างเดียว (F)'}">${icon(ui.expanded ? 'collapse' : 'expand', 15)}</button>`;
 }
 
 function onOutputScroll(e) {
@@ -1089,7 +1108,9 @@ async function getJson(url) {
 function outputText(s) {
   const st = olderFor(s);
   const older = st && st.lines.length ? `${st.lines.join('\n\n')}\n\n` : '';
-  return older + (s.screenPreview || '');
+  // Messages sent while Claude worked wait in its queue: show them where they will land.
+  const queued = (s.queuedMessages || []).map((q) => `⏳ รอส่ง: ${q.replace(/\s*\n\s*/g, ' ')}`).join('\n\n');
+  return older + (s.screenPreview || '') + (queued ? `\n\n${queued}` : '');
 }
 
 function olderControlHtml(s) {
@@ -1126,6 +1147,7 @@ function syncOutput(s, force = false) {
 function renderComposer(s) {
   const el = $('#f-composer');
   el.innerHTML = `
+    <div id="term-input"></div>
     <div class="attach-tray" id="attach-tray" aria-label="ไฟล์แนบ"></div>
     <div class="composer-box">
       <button class="attach-btn" id="attach-btn" ${act('pickFiles')} aria-label="แนบไฟล์หรือรูป" title="แนบไฟล์หรือรูป (วางภาพด้วย Ctrl+V หรือลากไฟล์มาวางได้)">${icon('paperclip', 19)}</button>
@@ -1315,6 +1337,17 @@ function updateComposerState(s) {
   }
   const attachBtn = $('#attach-btn');
   if (attachBtn) attachBtn.disabled = closed;
+  // A pending "replace or append?" question goes away once the box is empty again.
+  if (ui.pendingSend && ui.pendingSend.id === s.id && !(s.terminalInput && s.terminalInput.text)) {
+    const pending = ui.pendingSend;
+    ui.pendingSend = null;
+    sendCommand(s.id, pending.text, false).then((sent) => sent && pending.onSent && pending.onSent());
+  }
+  setHTML($('#term-input'), termInputHtml(s));
+  // The notice takes height from the output: keep a reader who was at the bottom there.
+  const out = $('#f-out');
+  const keep = scrollState.get(s.id);
+  if (out && (!keep || keep.stick)) out.scrollTop = out.scrollHeight;
   if (send) {
     send.disabled = held || closed;
     send.title = held ? 'พักรอ usage reset อยู่' : closed ? 'ห้องนี้ปิดแล้ว' : 'ส่ง (Enter)';
@@ -1334,6 +1367,48 @@ function updateComposerState(s) {
     }
     <button class="chip toggle-chip" style="margin-left:auto" ${act('toggleHeadless')} aria-pressed="${ui.headless}" title="ส่งผ่าน claude --resume ในพื้นหลัง ใช้ได้แม้ปิด terminal แล้ว">${icon('cloud', 14)}พื้นหลัง</button>`
   );
+}
+
+/**
+ * Text left unsent in the terminal's own input box (typed there, or a dashboard message that
+ * never went through). Anything typed next would be appended to it, so it is shown, and a send
+ * while it is there asks first.
+ */
+function termInputHtml(s) {
+  const ti = s.terminalInput;
+  if (!ti || !ti.text || s.lifecycle === 'history') return '';
+  const confirming = ui.pendingSend && ui.pendingSend.id === s.id;
+  const actions = confirming
+    ? `<span class="term-input-q">ข้อความใหม่จะไปต่อท้ายข้อความนี้ ต้องการแบบไหน</span>
+       <button class="btn btn-attn btn-sm" ${act('confirmSend', 'replace')}>ลบของเดิมแล้วส่งข้อความใหม่</button>
+       <button class="btn btn-sm" ${act('confirmSend', 'merge')}>ส่งรวมกัน</button>
+       <button class="btn btn-ghost btn-sm" ${act('confirmSend', 'cancel')}>ยกเลิก</button>`
+    : `<button class="btn btn-sm" ${act('sendKey', s.id, 'enter')}>${icon('send', 14)}ส่งข้อความนี้</button>
+       ${ti.exact ? `<button class="btn btn-sm" ${act('editTerminalInput', s.id)}>${icon('edit', 14)}ย้ายมาแก้ในนี้</button>` : ''}
+       <button class="btn btn-ghost btn-sm" ${act('clearTerminalInput', s.id)}>${icon('trash', 14)}ลบทิ้ง</button>`;
+  // The console cannot hand over Thai letters with marks above or below them (they read as
+  // U+FFFD), so text the dashboard does not know exactly is only shown when it reads cleanly.
+  const readable = ti.exact || (ti.text.includes('�') ? null : ti.text);
+  return `
+    <div class="notice is-attn term-input ${confirming ? 'is-confirm' : ''}" role="status">${icon('terminal', 18)}
+      <div class="notice-text">
+        <span>${readable ? 'ข้อความค้างอยู่ในช่องพิมพ์ของ terminal (ยังไม่ได้ส่ง)' : 'มีข้อความที่พิมพ์ค้างไว้ในหน้าต่าง terminal (ยังไม่ได้ส่ง)'}</span>
+        ${readable ? `<span class="term-input-text">${escapeHtml(readable)}</span>` : '<span class="notice-sub">ดูข้อความได้ที่หน้าต่าง terminal ของห้องนี้</span>'}
+        <div class="term-input-actions">${actions}</div>
+      </div>
+    </div>`;
+}
+
+/** Sends from the dashboard, but never silently appends to text left in the terminal's box. */
+async function guardedSend(s, text, onSent) {
+  if (s.terminalInput && s.terminalInput.text && s.lifecycle !== 'history' && !ui.headless) {
+    ui.pendingSend = { id: s.id, text, onSent };
+    updateComposerState(s);
+    return false;
+  }
+  const sent = await sendCommand(s.id, text, false);
+  if (sent && onSent) onSent();
+  return sent;
 }
 
 function saveDraft() {
@@ -1829,12 +1904,13 @@ function renderAll() {
 }
 
 /* ---------- Actions ---------- */
-async function sendCommand(sessionId, command, isApproval = false) {
+async function sendCommand(sessionId, command, isApproval = false, { clearFirst = false } = {}) {
   const r = await postJson('/api/session/command', {
     sessionId,
     command,
     isApproval,
     runHeadless: ui.headless,
+    clearFirst,
   });
   if (r.status === 423) {
     toast('พักงานรอ usage reset อยู่ คำสั่งยังไม่ถูกส่ง กด "ทำต่อเลย" ถ้าต้องการส่งตอนนี้', 'warn');
@@ -2032,7 +2108,39 @@ const Actions = {
   },
   quick(text) {
     const s = selected();
-    if (s) return sendCommand(s.id, text, false);
+    if (s) return guardedSend(s, text);
+  },
+  /** The answer to "the terminal's box already has text": replace it, append to it, or cancel. */
+  async confirmSend(mode) {
+    const pending = ui.pendingSend;
+    ui.pendingSend = null;
+    const s = pending && appState.sessions.find((x) => x.id === pending.id);
+    if (!s || mode === 'cancel') {
+      if (s) updateComposerState(s);
+      return;
+    }
+    updateComposerState(s);
+    const sent = await sendCommand(s.id, pending.text, false, { clearFirst: mode === 'replace' });
+    if (sent && pending.onSent) pending.onSent();
+  },
+  async clearTerminalInput(id) {
+    const r = await postJson('/api/session/clear-input', { sessionId: id });
+    toast(cleanMsg(r.data.message || r.data.error) || (r.ok ? 'ล้างแล้ว' : 'ล้างไม่สำเร็จ'), r.ok ? 'ok' : 'warn');
+  },
+  /** Bring the unsent text into the dashboard composer to edit, and empty the terminal's box. */
+  async editTerminalInput(id) {
+    const s = appState.sessions.find((x) => x.id === id);
+    const exact = s && s.terminalInput && s.terminalInput.exact;
+    if (!exact) return;
+    const r = await postJson('/api/session/clear-input', { sessionId: id });
+    if (!r.ok) return toast(cleanMsg(r.data.message || r.data.error) || 'ล้างช่องพิมพ์ใน terminal ไม่สำเร็จ', 'warn');
+    const ta = $('#cmd-input');
+    if (ta && mountedFocusId === id) {
+      ta.value = ta.value.trim() ? `${exact}\n${ta.value}` : exact;
+      drafts.set(id, ta.value);
+      autosize(ta);
+      ta.focus();
+    }
   },
   async submitCommand() {
     const s = selected();
@@ -2049,13 +2157,15 @@ const Actions = {
       return toast(`มี ${failed.length} ไฟล์ที่อัปโหลดไม่สำเร็จ เอาออกแล้วลองแนบใหม่`, 'err');
     }
     const text = ta.value.trim();
-    const sent = await sendCommand(s.id, messageWithAttachments(text, list.filter((a) => a.status === 'ready')), false);
-    if (sent) {
-      ta.value = '';
+    await guardedSend(s, messageWithAttachments(text, list.filter((a) => a.status === 'ready')), () => {
+      const box = $('#cmd-input');
+      if (box && mountedFocusId === s.id) {
+        box.value = '';
+        autosize(box);
+      }
       drafts.delete(s.id);
-      autosize(ta);
       clearAttachments(s.id);
-    }
+    });
   },
   pickFiles() {
     const input = $('#attach-input');
@@ -2127,9 +2237,19 @@ const Actions = {
       toast('คัดลอกไม่สำเร็จ', 'err');
     }
   },
+  /** Focus mode: the room fills the screen, and the browser goes full screen when it allows. */
   toggleExpand() {
     ui.expanded = !ui.expanded;
+    const root = document.documentElement;
+    if (ui.expanded && !document.fullscreenElement && root.requestFullscreen) {
+      root.requestFullscreen({ navigationUI: 'hide' }).catch(() => {}); // still fills the window if refused
+    } else if (!ui.expanded && document.fullscreenElement && document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
+    }
     renderFocus();
+    const s = selected();
+    const ta = $('#cmd-input');
+    if (ui.expanded && s && ta && !ta.disabled) ta.focus({ preventScroll: true });
   },
 
   async openInVsCode(id, file, line) {
@@ -2281,6 +2401,14 @@ document.addEventListener('click', (e) => {
   runAction(el, 'data-act');
 });
 
+// Leaving browser full screen (Esc, F11) also leaves focus mode, so the two never disagree.
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && ui.expanded) {
+    ui.expanded = false;
+    renderFocus();
+  }
+});
+
 // A file dropped outside the composer would make the browser open it and leave the dashboard.
 for (const type of ['dragover', 'drop']) {
   window.addEventListener(type, (e) => {
@@ -2315,6 +2443,11 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (isTyping(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+  if ((e.key === 'f' || e.key === 'F') && ui.view === 'focus' && selected() && !ide.open) {
+    e.preventDefault();
+    Actions.toggleExpand();
+    return;
+  }
   if (e.key === '/') {
     e.preventDefault();
     $('#search-input').focus();

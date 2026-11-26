@@ -100,6 +100,20 @@ function isReviewStep(screenPrompt) {
   );
 }
 
+/**
+ * Whether garbled on-screen text is a copy of `candidate`: its readable characters appear in
+ * order in the candidate, and the lengths fit (each U+FFFD stands for one or more characters, so
+ * more text than that, e.g. something appended, is not a copy).
+ */
+function sameText(screenText, candidate) {
+  const s = comparable(screenText);
+  const c = comparable(candidate);
+  if (!s.length || !c.length) return false;
+  const shown = Array.from(String(screenText).replace(/\s+/g, '')).length; // with the � cells
+  if (c.length < shown * 0.9 || c.length > shown * 2.5) return false;
+  return lcsLength(s, c) / s.length >= 0.85;
+}
+
 /** The on-screen prompt with Claude's exact questions and option text laid over it. */
 function mergeScreenPrompt(screenPrompt, ask) {
   if (!screenPrompt || !ask || !Array.isArray(ask.questions) || !ask.questions.length) {
@@ -144,4 +158,5 @@ module.exports = {
   promptFromQuestions,
   matchQuestionIndex,
   mergeScreenPrompt,
+  sameText,
 };

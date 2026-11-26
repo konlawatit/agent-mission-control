@@ -143,6 +143,10 @@ public class WinConsoleBridge {
         out uint lpNumberOfEventsWritten
     );
 
+    // Input events written to the console that the program has not read yet.
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetNumberOfConsoleInputEvents(IntPtr hConsoleInput, out uint lpcNumberOfEvents);
+
     [DllImport("user32.dll")]
     public static extern uint MapVirtualKey(uint uCode, uint uMapType);
 
@@ -220,7 +224,15 @@ public class WinConsoleBridge {
         }
     }
 
+    // Where the console cursor was in the last ReadConsoleText: its line in the returned text and
+    // its column. Claude Code keeps the caret there, so text AFTER a caret at the start of its
+    // input box is a dim suggestion, not something typed.
+    public static int LastCursorRow = -1;
+    public static int LastCursorCol = -1;
+
     public static string ReadConsoleText(uint pid, int maxLines) {
+        LastCursorRow = -1;
+        LastCursorCol = -1;
         FreeConsole();
         if (!AttachConsole(pid)) {
             AttachConsole(ATTACH_PARENT_PROCESS);
@@ -243,6 +255,8 @@ public class WinConsoleBridge {
             if (width <= 0) width = 120;
             short bottomRow = Math.Max(csbi.dwCursorPosition.Y, csbi.srWindow.Bottom);
             short topRow = (short)Math.Max(0, bottomRow - maxLines);
+            LastCursorRow = csbi.dwCursorPosition.Y - topRow;
+            LastCursorCol = csbi.dwCursorPosition.X;
 
             StringBuilder sb = new StringBuilder();
             char[] rowBuf = new char[width];
@@ -300,6 +314,34 @@ public class WinConsoleBridge {
         }
     }
 
+    // A key pressed with Ctrl held (e.g. Ctrl+U = 0x55 with control character 0x15).
+    public static bool SendCtrlKey(uint pid, ushort vk, char ch) {
+        FreeConsole();
+        if (!AttachConsole(pid)) {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            return false;
+        }
+        IntPtr hIn = CreateFile("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+        if (hIn == IntPtr.Zero || hIn == new IntPtr(-1)) {
+            FreeConsole();
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            return false;
+        }
+        try {
+            INPUT_RECORD[] recs = new INPUT_RECORD[2];
+            recs[0] = MakeKeyRecord(true, vk, ch);
+            recs[1] = MakeKeyRecord(false, vk, ch);
+            recs[0].KeyEvent.dwControlKeyState = 0x0008; // LEFT_CTRL_PRESSED
+            recs[1].KeyEvent.dwControlKeyState = 0x0008;
+            uint written = 0;
+            return WriteConsoleInputW(hIn, recs, 2, out written);
+        } finally {
+            CloseHandle(hIn);
+            FreeConsole();
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+
     public static bool SendTextAndEnter(uint pid, string text, bool pressEnter) {
         FreeConsole();
         if (!AttachConsole(pid)) {
@@ -322,10 +364,18 @@ public class WinConsoleBridge {
             uint written = 0;
             bool ok = recs.Length == 0 || WriteConsoleInputW(hIn, recs, (uint)recs.Length, out written);
             if (ok && pressEnter) {
-                // Written together with the text, Enter arrives in the same input chunk, which
-                // Claude Code reads as a paste: it becomes a newline in the prompt instead of
-                // sending it. As its own key a moment later, it submits.
-                System.Threading.Thread.Sleep(Math.Min(1200, 300 + text.Length / 4));
+                // Read together with the text, Enter is part of a paste for Claude Code and
+                // becomes a newline in the prompt instead of sending it. A fixed delay is not
+                // enough: while Claude is busy it reads input late, the text and the Enter pile
+                // up and arrive as one chunk. So wait until the text has actually been read
+                // (bounded, to stay inside the bridge's request timeout), then a short pause so
+                // the Enter is a read of its own.
+                var waited = System.Diagnostics.Stopwatch.StartNew();
+                uint unread = 0;
+                while (waited.ElapsedMilliseconds < 5000 && GetNumberOfConsoleInputEvents(hIn, out unread) && unread > 0) {
+                    System.Threading.Thread.Sleep(20);
+                }
+                System.Threading.Thread.Sleep(Math.Min(900, 250 + text.Length / 8));
                 INPUT_RECORD[] enter = new INPUT_RECORD[2];
                 enter[0] = MakeKeyRecord(true, 0x0D, '\r');
                 enter[1] = MakeKeyRecord(false, 0x0D, '\r');
@@ -379,6 +429,8 @@ function Invoke-BridgeAction {
                     title = $p.MainWindowTitle
                     startTime = if ($p.StartTime) { $p.StartTime.ToString("o") } else { "" }
                     screen = $screen
+                    cursorRow = [WinConsoleBridge]::LastCursorRow
+                    cursorCol = [WinConsoleBridge]::LastCursorCol
                 }
             }
         }
@@ -405,6 +457,8 @@ function Invoke-BridgeAction {
             "down"   { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x28, [char]0) }
             "left"   { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x25, [char]0) }
             "right"  { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x27, [char]0) }
+            # Claude Code: delete from the cursor to the start of the line (repeat for more lines).
+            "ctrl-u" { $ok = [WinConsoleBridge]::SendCtrlKey([uint32]$TargetPid, 0x55, [char]0x15) }
             "tab"    { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x09, "`t") }
             "space"  { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x20, " ") }
             default  {

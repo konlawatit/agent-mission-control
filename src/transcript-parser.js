@@ -647,7 +647,7 @@ function countShown(entry) {
     for (const t of texts) {
       if (isHumanPromptText(entry, t)) {
         lines += 1;
-        prompts += 1;
+        if (!INTERRUPTED_RE.test(String(t).trim())) prompts += 1; // a stop is not a prompt
       }
     }
   } else if (role === 'assistant' && Array.isArray(content)) {
@@ -670,8 +670,8 @@ function parseConversationLine(line) {
   }
   // Claude Code also stores request copies (`api-request-blob`, which carry a `message`),
   // tool shapes and attachments in the same file. Only real messages are conversation,
-  // plus the marker written when a turn ends.
-  if (isTurnEndMarker(entry)) return entry;
+  // plus the marker written when a turn ends and the queue of messages sent while it worked.
+  if (isTurnEndMarker(entry) || entry.type === 'queue-operation') return entry;
   if (typeof entry.type === 'string' && entry.type !== 'user' && entry.type !== 'assistant') {
     return null;
   }
@@ -683,6 +683,39 @@ function isTurnEndMarker(entry) {
 }
 
 const INTERRUPTED_RE = /^\[Request interrupted by user/;
+const STOPPED_LINE = '⏹ หยุดแล้ว (กด Esc)';
+const MAX_QUEUE_ITEMS = 10;
+
+/**
+ * Messages sent while Claude was working wait in its queue (`queue-operation` entries). If the
+ * turn is stopped with Esc, Claude Code puts the waiting ones back into the terminal's input box
+ * (`popAll`). Tracks both, so the dashboard can show what is waiting and what came back.
+ */
+function trackQueue(state, entry) {
+  if (entry.type === 'queue-operation') {
+    const text = String(entry.content == null ? '' : entry.content);
+    if (entry.operation === 'enqueue') {
+      state.queue.push({ text, at: entry.timestamp || null });
+      state.restored = null; // a new message was submitted from the input box
+    } else if (entry.operation === 'dequeue') {
+      state.queue.shift();
+    } else if (entry.operation === 'remove') {
+      const i = state.queue.findIndex((q) => q.text === text);
+      if (i >= 0) state.queue.splice(i, 1); // queued before the part read: nothing to drop
+    } else if (entry.operation === 'popAll') {
+      const back = state.queue.filter((q) => !/^\s*</.test(q.text)).map((q) => q.text.trim());
+      state.restored = back.length ? { text: back.join('\n'), at: entry.timestamp || null } : null;
+      state.queue = [];
+    }
+    return;
+  }
+  // A prompt the person submitted after the restore means the input box was used.
+  const msg = entry.message || entry;
+  if (state.restored && (msg.role || entry.type) === 'user' && !entry.isMeta && countShown(entry).prompts > 0) {
+    const text = typeof msg.content === 'string' ? msg.content : '';
+    if (!INTERRUPTED_RE.test(text.trim())) state.restored = null;
+  }
+}
 
 /**
  * The AskUserQuestion call still waiting for an answer after `entry`, given the one before.
@@ -817,7 +850,10 @@ function displayLinesFor(entry) {
         : Array.isArray(content)
         ? content.filter((b) => b.type === 'text' && b.text).map((b) => b.text)
         : [];
-    for (const t of texts) if (isHumanPromptText(entry, t)) out.push(`🧑 คุณ: ${t.trim()}`);
+    for (const t of texts) {
+      if (!isHumanPromptText(entry, t)) continue;
+      out.push(INTERRUPTED_RE.test(t.trim()) ? STOPPED_LINE : `🧑 คุณ: ${t.trim()}`);
+    }
   } else if (role === 'assistant' && Array.isArray(content)) {
     for (const b of content) {
       if (b.type === 'text' && b.text && b.text.trim()) out.push(`🤖 Claude:\n${b.text.trim()}`);
@@ -913,6 +949,7 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
     let turnState = null;
     let turnStateAt = null;
     let pendingAsk = null;
+    const queueState = { queue: [], restored: null };
 
     for (const filePath of filesToRead) {
       if (!fs.existsSync(filePath)) continue;
@@ -926,8 +963,9 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
             turnStateAt = entry.timestamp || new Date(stat.mtimeMs).toISOString();
           }
           pendingAsk = trackPendingAsk(pendingAsk, entry);
+          trackQueue(queueState, entry);
         }
-        if (isTurnEndMarker(entry)) continue;
+        if (isTurnEndMarker(entry) || entry.type === 'queue-operation') continue;
         const msg = entry.message || entry;
         const role = msg.role || entry.type;
         const content = msg.content;
@@ -975,6 +1013,12 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
           // by the harness; they are not the human's prompt.
           if (!isHumanPromptText(entry, text)) return;
           const clean = text.trim();
+          // Esc writes "[Request interrupted by user…]" as a user message: show where the turn
+          // stopped, not a bubble the person never typed.
+          if (INTERRUPTED_RE.test(clean)) {
+            conversationLines.push({ t: STOPPED_LINE, o: entry.entryOffset, f: filePath });
+            return;
+          }
           lastUserText = clean;
           // Each preview line remembers its entry (file + byte offset) for paging back.
           conversationLines.push({ t: `🧑 คุณ: ${clean}`, o: entry.entryOffset, f: filePath });
@@ -1162,6 +1206,13 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
       turnState,
       turnStateAt,
       pendingAsk,
+      // Messages still waiting in Claude's queue (sent while it worked), Claude Code's own
+      // notifications left out; and the text put back into the input box, if any.
+      queuedMessages: queueState.queue
+        .filter((q) => !/^\s*</.test(q.text) && q.text.trim())
+        .slice(-MAX_QUEUE_ITEMS)
+        .map((q) => q.text.trim().slice(0, 4000)),
+      restoredInput: queueState.restored ? { text: queueState.restored.text.slice(0, 4000), at: queueState.restored.at } : null,
       turnHistory: turns.reverse().slice(0, 20),
       subAgents: Array.from(subAgentsMap.values()),
     };

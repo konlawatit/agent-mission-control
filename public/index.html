@@ -480,6 +480,27 @@
     .notice.is-attn { background: var(--attn-soft); box-shadow: inset 0 0 0 1px var(--attn-line); }
     .notice.is-attn > svg { color: var(--attn-ink); flex-shrink: 0; }
     .list-notice { margin: 0 0 12px; padding: 12px 14px; align-items: flex-start; }
+    /* Text left unsent in the terminal's own input box. */
+    .term-input { align-items: flex-start; padding: 12px 14px; }
+    .term-input > svg { margin-top: 2px; }
+    .term-input-text {
+      display: block; margin: 6px 0 2px; padding: 8px 10px; border-radius: 10px; background: var(--card-sel);
+      font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 120px; overflow-y: auto;
+      box-shadow: inset 0 0 0 1px var(--attn-line);
+    }
+    .term-input-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+    .term-input-q { font-size: 13px; font-weight: 650; color: var(--attn-ink); margin-right: 4px; }
+    /* Conversation: where a turn was stopped, and messages waiting in Claude's queue. */
+    .md-stop {
+      display: flex; align-items: center; gap: 10px; align-self: stretch; margin: 2px 0;
+      color: var(--hold-ink); font: 650 12.5px var(--font-ui); white-space: nowrap;
+    }
+    .md-stop::before, .md-stop::after { content: ""; flex: 1; height: 1px; background: var(--hold-line); }
+    .md-user-turn.is-queued {
+      background: var(--card-sel); color: var(--primary-ink); box-shadow: none; border: 1.5px dashed var(--primary);
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .md-queued-note { font-size: 11.5px; font-weight: 500; color: var(--text-3); }
     .list-notice .btn { align-self: center; }
 
     .ask {
@@ -567,6 +588,21 @@
     }
     .output-start::before, .output-start::after { content: ""; flex: 1; height: 1px; background: var(--line); }
     .focus.is-expanded .focus-head, .focus.is-expanded .tldr, .focus.is-expanded .stepper { display: none; }
+    /* Expanded = focus mode: the room's conversation fills the screen (browser full screen when
+       allowed), read in a centred column, with its question card and composer still at hand. */
+    body.is-focus-expanded .work { -webkit-backdrop-filter: none; backdrop-filter: none; } /* else .work would contain the fixed overlay */
+    .focus.is-expanded {
+      position: fixed; inset: 0; z-index: 45; display: flex; flex-direction: column; background: var(--ground);
+      --read-pad: max(24px, calc((100vw - 1120px) / 2));
+    }
+    .focus.is-expanded .focus-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px var(--read-pad) 2px; }
+    .focus.is-expanded .output { min-height: 0; }
+    .focus.is-expanded .composer { padding: 12px var(--read-pad) 18px; }
+    .output-title .pill { margin-left: 4px; }
+    .focus.is-expanded .output-title {
+      color: var(--text); font-size: 14px; font-weight: 700; min-width: 0; flex: 1 1 auto;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
 
     /* Output as a conversation: user turns are violet bubbles, Claude turns are white cards */
     .md-user-turn {

@@ -14,7 +14,7 @@ const {
   findTranscriptsForCwd,
 } = require('./transcript-parser');
 const { parseConsoleScreen } = require('./console-scanner');
-const { sanitizeQuestions, promptFromQuestions, mergeScreenPrompt } = require('./ask-prompt');
+const { sanitizeQuestions, promptFromQuestions, mergeScreenPrompt, sameText } = require('./ask-prompt');
 
 function askStatusLabel(prompt) {
   const n = Array.isArray(prompt.questions) ? prompt.questions.length : 0;
@@ -65,6 +65,23 @@ function sanitizeCwd(rawCwd) {
 function normalizeCwdKey(cwd) {
   const clean = sanitizeCwd(cwd);
   return clean ? clean.toLowerCase() : '';
+}
+
+/**
+ * What a Notification hook means: 'attention' (a permission prompt or a question is on screen),
+ * 'idle' ("Claude is waiting for your input" after a turn), or 'info'. Uses Claude Code's
+ * `notification_type` when sent, else the message.
+ */
+function notificationKind(payload) {
+  const type = String(payload.notification_type || '').toLowerCase();
+  if (type) {
+    if (/permission|elicitation/.test(type)) return 'attention';
+    return /idle/.test(type) ? 'idle' : 'info';
+  }
+  const message = String(payload.message || '');
+  if (/waiting for your input/i.test(message)) return 'idle';
+  if (/permission|approv/i.test(message)) return 'attention';
+  return 'info';
 }
 
 function sameDir(a, b) {
@@ -360,6 +377,12 @@ class StateStore extends EventEmitter {
     ) {
       session.pendingAsk = null; // the transcript has moved past it
     }
+    // When the transcript last moved (a tool ran, a reply, an interrupt): a prompt reported before
+    // that is over.
+    if (parsed.turnStateAt) session.lastTurnStateAt = parsed.turnStateAt;
+    // Messages waiting in Claude's queue, and text it put back into the input box.
+    session.queuedMessages = Array.isArray(parsed.queuedMessages) ? parsed.queuedMessages : [];
+    session.restoredInput = parsed.restoredInput || null;
     // A Claude session started before the hooks were installed never sends Stop, so a room the
     // dashboard set to "working" would stay that way. The transcript records when the turn ended.
     // Only a turn end newer than the last working signal (or the room itself) counts.
@@ -606,7 +629,7 @@ class StateStore extends EventEmitter {
       if (!item || !item.pid || !item.screen) continue;
       const numericPid = Number(item.pid);
 
-      const parsed = parseConsoleScreen(item.screen);
+      const parsed = parseConsoleScreen(item.screen, { cursorRow: item.cursorRow, cursorCol: item.cursorCol });
       if (!parsed) continue;
 
       // Authoritative OS-level PEB `item.cwd` takes precedence over screen-scraped `parsed.cwd`!
@@ -642,6 +665,8 @@ class StateStore extends EventEmitter {
       });
 
       const prevStateSig = JSON.stringify({
+        input: session.terminalInput,
+        queued: session.queuedMessages,
         lifecycle: session.lifecycle,
         status: session.status,
         pid: session.pid,
@@ -695,7 +720,16 @@ class StateStore extends EventEmitter {
       if (parsed.interactivePrompt) {
         // Claude's own question text replaces the screen's (Thai arrives garbled from the console).
         const prompt = mergeScreenPrompt(parsed.interactivePrompt, session.pendingAsk);
+        // A permission prompt: its options read fine from the screen, but the command shown with
+        // it garbles Thai; use the hook's exact copy instead of any garbled line.
+        const perm = session.permissionDetail;
+        if (prompt.source !== 'claude' && perm && session.hookPromptAt) {
+          const clean = (prompt.context || []).filter((l) => !l.includes('�') && !perm.text.includes(l.trim()));
+          prompt.context = [perm.text, ...clean].slice(0, 5);
+          if (prompt.question.includes('�')) prompt.question = `อนุญาตให้ ${perm.tool} ทำงานนี้หรือไม่?`;
+        }
         session.interactivePrompt = prompt;
+        session.promptOnScreen = true;
         session.status = 'needs_input';
         session.statusLabel = askStatusLabel(prompt);
         session.pendingAction = prompt.question;
@@ -714,9 +748,20 @@ class StateStore extends EventEmitter {
         session.status = 'needs_input';
         session.statusLabel = askStatusLabel(session.interactivePrompt);
         session.pendingAction = session.pendingAsk.questions[0].question;
+      } else if (
+        session.hookPromptAt &&
+        !session.promptOnScreen &&
+        !(session.lastTurnStateAt && Date.parse(session.lastTurnStateAt) > Date.parse(session.hookPromptAt))
+      ) {
+        // A hook reported a permission prompt this screen hasn't shown (not drawn yet, or a
+        // layout the parser doesn't know). Clearing it here made the card flash and vanish; it
+        // stays until it has been seen and gone, or the transcript moves past it.
       } else if (session.interactivePrompt) {
         session.interactivePrompt = null;
         session.pendingAction = null;
+        session.hookPromptAt = null;
+        session.promptOnScreen = false;
+        session.permissionDetail = null;
         if (session.status === 'needs_input') {
           session.status = 'idle';
           session.statusLabel = 'พร้อมรับคำสั่ง';
@@ -724,7 +769,23 @@ class StateStore extends EventEmitter {
         }
       }
 
+      // What is sitting unsent in the terminal's input box (null = empty or not on screen).
+      if (parsed.inputText !== null && parsed.inputText !== undefined) {
+        if (!parsed.inputText) {
+          session.terminalInput = null;
+        } else {
+          // The screen garbles Thai; when it is text we know (typed by the dashboard, or put back
+          // from Claude's queue), keep the exact copy too.
+          const known = [session.restoredInput && session.restoredInput.text, session.lastTypedText].filter(Boolean);
+          const exact = known.find((k) => sameText(parsed.inputText, k)) || null;
+          session.terminalInput = { text: parsed.inputText.slice(0, 4000), exact: exact ? exact.slice(0, 4000) : null };
+        }
+      }
+      session.terminalBusy = Boolean(parsed.busy);
+
       const nextStateSig = JSON.stringify({
+        input: session.terminalInput,
+        queued: session.queuedMessages,
         lifecycle: session.lifecycle,
         status: session.status,
         pid: session.pid,
@@ -1054,10 +1115,17 @@ class StateStore extends EventEmitter {
       // It is a question, not an approval: show the questions, never Yes/No.
       if (!session.pendingAsk) this._openAsk(session, toolInput, payload.tool_use_id, now);
       session.status = 'needs_input';
+    } else if (hookEvent === 'Notification' && notificationKind(payload) !== 'attention') {
+      // "Claude is waiting for your input" comes ~60 s after a turn ends: the room is idle, not
+      // asking anything. Treating it as a question flashed a fake approval card into "รอคุณ".
+      pushTimeline(summarizeText(payload.message || 'Claude รอคำสั่งถัดไป', 90), 'Notification', 'info');
     } else if (
       hookEvent === 'PermissionRequest' ||
       hookEvent === 'Notification'
     ) {
+      // Kept until the prompt shows and goes on screen, or the transcript moves past it (see
+      // ingestConsoleScan): the first scan can run before the terminal has drawn the prompt.
+      session.hookPromptAt = now;
       const cmdDetail =
         (toolInput && (toolInput.command || toolInput.file_path)) ||
         payload.message ||
@@ -1065,6 +1133,8 @@ class StateStore extends EventEmitter {
         (toolName
           ? `ขอสิทธิ์รัน ${toolName}`
           : 'Claude กำลังรอให้คุณเลือกคำตอบหรือกดยืนยัน');
+      // The exact command; the screen's copy garbles Thai (see ingestConsoleScan).
+      if (toolName) session.permissionDetail = { tool: String(toolName).slice(0, 80), text: String(cmdDetail).slice(0, 2000) };
 
       session.status = 'needs_input';
       session.statusLabel = 'รอคุณเลือกตอบ / Approve';
@@ -1119,6 +1189,13 @@ class StateStore extends EventEmitter {
       );
     }
 
+    // Any of these means a permission prompt reported earlier has been answered or abandoned.
+    if (['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionEnd'].includes(hookEvent)) {
+      session.hookPromptAt = null;
+      session.promptOnScreen = false;
+      session.permissionDetail = null;
+    }
+
     // The last moment anything said this room is working; a transcript turn end after it means done.
     if (session.status === 'working') {
       session.workingSignalAt = now;
@@ -1153,6 +1230,9 @@ class StateStore extends EventEmitter {
     session.currentTool = 'Ready';
     session.workingSignalAt = null;
     session.pendingAsk = null;
+    session.hookPromptAt = null;
+    session.promptOnScreen = false;
+    session.permissionDetail = null;
     for (const sub of session.subAgents) {
       if (sub.state === 'working') {
         sub.state = 'done';

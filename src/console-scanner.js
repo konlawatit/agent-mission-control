@@ -36,6 +36,31 @@ function extractValidDirectory(line) {
  * - Interactive multiple-choice TUI prompts
  * - Clean last lines for live terminal preview
  */
+/**
+ * What sits in Claude Code's input box (the rows between the last two horizontal rules, the first
+ * starting with ❯): '' when empty, null when no input box is on screen. Text the dashboard
+ * typed that never got sent stays here, and a new message would be appended to it.
+ */
+function parseInputBox(lines, cursor = {}) {
+  const rules = [];
+  lines.forEach((l, i) => {
+    if (/^\s*[─━]{20,}\s*$/.test(l)) rules.push(i);
+  });
+  if (rules.length < 2) return null;
+  const firstRow = rules[rules.length - 2] + 1;
+  const box = lines.slice(firstRow, rules[rules.length - 1]);
+  if (!box.length || !/^\s*❯/.test(box[0])) return null;
+  const text = [box[0].replace(/^\s*❯\s?/, ''), ...box.slice(1).map((l) => l.replace(/^ {0,2}/, ''))]
+    .join('\n')
+    .replace(/\s+$/, '');
+  if (!text.trim()) return '';
+  // An empty box can show a suggested next prompt (dim, but the console reports no faint colour).
+  // The caret then sits at the start of the box, before that text; typed text has it after.
+  const caretAtStart = cursor.cursorRow === firstRow && Number(cursor.cursorCol) <= box[0].indexOf('❯') + 2;
+  if (caretAtStart || /^Try "/.test(text.trim())) return '';
+  return text;
+}
+
 // The row after a multi-select question's checkboxes that moves on ("❯ Next" when the cursor is on it).
 const NEXT_ROW_RE = /^\s*([❯>])?\s*Next\s*$/;
 
@@ -72,7 +97,7 @@ function splitCheckbox(label) {
   return { label: m[3], checked: !(mark === ' ' || mark === '☐' || mark === '◯') };
 }
 
-function parseConsoleScreen(rawScreen) {
+function parseConsoleScreen(rawScreen, cursor = {}) {
   if (!rawScreen || typeof rawScreen !== 'string') {
     return null;
   }
@@ -241,6 +266,9 @@ function parseConsoleScreen(rawScreen) {
     version: detectedVersion,
     model: detectedModel,
     interactivePrompt,
+    // Only meaningful when no prompt dialog is up.
+    inputText: interactivePrompt ? null : parseInputBox(lines, cursor),
+    busy: lines.slice(-6).some((l) => /esc to interrupt/i.test(l)),
     screenPreview: previewLines,
   };
 }

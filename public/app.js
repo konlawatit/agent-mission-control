@@ -579,6 +579,7 @@ function ensureSelection() {
 }
 
 function currentNav() {
+  if (ui.view === 'search') return 'search';
   if (ui.view === 'grid') return 'overview';
   if (ui.lifecycle === 'history') return 'history';
   return ui.filter === 'attn' ? 'attn' : 'live';
@@ -611,7 +612,8 @@ function renderSidebar() {
     item('live', 'rows', 'Live', `<span class="count">${live.length}</span>`) +
       item('attn', 'alert', 'รอคุณ', waiting ? `<span class="badge-attn">${waiting}</span>` : `<span class="count">0</span>`) +
       item('overview', 'grid', 'ภาพรวม', '') +
-      item('history', 'clock', 'ประวัติ', `<span class="count">${hist}</span>`)
+      item('history', 'clock', 'ประวัติ', `<span class="count">${hist}</span>`) +
+      item('search', 'search', 'ค้นหา', '')
   );
 
   const u = appState.usageGuard;
@@ -1972,10 +1974,12 @@ function filtersPopoverHtml() {
 function renderAll() {
   ensureSelection();
   $('#work').classList.toggle('is-grid', ui.view === 'grid');
+  $('#work').classList.toggle('is-search', ui.view === 'search');
   renderSidebar();
   renderHoldBanner();
   renderList();
   if (ui.view === 'grid') renderOverview();
+  else if (ui.view === 'search') renderSearch();
   else renderFocus();
   renderStrip();
   renderPanel();
@@ -2014,7 +2018,7 @@ function openVscodeUri(uri) {
 const Actions = {
   selectRoom(id) {
     ui.selectedId = id;
-    if (ui.view === 'grid') ui.view = 'focus';
+    if (ui.view !== 'focus') ui.view = 'focus';
     const s = selected();
     if (s && s.lifecycle === 'history' && ui.lifecycle !== 'history') ui.lifecycle = 'history';
     if (s && s.lifecycle !== 'history' && ui.lifecycle === 'history') ui.lifecycle = 'live';
@@ -2043,6 +2047,7 @@ const Actions = {
     renderAll();
   },
   navigate(key) {
+    if (key === 'search') return Actions.openSearch();
     ui.view = key === 'overview' ? 'grid' : 'focus';
     ui.lifecycle = key === 'history' ? 'history' : 'live';
     ui.filter = key === 'attn' ? 'attn' : 'all';
@@ -2069,7 +2074,7 @@ const Actions = {
     renderPanel();
   },
   openPanel(key) {
-    if (ui.view === 'grid') ui.view = 'focus';
+    if (ui.view !== 'focus') ui.view = 'focus';
     ui.panel = key;
     savePrefs();
     renderAll();
@@ -2554,7 +2559,7 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === '/') {
     e.preventDefault();
-    $('#search-input').focus();
+    $(ui.view === 'search' ? '#gs-input' : '#search-input').focus();
     return;
   }
   if (ide.open && (e.key === 'j' || e.key === 'k')) {
@@ -2824,6 +2829,209 @@ $('#edit-dialog').addEventListener('close', async () => {
   });
   toast(r.ok ? 'บันทึกแล้ว' : 'บันทึกไม่สำเร็จ', r.ok ? 'ok' : 'err');
 });
+
+/* ---------- Search across sessions (roadmap 2) ---------- */
+// Searches every transcript under ~/.claude/projects through GET /api/search (an index the server
+// builds in the background). A snippet opens the shared transcript viewer at its entry.
+const SEARCH_SCOPES = [
+  ['people', 'คนพิมพ์'],
+  ['automated', 'งานอัตโนมัติ'],
+  ['all', 'ทั้งหมด'],
+];
+const SEARCH_ROLE = { u: 'คุณ', a: 'Claude', t: 'Tool' };
+const SEARCH_PREF_KEY = 'amc.search.v1';
+const gsearch = { q: '', scope: 'people', results: null, status: null, loading: false, error: null, seq: 0, timer: 0, poll: 0 };
+try {
+  const saved = JSON.parse(localStorage.getItem(SEARCH_PREF_KEY) || '{}');
+  if (SEARCH_SCOPES.some(([k]) => k === saved.scope)) gsearch.scope = saved.scope;
+} catch {}
+
+function searchDate(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/** Snippet text with the match marked; `hl` is [start, length] in the text, from the server. */
+function searchSnippetHtml(s) {
+  const t = String(s.text || '');
+  const [a, n] = Array.isArray(s.hl) ? s.hl : [0, 0];
+  if (!Number.isInteger(a) || !Number.isInteger(n) || a < 0 || n <= 0 || a + n > t.length) return escapeHtml(t);
+  return `${escapeHtml(t.slice(0, a))}<mark>${escapeHtml(t.slice(a, a + n))}</mark>${escapeHtml(t.slice(a + n))}`;
+}
+
+function searchIndexHtml(st) {
+  if (!st) return '';
+  if (!st.done) {
+    return `${icon('spinner', 14)}<span>กำลังสร้างดัชนี… ${st.files}/${st.total || '?'} session</span>`;
+  }
+  return `<span title="อัปเดตเองทุกไม่กี่สิบวินาที">ค้นจาก ${Number(st.files).toLocaleString()} session</span>`;
+}
+
+function searchCardHtml(r) {
+  const snippets = (r.snippets || [])
+    .map(
+      (s) => `
+      <button class="gs-snip" ${act('openSearchHit', r.sessionId, s.offset)} title="เปิดอ่านตรงนี้">
+        <span class="gs-role is-${escapeHtml(s.role)}">${escapeHtml(SEARCH_ROLE[s.role] || '')}</span>
+        <span class="gs-snip-text ${s.role === 't' ? 'mono' : ''}">${searchSnippetHtml(s)}</span>
+      </button>`
+    )
+    .join('');
+  const count = `${r.moreMatches ? 'มากกว่า ' : ''}${Number(r.matchCount).toLocaleString()} ที่`;
+  return `
+    <article class="gs-card">
+      <div class="gs-card-top">
+        <span class="gs-card-title" title="${escapeHtml(r.title)}">${escapeHtml(r.title)}</span>
+        <span class="gs-card-time" title="เริ่ม ${escapeHtml(searchDate(r.startedAt))}">${escapeHtml(searchDate(r.modifiedAt))}</span>
+      </div>
+      <div class="gs-card-meta">
+        <span class="gs-proj">${icon('folder', 14)}${escapeHtml(r.project)}</span>
+        <span class="pill">${escapeHtml(count)}</span>
+        ${r.automated ? '<span class="pill">งานอัตโนมัติ</span>' : ''}
+        <span class="gs-path mono" title="${escapeHtml(r.cwd || '')}">${escapeHtml(r.cwd || '')}</span>
+      </div>
+      <div class="gs-snips">${snippets}</div>
+      <div class="gs-card-foot">
+        <button class="btn btn-ghost btn-sm" ${act('openSearchHit', r.sessionId, null)}>${icon('text', 14)}อ่านทั้ง session</button>
+        <button class="btn btn-ghost btn-sm" ${act('copyResume', r.sessionId)} title="คัดลอกคำสั่ง แล้ววางใน terminal ที่โฟลเดอร์ ${escapeHtml(r.cwd || r.project)}">${icon('copy', 14)}คัดลอก claude --resume</button>
+      </div>
+    </article>`;
+}
+
+function searchResultsHtml() {
+  const q = gsearch.q.trim();
+  if (q.length < 2) {
+    return `
+      <div class="gs-empty">
+        ${icon('search', 24)}
+        <b>ค้นหาในทุก session ที่เคยคุยกับ Claude</b>
+        <span>ค้นได้ทั้งภาษาไทยและอังกฤษ จากข้อความที่คุณพิมพ์ คำตอบของ Claude และคำสั่ง tool<br />กดข้อความในผลลัพธ์เพื่อเปิดอ่านตรงจุดนั้น</span>
+      </div>`;
+  }
+  if (gsearch.error) return `<div class="gs-empty"><b>ค้นหาไม่สำเร็จ</b><span>${escapeHtml(gsearch.error)}</span></div>`;
+  const r = gsearch.results;
+  if (!r) return `<div class="gs-empty"><span>กำลังค้นหา…</span></div>`;
+  const scopeLabel = (SEARCH_SCOPES.find(([k]) => k === r.scope) || ['', ''])[1];
+  const building = r.indexing && !r.indexing.done ? '<p class="gs-note">ดัชนียังสร้างไม่เสร็จ ผลลัพธ์จะเพิ่มขึ้นเองเมื่อเสร็จ</p>' : '';
+  if (!r.results.length) {
+    const wider = r.scope !== 'all' ? `<button class="chip" ${act('searchScope', 'all')}>${icon('search', 14)}ลองค้นในทั้งหมด</button>` : '';
+    return `${building}<div class="gs-empty"><b>ไม่พบ “${escapeHtml(r.q)}”</b><span>ใน session ${escapeHtml(scopeLabel)}</span>${wider}</div>`;
+  }
+  const more = r.total > r.results.length ? ` · แสดง ${r.results.length} รายการล่าสุด` : '';
+  return `${building}<p class="gs-summary">พบใน ${r.total.toLocaleString()} session${more}</p>
+    <div class="gs-list">${r.results.map(searchCardHtml).join('')}</div>`;
+}
+
+function renderSearch() {
+  const el = $('#search-view');
+  if (!el || ui.view !== 'search') return;
+  // Built once, so typing keeps its focus and caret while results update below.
+  if (!el.__built) {
+    el.innerHTML = `
+      <div class="gs-inner">
+        <div class="gs-top"><h2 class="gs-title">ค้นหาบทสนทนา</h2><span class="gs-index" id="gs-index"></span></div>
+        <label class="gs-field">
+          ${icon('search', 18)}
+          <span class="sr-only">ค้นหาในทุก session</span>
+          <input id="gs-input" type="search" placeholder="เช่น webhook Venio หรือข้อความที่จำได้" autocomplete="off" spellcheck="false" maxlength="200" />
+        </label>
+        <div class="gs-scopes" id="gs-scopes" role="group" aria-label="ค้นใน"></div>
+        <div id="gs-results" aria-live="polite"></div>
+      </div>`;
+    el.__built = true;
+    $('#gs-input', el).value = gsearch.q;
+  }
+  setHTML(
+    $('#gs-scopes', el),
+    SEARCH_SCOPES.map(([k, label]) => `<button class="chip gs-chip" ${act('searchScope', k)} aria-pressed="${gsearch.scope === k}">${escapeHtml(label)}</button>`).join('')
+  );
+  setHTML($('#gs-index', el), searchIndexHtml((gsearch.results && gsearch.results.indexing) || gsearch.status));
+  setHTML($('#gs-results', el), searchResultsHtml());
+}
+
+async function runSearch() {
+  clearTimeout(gsearch.timer);
+  clearTimeout(gsearch.poll);
+  const q = gsearch.q.trim();
+  const seq = ++gsearch.seq;
+  if (q.length < 2) {
+    Object.assign(gsearch, { results: null, error: null, loading: false });
+    renderSearch();
+    return;
+  }
+  gsearch.loading = true;
+  if (gsearch.results && gsearch.results.q !== q) gsearch.results = null;
+  renderSearch();
+  const r = await getJson(`/api/search?q=${encodeURIComponent(q)}&scope=${encodeURIComponent(gsearch.scope)}&limit=30`);
+  if (seq !== gsearch.seq) return; // a newer search was started meanwhile
+  gsearch.loading = false;
+  if (r && r.ok) Object.assign(gsearch, { results: r, status: r.indexing, error: null });
+  else Object.assign(gsearch, { results: null, error: (r && r.error) || 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้' });
+  renderSearch();
+  // Results grow while the index is still being built: ask again shortly.
+  if (r && r.ok && !r.indexing.done && ui.view === 'search') gsearch.poll = setTimeout(runSearch, 1500);
+}
+
+async function refreshSearchStatus() {
+  clearTimeout(gsearch.poll);
+  const r = await getJson('/api/search/status');
+  if (!r || !r.ok) return;
+  gsearch.status = r.indexing;
+  renderSearch();
+  if (!r.indexing.done && ui.view === 'search' && gsearch.q.trim().length < 2) gsearch.poll = setTimeout(refreshSearchStatus, 1500);
+}
+
+Object.assign(Actions, {
+  openSearch() {
+    ui.view = 'search';
+    ui.panel = null;
+    closePopover();
+    savePrefs();
+    renderAll();
+    const input = $('#gs-input');
+    if (input) input.focus({ preventScroll: true });
+    if (gsearch.q.trim().length >= 2) runSearch();
+    else refreshSearchStatus(); // also starts the index if it has not started yet
+  },
+  searchScope(scope) {
+    if (!SEARCH_SCOPES.some(([k]) => k === scope)) return;
+    gsearch.scope = scope;
+    try {
+      localStorage.setItem(SEARCH_PREF_KEY, JSON.stringify({ scope }));
+    } catch {}
+    renderSearch();
+    runSearch();
+  },
+  async openSearchHit(sessionId, offset) {
+    const r = gsearch.results && gsearch.results.results.find((x) => x.sessionId === sessionId);
+    if (!r) return;
+    const at = Number.isSafeInteger(offset) ? offset : null;
+    await openTranscriptViewer(sessionId, { title: `${r.title} · ${r.project}`, at, mark: gsearch.results.q });
+    // The page ends at the matching entry: also bring in what came right after it (the reply).
+    if (at !== null && viewer.open && viewer.sessionId === sessionId && !viewer.newerDone) await Actions.viewerNewer();
+  },
+  async copyResume(sessionId) {
+    if (!/^[0-9a-f-]{36}$/i.test(String(sessionId))) return;
+    try {
+      await navigator.clipboard.writeText(`claude --resume ${sessionId}`);
+      toast('คัดลอกคำสั่งแล้ว วางใน terminal ที่โฟลเดอร์ของ session นี้');
+    } catch {
+      toast('คัดลอกไม่สำเร็จ', 'err');
+    }
+  },
+});
+
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'gs-input') return;
+  gsearch.q = e.target.value || '';
+  clearTimeout(gsearch.timer);
+  gsearch.timer = setTimeout(runSearch, 250);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.target.id === 'gs-input' && e.key === 'Enter') runSearch();
+});
+// Reopened on the search view (the view is a saved preference): show the index state.
+if (ui.view === 'search') setTimeout(refreshSearchStatus, 0);
 
 /* ---------- Data ---------- */
 function applySnapshot(snap) {

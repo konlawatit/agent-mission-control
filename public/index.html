@@ -784,6 +784,67 @@
     .ov-stack { display: flex; flex-direction: column; gap: 10px; }
     .ov-stack .rcard { margin: 0; }
 
+    /* ---------- Search across sessions (roadmap 2) ---------- */
+    .work.is-search { grid-template-columns: minmax(0, 1fr); }
+    .work.is-search .list, .work.is-search .focus, .work.is-search .strip, .work.is-search .panel, .work.is-search .overview { display: none; }
+    .gsearch { display: none; }
+    .work.is-search .gsearch { display: block; grid-row: 2; min-width: 0; overflow-y: auto; padding: 24px 26px 30px; }
+    .gs-inner { max-width: 940px; margin: 0 auto; }
+    .gs-top { display: flex; align-items: baseline; gap: 6px 16px; flex-wrap: wrap; margin-bottom: 14px; }
+    .gs-title { font-size: 23px; font-weight: 750; letter-spacing: -0.02em; margin-right: auto; }
+    .gs-index { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .gs-index svg { align-self: center; }
+    .gs-index .spin { transform-origin: 12px 12px; animation: spin 1.1s linear infinite; }
+    .gs-field {
+      display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 16px; border-radius: var(--r);
+      background: var(--card-sel); color: var(--text-3); box-shadow: var(--shadow-card), inset 0 0 0 1px var(--glass-edge);
+      transition: box-shadow 140ms;
+    }
+    .gs-field:focus-within { box-shadow: var(--shadow-lift), inset 0 0 0 2px var(--ring); }
+    .gs-field input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 15px; }
+    .gs-field input::placeholder { color: var(--text-3); }
+    .gs-scopes { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 18px; }
+    .gs-chip { font-weight: 600; }
+    .gs-chip[aria-pressed="true"] { background: var(--primary-soft); color: var(--primary-ink); }
+    .gs-summary { margin: 0 4px 10px; font-size: 12.5px; font-weight: 650; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .gs-note { margin: 0 4px 10px; font-size: 12.5px; color: var(--text-2); }
+    .gs-list { display: flex; flex-direction: column; gap: 12px; }
+    .gs-card {
+      display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 14px 12px 8px; border-radius: var(--r-lg);
+      background: var(--card); box-shadow: var(--shadow-card), inset 0 0 0 1px var(--glass-edge);
+    }
+    .gs-card-top { display: flex; align-items: baseline; gap: 12px; min-width: 0; padding: 0 4px; }
+    .gs-card-title { flex: 1; min-width: 0; font-size: 14.5px; font-weight: 700; letter-spacing: -0.005em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gs-card-time { flex-shrink: 0; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .gs-card-meta { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 4px; font-size: 12px; color: var(--text-3); }
+    .gs-card-meta .pill { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+    .gs-proj { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; max-width: 45%; font-weight: 650; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gs-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+    .gs-snips { display: flex; flex-direction: column; gap: 4px; }
+    .gs-snip {
+      display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: baseline; gap: 10px; width: 100%;
+      padding: 8px 10px; border-radius: var(--r-sm); background: var(--soft); color: var(--text-2);
+      text-align: left; font-size: 13px; line-height: 1.55; transition: background-color 140ms, color 140ms;
+    }
+    .gs-snip:hover { background: var(--soft-2); color: var(--text); }
+    .gs-role { font-size: 11.5px; font-weight: 700; color: var(--text-3); white-space: nowrap; }
+    .gs-role.is-a { color: var(--primary-ink); }
+    .gs-role.is-t { color: var(--work-ink); font-family: var(--font-mono); font-weight: 600; }
+    .gs-snip-text { min-width: 0; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .gs-snip-text.mono { font-size: 12px; }
+    /* Same find-highlight as the transcript viewer the snippet opens. */
+    .gs-snip mark { background: var(--attn-soft); color: var(--text); box-shadow: 0 0 0 2px var(--attn-soft); border-radius: 3px; font-weight: 650; }
+    .gs-card-foot { display: flex; flex-wrap: wrap; gap: 2px; }
+    .gs-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 48px 16px; text-align: center; font-size: 13.5px; line-height: 1.7; color: var(--text-3); }
+    .gs-empty b { font-size: 15px; font-weight: 700; color: var(--text); }
+    .gs-empty .chip { margin-top: 6px; }
+    @media (max-width: 900px) {
+      .work.is-search .gsearch { padding: 18px 14px 24px; overflow: visible; }
+      .gs-snip { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+      .gs-path { display: none; }
+      .gs-proj { max-width: none; flex-shrink: 1; }
+    }
+
     /* ---------- Popover ---------- */
     .popover {
       position: fixed; z-index: 60; min-width: 230px; max-width: 320px; padding: 8px; border-radius: var(--r-lg);
@@ -995,6 +1056,7 @@
 
       <section class="focus" id="focus" aria-label="ห้องที่เลือก"></section>
       <section class="overview" id="overview" aria-label="ภาพรวมทุกห้อง"></section>
+      <section class="gsearch" id="search-view" aria-label="ค้นหาบทสนทนา"></section>
       <nav class="strip" id="strip" aria-label="เปิดรายละเอียด"></nav>
       <div class="panel" id="panel" hidden></div>
     </main>

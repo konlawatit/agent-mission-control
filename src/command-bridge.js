@@ -37,6 +37,33 @@ function resolveResumeId(session) {
   return UUID_RE.test(session.id) ? session.id : null;
 }
 
+// Permission modes a background run may ask for. spawn() goes through a shell on Windows, so only
+// these constants (never a caller's string) are ever added to the command line.
+const HEADLESS_PERMISSION_MODES = new Set(['acceptEdits']);
+const HEADLESS_EXIT_PREFIX = 'Process จบการทำงานด้วยรหัส';
+
+/** The Stop summary of a background run that ended without a result (a crash, a failed start). */
+function headlessExitSummary(code) {
+  return `${HEADLESS_EXIT_PREFIX} (exit code ${code})`;
+}
+
+function isHeadlessExitSummary(text) {
+  return typeof text === 'string' && text.startsWith(HEADLESS_EXIT_PREFIX);
+}
+
+/** Arguments for a background `claude -p` run of a room; the prompt itself goes to stdin. */
+function headlessClaudeArgs(session, { permissionMode } = {}) {
+  const args = ['-p', '--output-format', 'stream-json', '--verbose'];
+  const resumeId = resolveResumeId(session);
+  if (resumeId) {
+    args.unshift('--resume', resumeId);
+  }
+  if (HEADLESS_PERMISSION_MODES.has(permissionMode)) {
+    args.push('--permission-mode', permissionMode);
+  }
+  return args;
+}
+
 function parsePositiveInt(value, fallback) {
   const n = Number(value);
   return Number.isInteger(n) && n >= 1 && n <= 50 ? n : fallback;
@@ -346,7 +373,7 @@ class CommandBridge {
 
     if (mode === 'claude-resume' || options.runHeadless) {
       recordPrompt({ viaTerminal: false });
-      this._spawnClaudeHeadless(session, trimmed);
+      this._spawnClaudeHeadless(session, trimmed, { permissionMode: options.permissionMode });
       return {
         ok: true,
         delivered: true,
@@ -397,17 +424,13 @@ class CommandBridge {
     });
   }
 
-  _spawnClaudeHeadless(session, promptText) {
+  _spawnClaudeHeadless(session, promptText, options = {}) {
     const cwd =
       session.cwd && fs.existsSync(session.cwd) ? session.cwd : process.cwd();
 
     // The prompt is written to stdin rather than passed as an argument: on Windows `claude`
     // is often a .cmd shim that needs a shell, and nothing user-supplied may reach that shell.
-    const args = ['-p', '--output-format', 'stream-json', '--verbose'];
-    const resumeId = resolveResumeId(session);
-    if (resumeId) {
-      args.unshift('--resume', resumeId);
-    }
+    const args = headlessClaudeArgs(session, options);
 
     try {
       const child = spawn('claude', args, {
@@ -454,10 +477,7 @@ class CommandBridge {
           session_id: session.id,
           cwd,
           hook_event_name: 'Stop',
-          summary:
-            code === 0
-              ? undefined
-              : `Process จบการทำงานด้วยรหัส (exit code ${code})`,
+          summary: code === 0 ? undefined : headlessExitSummary(code),
         });
       });
     } catch (err) {
@@ -471,6 +491,14 @@ class CommandBridge {
 
   _handleClaudeStreamJson(sessionId, evt) {
     if (!evt || typeof evt !== 'object') return;
+    // A room that had no Claude session yet takes the one this run started: the next background
+    // run resumes it, and the run's own hook events (keyed by that id) find this room.
+    if (typeof evt.session_id === 'string' && UUID_RE.test(evt.session_id)) {
+      const room = this.store.sessions.get(sessionId);
+      if (room && !room.claudeSessionId) {
+        this.store.updateSession(sessionId, { claudeSessionId: evt.session_id });
+      }
+    }
     if (
       evt.type === 'assistant' &&
       evt.message &&
@@ -496,6 +524,8 @@ class CommandBridge {
         session_id: sessionId,
         hook_event_name: 'Stop',
         summary: String(evt.result).slice(0, 220),
+        // The whole answer, for readers that need its last line (a quest's verdict).
+        last_assistant_message: String(evt.result),
       });
     }
   }
@@ -603,4 +633,7 @@ module.exports = {
   buildTerminalScript,
   safeTitle,
   resolveResumeId,
+  headlessClaudeArgs,
+  headlessExitSummary,
+  isHeadlessExitSummary,
 };

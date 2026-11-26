@@ -1055,6 +1055,13 @@ class StateStore extends EventEmitter {
 
     const matched = this._roomForHook(payload, { rawSessionId, isUuid, roomCwd, automated });
     if (matched === null) return null; // an automated session nobody owns: no room
+    const eventName = payload.hook_event_name || payload.event || payload.type;
+    if (automated && matched && (eventName === 'SessionStart' || eventName === 'SessionEnd')) {
+      // The dashboard's own background run (`claude -p`) starting or exiting is not the room
+      // opening or closing: it would flip a working room to idle, or put it in history.
+      if (payload.transcript_path) matched.transcriptPath = payload.transcript_path;
+      return matched;
+    }
     const session =
       matched ||
       this.getOrCreateSession(lookupId, {
@@ -1399,7 +1406,13 @@ class StateStore extends EventEmitter {
     this._enrichSessionFromTranscript(session);
     this._deduplicateSessions();
 
-    this._emitChange('hook_event', { sessionId: session.id, hookEvent });
+    const detail = { sessionId: session.id, hookEvent };
+    // The full answer, untrimmed: a quest reads its verdict from the last line (src/quest-runner.js).
+    const lastAssistantMessage = payload.last_assistant_message || payload.summary;
+    if (typeof lastAssistantMessage === 'string' && lastAssistantMessage) {
+      detail.lastAssistantMessage = lastAssistantMessage;
+    }
+    this._emitChange('hook_event', detail);
     return session;
   }
 

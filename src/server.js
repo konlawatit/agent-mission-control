@@ -37,6 +37,8 @@ const {
 const { MAX_ATTACHMENT_BYTES, saveAttachment, pruneAttachments } = require('./attachments');
 const { AutomatedRuns, DEFAULT_WINDOW_HOURS, MAX_WINDOW_HOURS } = require('./automated-runs');
 const { SearchIndex } = require('./search-index');
+const { QuestRunner, QuestError } = require('./quest-runner');
+const { classesForClient } = require('./guild-classes');
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -45,6 +47,9 @@ const MIME_TYPES = {
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
   '.woff2': 'font/woff2',
 };
 
@@ -108,7 +113,15 @@ function createMissionControlServer(options = {}) {
   );
   const usageGuard = new UsageGuard(store, bridge, { isChecking: () => usageChecker.busy });
   store.usageGuard = usageGuard;
-  const publicDir = path.resolve(__dirname, '..', 'public');
+  // Guild Mode quests: one prompt per phase over the bridge, moved on by the Stop hook.
+  const questRunner = new QuestRunner(store, bridge, {
+    usageGuard,
+    resolveDirectory: safeDirectory,
+    ...(options.questRunnerOptions || {}),
+  });
+  const publicDir = options.publicDir
+    ? path.resolve(options.publicDir)
+    : path.resolve(__dirname, '..', 'public');
   const sseClients = new Set();
   // Old composer attachments (two weeks and older) are removed in the background.
   setImmediate(() => pruneAttachments(store.dataDir));
@@ -327,9 +340,15 @@ function createMissionControlServer(options = {}) {
     );
   }
 
-  function serveIndex(res) {
+  /** An app page (index.html, guild.html) with the API token embedded. */
+  function servePage(res, fileName) {
+    const file = path.join(publicDir, fileName);
+    if (!fs.existsSync(file)) {
+      res.writeHead(404, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('Not Found');
+    }
     const html = fs
-      .readFileSync(path.join(publicDir, 'index.html'), 'utf8')
+      .readFileSync(file, 'utf8')
       .replace('<head>', `<head>\n  <meta name="amc-token" content="${token}" />`);
     res.writeHead(200, {
       ...SECURITY_HEADERS,
@@ -337,6 +356,42 @@ function createMissionControlServer(options = {}) {
       'Cache-Control': 'no-store',
     });
     res.end(html);
+  }
+
+  /**
+   * A new room in `cwd`, as "เปิดห้องใหม่" makes it (the spawn route and Guild quests). The
+   * terminal, if any, is opened by the caller.
+   */
+  function createRoom({ sessionId, cwd, room, category, cli, goal, status, statusLabel }) {
+    const session = store.getOrCreateSession(sessionId, {
+      room,
+      category: category || undefined,
+      cwd,
+      cli: cli || 'claude-code',
+      goal,
+      status,
+      statusLabel,
+    });
+    if (category) {
+      store.updateSession(session.id, { category });
+    }
+    return session;
+  }
+
+  /** A room id no room has yet (two quests may start within the same millisecond). */
+  function newRoomId() {
+    let id = `session-${Date.now()}`;
+    while (store.sessions.has(id)) id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    return id;
+  }
+
+  function sendQuestError(res, err) {
+    if (!(err instanceof QuestError)) throw err;
+    return sendJson(res, err.statusCode, {
+      ok: false,
+      error: err.message,
+      ...(err.statusCode === 423 ? { held: true } : {}),
+    });
   }
 
   // Automated runs (`claude -p`, Agent SDK) are summarised from their transcripts on request.
@@ -699,19 +754,16 @@ function createMissionControlServer(options = {}) {
         const folderName = path.basename(cwd) || 'Workspace';
         const roomName = body.room || folderName;
 
-        const session = store.getOrCreateSession(sessionId, {
-          room: roomName,
-          category: body.category || undefined,
+        const session = createRoom({
+          sessionId,
           cwd,
-          cli: body.cli || 'claude-code',
+          room: roomName,
+          category: body.category,
+          cli: body.cli,
           goal: body.goal || 'เปิดห้องทำงานใหม่จาก Mission Control',
           status: body.goal ? 'working' : 'idle',
           statusLabel: body.goal ? 'กำลังเริ่มงาน' : 'พร้อมรับคำสั่ง',
         });
-
-        if (body.category) {
-          store.updateSession(session.id, { category: body.category });
-        }
 
         let launchResult = null;
         if (body.openTerminal) {
@@ -1007,6 +1059,74 @@ function createMissionControlServer(options = {}) {
         return sendJson(res, 200, { ok: true, ...(await automatedRuns.summary({ hours })) });
       }
 
+      // ---------- Guild Mode (the game page at /guild) ----------
+      if (req.method === 'GET' && pathname === '/api/guild/classes') {
+        return sendJson(res, 200, { ok: true, classes: classesForClient() });
+      }
+      if (req.method === 'GET' && pathname === '/api/guild/quests') {
+        return sendJson(res, 200, { ok: true, quests: questRunner.list() });
+      }
+      // Body: { heroClassId, goal, name?, cwd?, optionValue?, presetPrompt?, sessionId?,
+      // launch?: 'terminal' | 'headless' }. Without sessionId a new room is made in cwd.
+      if (req.method === 'POST' && pathname === '/api/guild/quests') {
+        const body = await readJsonBody(req);
+        let prepared;
+        try {
+          prepared = questRunner.prepare(body);
+        } catch (err) {
+          return sendQuestError(res, err);
+        }
+        let sessionId = prepared.sessionId;
+        let roomName = null;
+        if (!sessionId) {
+          // Named after the quest, so the chat's room list reads the same as the guild.
+          roomName = prepared.name || path.basename(prepared.cwd) || 'Workspace';
+          const terminal = prepared.launch === 'terminal';
+          sessionId = createRoom({
+            sessionId: newRoomId(),
+            cwd: prepared.cwd,
+            room: roomName,
+            goal: `เควสต์: ${prepared.name}`,
+            status: 'idle',
+            statusLabel: terminal ? 'กำลังเปิด terminal ให้เควสต์' : 'กำลังเริ่มเควสต์เบื้องหลัง',
+          }).id;
+        }
+        let quest;
+        try {
+          quest = await questRunner.start(prepared, sessionId);
+        } catch (err) {
+          return sendQuestError(res, err);
+        }
+        let launchResult = null;
+        if (prepared.launch === 'terminal') {
+          // The quest waits for this terminal's SessionStart before it sends phase 1.
+          launchResult = await bridge.openTerminalTab(sessionId, {
+            cwd: prepared.cwd,
+            room: roomName,
+            autoRunClaude: true,
+          });
+          if (!launchResult || !launchResult.ok) {
+            questRunner.launchFailed(quest.id, launchResult && launchResult.message);
+          }
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          quest: questRunner.get(quest.id),
+          session: store.sessions.get(sessionId) || null,
+          launchResult,
+        });
+      }
+      // Body: { questId, action: 'stop' | 'resume', note? }
+      if (req.method === 'POST' && pathname === '/api/guild/quest-action') {
+        const body = await readJsonBody(req);
+        try {
+          const quest = await questRunner.action(body.questId, body.action, body.note);
+          return sendJson(res, 200, { ok: true, quest });
+        } catch (err) {
+          return sendQuestError(res, err);
+        }
+      }
+
       if (pathname.startsWith('/api/')) {
         return sendJson(res, 404, { ok: false, error: 'Unknown endpoint' });
       }
@@ -1016,7 +1136,10 @@ function createMissionControlServer(options = {}) {
         return sendJson(res, 405, { ok: false, error: 'Method not allowed' });
       }
       if (pathname === '/' || pathname === '/index.html') {
-        return serveIndex(res);
+        return servePage(res, 'index.html');
+      }
+      if (pathname === '/guild' || pathname === '/guild.html') {
+        return servePage(res, 'guild.html');
       }
 
       const filePath = path.join(publicDir, pathname);
@@ -1053,11 +1176,12 @@ function createMissionControlServer(options = {}) {
   server.on('close', () => {
     if (scanner) scanner.stop();
     if (usageGuard) usageGuard.stop();
+    questRunner.stop(); // clears its timers and writes guild-quests.json
     if (broadcastTimer) clearTimeout(broadcastTimer);
     store.flush();
   });
 
-  return { server, store, bridge, scanner, usageGuard, usageChecker, token, searchIndex };
+  return { server, store, bridge, scanner, usageGuard, usageChecker, token, searchIndex, questRunner };
 }
 
 module.exports = { createMissionControlServer };

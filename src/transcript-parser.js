@@ -1078,9 +1078,15 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
   }
 }
 
+// A guild quest's closing line (src/guild-classes.js) is for the quest runner, not for people.
+const QUEST_VERDICT_LINE = /^[ \t>*_`-]*QUEST-VERDICT\b[^\n]*$/gim;
+
 function summarizeText(text, maxLen = 200) {
   if (!text) return '';
-  const cleaned = String(text)
+  let source = String(text);
+  const withoutVerdict = source.replace(QUEST_VERDICT_LINE, '').trim();
+  if (withoutVerdict) source = withoutVerdict; // a bare verdict (the probe's answer) stays
+  const cleaned = source
     .replace(/```[\s\S]*?```/g, '[โค้ด/คำสั่ง]')
     .replace(/\s+/g, ' ')
     .trim();

@@ -193,4 +193,14 @@ const toolCall = (ms) => ({
   assert.deepStrictEqual(gap.lines, readConversationPage(file, { before: parsed.previewFrom, limit: 10 }).lines);
 }
 
+// A guild quest's verdict line is for the quest runner: summaries (the TL;DR) leave it out,
+// unless it is all there is.
+{
+  const { summarizeText } = require('../src/transcript-parser');
+  assert.strictEqual(summarizeText('รัน npm test: all passed\nQUEST-VERDICT: PASS'), 'รัน npm test: all passed');
+  assert.strictEqual(summarizeText('แก้แล้ว\r\n**QUEST-VERDICT: FAIL — 2 tests**'), 'แก้แล้ว');
+  assert.strictEqual(summarizeText('QUEST-VERDICT: PASS'), 'QUEST-VERDICT: PASS');
+  assert.strictEqual(summarizeText('see QUEST-VERDICT: PASS in the middle'), 'see QUEST-VERDICT: PASS in the middle');
+}
+
 console.log('✅ Transcript tail parsing checks passed!');

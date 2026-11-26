@@ -98,6 +98,12 @@ function newStore() {
   const r = store.processHookEvent({ session_id: SID_MAIN, cwd: repo, transcript_path: mainTranscript, hook_event_name: 'UserPromptSubmit', prompt: 'go', entrypoint: 'sdk-cli' });
   assert.strictEqual(r, room);
   assert.strictEqual(room.status, 'working');
+  // The run's own process starting and exiting neither idles nor closes the room.
+  for (const hook_event_name of ['SessionStart', 'SessionEnd']) {
+    assert.strictEqual(store.processHookEvent({ session_id: SID_MAIN, cwd: repo, transcript_path: mainTranscript, hook_event_name, entrypoint: 'sdk-cli' }), room);
+  }
+  assert.strictEqual(room.status, 'working');
+  assert.strictEqual(room.lifecycle, 'live');
   store.flush();
 }
 

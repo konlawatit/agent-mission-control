@@ -1,10 +1,11 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFile, execFileSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const { sanitizeQuestions } = require('./ask-prompt');
+// Branch and dirty-file count of a room live in git-meta.js, which never waits for a git process.
+const { getGitMetadata, clearGitCache } = require('./git-meta');
 
-const GIT_CACHE_TTL_MS = 5000;
 const TRANSCRIPT_LIST_TTL_MS = 2000;
 const MAX_CACHE_ENTRIES = 200;
 
@@ -14,72 +15,10 @@ const GIT_OPTS = {
   windowsHide: true,
 };
 
-function toGitMeta(branchOut, statusOut) {
-  const branch = String(branchOut || '').trim();
-  const status = String(statusOut || '').trim();
-  return {
-    branch: branch || 'main',
-    dirtyFiles: status ? status.split(/\r?\n/).filter(Boolean).length : 0,
-  };
-}
-
-function readGitMetadataSync(cwd) {
-  try {
-    return toGitMeta(
-      execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-        ...GIT_OPTS,
-        cwd,
-      }),
-      execFileSync('git', ['status', '--porcelain'], { ...GIT_OPTS, cwd })
-    );
-  } catch {
-    return { branch: 'local', dirtyFiles: 0 };
-  }
-}
-
-function readGitMetadataAsync(cwd) {
-  const run = (args) =>
-    new Promise((resolve, reject) =>
-      execFile('git', args, { ...GIT_OPTS, cwd }, (err, stdout) =>
-        err ? reject(err) : resolve(stdout)
-      )
-    );
-  return Promise.all([
-    run(['rev-parse', '--abbrev-ref', 'HEAD']),
-    run(['status', '--porcelain']),
-  ])
-    .then(([branchOut, statusOut]) => toGitMeta(branchOut, statusOut))
-    .catch(() => ({ branch: 'local', dirtyFiles: 0 }));
-}
-
 function boundCache(map) {
   if (map.size > MAX_CACHE_ENTRIES) {
     map.delete(map.keys().next().value);
   }
-}
-
-const gitCache = new Map();
-
-function getGitMetadata(cwd) {
-  if (!cwd || !fs.existsSync(cwd)) {
-    return { branch: 'main', dirtyFiles: 0 };
-  }
-  const hit = gitCache.get(cwd);
-  if (!hit) {
-    const value = readGitMetadataSync(cwd);
-    gitCache.set(cwd, { at: Date.now(), value, refreshing: false });
-    boundCache(gitCache);
-    return { ...value };
-  }
-  if (Date.now() - hit.at > GIT_CACHE_TTL_MS && !hit.refreshing) {
-    hit.refreshing = true;
-    readGitMetadataAsync(cwd).then((value) => {
-      hit.value = value;
-      hit.at = Date.now();
-      hit.refreshing = false;
-    });
-  }
-  return { ...hit.value };
 }
 
 /**
@@ -478,7 +417,7 @@ function parseTranscriptTail(transcriptPath, cwd = null) {
 }
 
 function clearCaches() {
-  gitCache.clear();
+  clearGitCache();
   transcriptListCache.clear();
   parseCache.clear();
   usageCache.clear();

@@ -62,6 +62,8 @@ function forward(payload) {
     const body = JSON.stringify({
       session_id: payload.session_id || null,
       transcript_path: payload.transcript_path || null,
+      // The claude process this statusline belongs to: one room per terminal, even in a shared folder.
+      claude_pid: Number(process.env.CLAUDE_PID) || null,
       cwd:
         (payload.workspace && payload.workspace.current_dir) || payload.cwd || process.cwd(),
       model: payload.model || null,

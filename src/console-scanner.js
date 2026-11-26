@@ -36,6 +36,42 @@ function extractValidDirectory(line) {
  * - Interactive multiple-choice TUI prompts
  * - Clean last lines for live terminal preview
  */
+// The row after a multi-select question's checkboxes that moves on ("❯ Next" when the cursor is on it).
+const NEXT_ROW_RE = /^\s*([❯>])?\s*Next\s*$/;
+
+// Only prompts say this; the working spinner says "esc to interrupt", which must not match.
+const PROMPT_KEY_HINT_RE = /Esc to cancel|Enter to (?:select|confirm)/i;
+
+/** An option line can carry a preview box to its right; keep only the option text. */
+function stripSidePanel(text) {
+  const m = text.match(/\s{3,}[─-╿]/);
+  return m ? text.slice(0, m.index) : text;
+}
+
+const TAB_MARKS = '☐☑☒✔✓■□';
+const TAB_MARK_RE = new RegExp(`[${TAB_MARKS}]`);
+
+function isQuestionTabBar(line) {
+  return /[←→]/.test(line) && TAB_MARK_RE.test(line);
+}
+
+/** Tabs of a multi-question prompt in order, each answered or not (☐ = not yet). */
+function parseQuestionTabs(line) {
+  const re = new RegExp(`([${TAB_MARKS}])\\s+([^${TAB_MARKS}←→]+)`, 'g');
+  return Array.from(line.matchAll(re), (m) => ({
+    name: m[2].trim(),
+    done: m[1] !== '☐' && m[1] !== '□',
+  }));
+}
+
+/** A multi-select option reads "[ ] label" or "☐ label"; keep the label and whether it is ticked. */
+function splitCheckbox(label) {
+  const m = label.match(/^(?:\[([ xX✔✓])\]|([☐☑☒◯◉]))\s+(.*)$/);
+  if (!m) return { label };
+  const mark = m[1] !== undefined ? m[1] : m[2];
+  return { label: m[3], checked: !(mark === ' ' || mark === '☐' || mark === '◯') };
+}
+
 function parseConsoleScreen(rawScreen) {
   if (!rawScreen || typeof rawScreen !== 'string') {
     return null;
@@ -82,13 +118,22 @@ function parseConsoleScreen(rawScreen) {
   let lastOptionLineIdx = -1;
   let currentIndex = 1;
 
+  // A multi-select question ends its checkboxes with an unnumbered "Next" row.
+  let nextItem = null;
+
   for (let i = 0; i < tailLines.length; i++) {
     const line = tailLines[i];
+    const nextMatch = options.length > 0 && !nextItem ? line.match(NEXT_ROW_RE) : null;
+    if (nextMatch) {
+      nextItem = { index: options.length + 1, active: Boolean(nextMatch[1]) };
+      if (nextItem.active) currentIndex = nextItem.index;
+      continue;
+    }
     const m = line.match(optionRegex);
     if (m) {
       const hasCursor = Boolean(m[1]);
       const num = m[2];
-      const label = m[3].trim();
+      const label = stripSidePanel(m[3]).trim();
 
       const expectedIndex = options.length + 1;
       if (
@@ -99,25 +144,27 @@ function parseConsoleScreen(rawScreen) {
           firstOptionLineIdx = i;
         }
         lastOptionLineIdx = i;
-        const optIndex = options.length + 1;
+        // `index` is the arrow-key position, which counts an unnumbered "Next" row above it.
+        const optIndex = options.length + 1 + (nextItem ? 1 : 0);
         if (hasCursor) {
           currentIndex = optIndex;
         }
         options.push({
           index: optIndex,
           number: String(num),
-          label,
+          ...splitCheckbox(label),
           active: hasCursor,
         });
       } else if (Number(num) === 1) {
         options.length = 0;
+        nextItem = null;
         firstOptionLineIdx = i;
         lastOptionLineIdx = i;
         currentIndex = 1;
         options.push({
           index: 1,
           number: '1',
-          label,
+          ...splitCheckbox(label),
           active: hasCursor,
         });
       }
@@ -126,8 +173,21 @@ function parseConsoleScreen(rawScreen) {
 
   let interactivePrompt = null;
 
-  if (options.length >= 2 && tailLines.length - lastOptionLineIdx <= 6) {
-    if (!options.some((o) => o.active)) {
+  // The key-hint line under a prompt ("Enter to select · … · Esc to cancel"). A question with
+  // previews puts the preview box, notes and extra options between it and the last option.
+  let keyHintIdx = -1;
+  for (let i = tailLines.length - 1; i > lastOptionLineIdx && i >= 0; i--) {
+    if (PROMPT_KEY_HINT_RE.test(tailLines[i])) {
+      keyHintIdx = i;
+      break;
+    }
+  }
+  const promptEndsNearby =
+    tailLines.length - lastOptionLineIdx <= 6 ||
+    (keyHintIdx > lastOptionLineIdx && keyHintIdx - lastOptionLineIdx <= 24);
+
+  if (options.length >= 2 && promptEndsNearby) {
+    if (!options.some((o) => o.active) && !(nextItem && nextItem.active)) {
       options[0].active = true;
       currentIndex = 1;
     }
@@ -140,22 +200,28 @@ function parseConsoleScreen(rawScreen) {
       }
     }
 
-    const headerLines = tailLines
+    const allHeaderLines = tailLines
       .slice(sectionStart, firstOptionLineIdx)
       .map((l) => l.trim())
       .filter((l) => l && !/[─━═]{8,}/.test(l));
+    // A multi-question prompt shows a tab bar: "←  ☐ Export  ☐ Layout  ✔ Submit  →".
+    const tabLine = allHeaderLines.find(isQuestionTabBar);
+    const headerLines = allHeaderLines.filter((l) => l !== tabLine);
 
     const question =
       headerLines.find((l) => l.endsWith('?') || l.endsWith(':')) ||
       headerLines[0] ||
       'Claude กำลังรอให้คุณเลือกคำตอบ';
 
-    const context = headerLines.filter((l) => l !== question).slice(-5);
+    const context = allHeaderLines.filter((l) => l !== question).slice(-5);
 
-    const footerLines = tailLines
-      .slice(lastOptionLineIdx + 1)
-      .map((l) => l.trim())
-      .filter(Boolean);
+    const footerLines =
+      keyHintIdx >= 0
+        ? [tailLines[keyHintIdx].trim()]
+        : tailLines
+            .slice(lastOptionLineIdx + 1)
+            .map((l) => l.trim())
+            .filter(Boolean);
 
     interactivePrompt = {
       question,
@@ -164,6 +230,8 @@ function parseConsoleScreen(rawScreen) {
       options,
       footer: footerLines.join(' · ') || 'Enter to confirm · Esc to cancel',
     };
+    if (tabLine) interactivePrompt.tabs = parseQuestionTabs(tabLine);
+    if (nextItem) interactivePrompt.nextIndex = nextItem.index;
   }
 
   const previewLines = lines.slice(-18).join('\n');

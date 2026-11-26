@@ -19,7 +19,7 @@ let appState = {
   projects: [],
   categories: [],
   sessions: [],
-  hooks: { installed: false, installedEvents: [] },
+  hooks: null, // unknown until the first snapshot; avoids flashing the "install hooks" notice
   statusline: { installed: false },
 };
 
@@ -227,6 +227,7 @@ const ICON_PATHS = {
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   gauge: '<path d="M4.6 17.5a8.5 8.5 0 1 1 14.8 0"/><path d="m12 13.5 3.8-4.3"/><circle cx="12" cy="14" r="1.4"/>',
   x: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
+  paperclip: '<path d="M19.5 11.2 12 18.7a4.6 4.6 0 0 1-6.5-6.5l7.8-7.8a3.1 3.1 0 0 1 4.4 4.4l-7.8 7.8a1.55 1.55 0 0 1-2.2-2.2l7.1-7.1"/>',
   chevronDown: '<path d="m7 10 5 5 5-5"/>',
   more: '<circle cx="5.5" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="18.5" cy="12" r="1.3" fill="currentColor" stroke="none"/>',
   pin: '<path d="M9 4h6l-1 5 3 3v2H7v-2l3-3z"/><path d="M12 14v6.5"/>',
@@ -244,7 +245,7 @@ const ICON_PATHS = {
   alert: '<path d="M12 3.3 20.7 12 12 20.7 3.3 12z"/><path d="M12 8.3v4.4"/><circle cx="12" cy="15.7" r="0.95" fill="currentColor" stroke="none"/>',
   pauseCircle: '<circle cx="12" cy="12" r="8.5"/><path d="M10 9v6M14 9v6"/>',
   checkCircle: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.2 2.4 2.4 4.7-5"/>',
-  idle: '<circle cx="12" cy="12" r="7.5" stroke-dasharray="2.6 3.2"/>',
+  idle: '<circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/>',
   spinner: '<circle cx="12" cy="12" r="8" opacity="0.28"/><path class="spin" d="M12 4a8 8 0 0 1 8 8"/>',
   closed: '<circle cx="12" cy="12" r="8.5"/><path d="M8.5 12h7"/>',
   flask: '<path d="M9.5 3.5h5M10.5 3.5v5.2L5.7 17a2 2 0 0 0 1.7 3h9.2a2 2 0 0 0 1.7-3l-4.8-8.3V3.5"/><path d="M7.8 15h8.4"/>',
@@ -291,10 +292,14 @@ function stageIndex(s) {
   return Math.max(0, Math.min(3, Number(s.stageIndex || 0)));
 }
 
+// A stage is "now" only while a turn is in flight; an idle room has no current stage.
+const ACTIVE_STATES = new Set(['attn', 'work', 'hold']);
+
 function stageDotsHtml(s) {
   const idx = stageIndex(s);
   const finished = s.status === 'done' || s.lifecycle === 'history';
   const st = roomState(s);
+  if (!finished && !ACTIVE_STATES.has(st.key)) return '';
   return `<span class="dots ${st.key === 'attn' ? 'is-attn' : ''}" aria-hidden="true">${STAGES.map((_, i) => {
     const cls = finished || i < idx ? 'on' : i === idx ? 'now' : '';
     return `<i class="${cls}"></i>`;
@@ -510,6 +515,18 @@ function byPinnedThenAge(a, b) {
   return String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
 }
 
+/** Where the user dragged the room to; rooms never placed come after, pinned then oldest first. */
+function byManualOrder(a, b) {
+  const ao = Number.isFinite(a.sortOrder) ? a.sortOrder : Infinity;
+  const bo = Number.isFinite(b.sortOrder) ? b.sortOrder : Infinity;
+  if (ao !== bo) return ao < bo ? -1 : 1;
+  return byPinnedThenAge(a, b);
+}
+
+function manualOrderIds() {
+  return appState.sessions.slice().sort(byManualOrder).map((s) => s.id);
+}
+
 /** Rail groups in reading order: who needs me first. */
 function railGroups() {
   const visible = appState.sessions.filter(matchesFilters);
@@ -531,7 +548,7 @@ function railGroups() {
     const g = groups.find((x) => x.key === k) || groups[3];
     g.items.push(s);
   }
-  groups.forEach((g) => g.items.sort(byPinnedThenAge));
+  groups.forEach((g) => g.items.sort(byManualOrder));
   const shown = ui.filter === 'attn' ? groups.filter((g) => g.key === 'attn') : groups;
   return shown.filter((g) => g.items.length);
 }
@@ -635,6 +652,11 @@ function renderHoldBanner() {
 
 /* ---------- Room list ---------- */
 function renderList() {
+  // A redraw mid-drag would drop the card being held; redraw once it is let go.
+  if (drag.active) {
+    drag.dirty = true;
+    return;
+  }
   const titles = { live: 'ห้องที่เปิดอยู่', attn: 'รอคุณ', history: 'ประวัติ', overview: 'ห้องที่เปิดอยู่' };
   const title = $('#list-title');
   if (title) title.textContent = titles[currentNav()];
@@ -665,12 +687,26 @@ function renderList() {
     if (groups.length > 1 || g.key === 'history') {
       html += `<div class="group-head ${g.key === 'attn' ? 'is-attn' : ''}">${escapeHtml(g.label)} <span class="count">${g.items.length}</span></div>`;
     }
-    html += g.items.map((s) => rcardHtml(s, s.id === ui.selectedId && ui.view === 'focus')).join('');
+    const dragGroup = g.key !== 'history' && g.items.length > 1 ? g.key : '';
+    html += g.items.map((s) => rcardHtml(s, s.id === ui.selectedId && ui.view === 'focus', dragGroup)).join('');
   }
   if (ui.lifecycle === 'history' && groups.length) {
     html += `<div style="padding:6px 4px"><button class="btn btn-ghost btn-sm" ${act('clearHistory')}>${icon('trash', 14)}ล้างประวัติที่ไม่ได้ปักหมุด</button></div>`;
   }
-  setHTML($('#rail-list'), html);
+  setHTML($('#rail-list'), hooksNoticeHtml() + html);
+}
+
+/** Without hooks the server only sees terminal screens, so working/done can't be told apart. */
+function hooksNoticeHtml() {
+  if (!appState.hooks || appState.hooks.installed !== false || ui.lifecycle === 'history') return '';
+  return `
+    <div class="notice is-attn list-notice" role="status">${icon('plug', 18)}
+      <div class="notice-text">
+        <span>สถานะห้องยังไม่สด</span>
+        <span class="notice-sub">ติดตั้ง hooks เพื่อให้รู้ว่าห้องไหนทำงานอยู่หรือเสร็จแล้ว</span>
+      </div>
+      <button class="btn btn-sm" ${act('installHooks')}>ติดตั้ง</button>
+    </div>`;
 }
 
 const PILL_LABEL = { attn: 'รอคุณ', work: 'กำลังทำงาน', hold: 'พักรอ reset', done: 'เสร็จแล้ว', idle: 'ว่าง', closed: 'ปิดแล้ว' };
@@ -679,25 +715,38 @@ const PILL_LABEL = { attn: 'รอคุณ', work: 'กำลังทำงา
 function roomSummaryHtml(s) {
   const st = roomState(s);
   if (st.key === 'attn') {
-    const q = s.interactivePrompt && s.interactivePrompt.question;
-    const text = q ? `ถาม: ${q}` : s.pendingAction ? `รอยืนยัน: ${s.pendingAction}` : s.tldr || s.goal;
+    const p = s.interactivePrompt;
+    const q = p && p.question;
+    const n = p && Array.isArray(p.questions) ? p.questions.length : 0;
+    const lead = n > 1 ? `ถาม ${n} ข้อ: ` : 'ถาม: ';
+    const text = q ? `${lead}${q}` : s.pendingAction ? `รอยืนยัน: ${s.pendingAction}` : s.tldr || s.goal;
     return `<span class="rc-sum is-ask">${escapeHtml(plainText(text))}</span>`;
   }
   const text = s.tldr || s.goal;
   return text ? `<span class="rc-sum">${formatInline(escapeHtml(text))}</span>` : '';
 }
 
-function rcardHtml(s, current = false) {
+/** `group` (a status-group key) makes the card draggable within that group. */
+function rcardHtml(s, current = false, group = '') {
   const st = roomState(s);
+  const dragAttrs = group
+    ? ` data-id="${escapeHtml(s.id)}" data-group="${escapeHtml(group)}" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"`
+    : '';
+  const hint = group ? '\nลากเพื่อสลับลำดับ (Alt+↑/↓)' : '';
   const pillCls = st.key === 'idle' || st.key === 'closed' ? '' : `s-${st.key}`;
   const avatarCls = st.key === 'idle' ? '' : `s-${st.key}`;
   const time = relTime(s.lifecycle === 'history' && s.closedAt ? s.closedAt : s.updatedAt);
-  const tool = st.key === 'work' && s.currentTool && s.currentTool !== 'Idle' ? `${STAGES[stageIndex(s)].label} · ${s.currentTool}` : STAGES[stageIndex(s)].label;
+  const stage = STAGES[stageIndex(s)].label;
+  const tool = !ACTIVE_STATES.has(st.key)
+    ? ''
+    : st.key === 'work' && s.currentTool && s.currentTool !== 'Idle'
+    ? `${stage} · ${s.currentTool}`
+    : stage;
   return `
-    <button class="rcard" ${act('selectRoom', s.id)} aria-current="${current}" title="${escapeHtml(s.cwd || '')}">
+    <button class="rcard" ${act('selectRoom', s.id)} aria-current="${current}"${dragAttrs} title="${escapeHtml((s.cwd || '') + hint)}">
       <span class="avatar ${avatarCls}" role="img" aria-label="${escapeHtml(st.label)}">${icon(st.glyph, 20)}${s.pinned ? `<span class="pin-dot">${icon('pin', 11)}</span>` : ''}</span>
       <span class="rc-top"><span class="rc-name">${escapeHtml(s.room)}</span><time class="rc-time" datetime="${escapeHtml(s.updatedAt || '')}">${escapeHtml(time)}</time></span>
-      <span class="rc-state"><span class="pill ${pillCls}">${escapeHtml(PILL_LABEL[st.key] || st.label)}</span>${stageDotsHtml(s)}<span class="rc-tool">${escapeHtml(tool)}</span></span>
+      <span class="rc-state"><span class="pill ${pillCls}">${escapeHtml(PILL_LABEL[st.key] || st.label)}</span>${stageDotsHtml(s)}${tool ? `<span class="rc-tool">${escapeHtml(tool)}</span>` : ''}</span>
       ${roomSummaryHtml(s)}
       <span class="rc-foot">
         <span class="branch">${icon('branch', 12)}${escapeHtml(s.branch || '-')}</span>
@@ -799,10 +848,13 @@ function focusHeadHtml(s) {
 function stepperHtml(s) {
   const idx = stageIndex(s);
   const finished = s.status === 'done' || s.lifecycle === 'history';
-  const attn = roomState(s).key === 'attn';
-  return `<div class="stepper" aria-label="ขั้นตอน: ${escapeHtml(STAGES[idx].label)}">${STAGES.map((st, i) => {
-    const done = finished || i < idx;
-    const now = !finished && i === idx;
+  const key = roomState(s).key;
+  const attn = key === 'attn';
+  const active = !finished && ACTIVE_STATES.has(key);
+  const label = active ? STAGES[idx].label : finished ? 'เสร็จแล้ว' : 'ว่าง รอคำสั่งถัดไป';
+  return `<div class="stepper" aria-label="ขั้นตอน: ${escapeHtml(label)}">${STAGES.map((st, i) => {
+    const done = finished || (active && i < idx);
+    const now = active && i === idx;
     const cls = done ? 'is-done' : now ? `is-now${attn ? ' is-attn' : ''}` : '';
     const line = i < STAGES.length - 1 ? `<span class="step-line ${done ? 'is-done' : ''}"></span>` : '';
     return `<span class="step ${cls}" ${now ? 'aria-current="step"' : ''}><span class="step-icon">${icon(done ? 'check' : st.icon, 13)}</span>${st.label}</span>${line}`;
@@ -836,31 +888,128 @@ function noticesHtml(s) {
   return parts.join('');
 }
 
+/** Tabs for a prompt with several questions: which is on screen, which are answered, then submit. */
+function askTabsHtml(s, p) {
+  const n = p.questions.length;
+  const allAnswered = p.questions.every((q) => q.answered);
+  // The terminal's own position: a question, the submit step (n), or unknown (-1) when the
+  // screen matches neither; then tabs can't be stepped to.
+  const at = p.activeQuestion >= 0 ? p.activeQuestion : p.reviewStep || allAnswered ? n : -1;
+  const tab = (i, label, done) => {
+    const isCur = i === at;
+    const mark = done ? icon('check', 12) : i < n ? String(i + 1) : icon('send', 11);
+    return `<button class="ask-tab ${isCur ? 'is-current' : ''} ${done ? 'is-done' : ''}" role="tab" aria-selected="${isCur}"
+        ${at >= 0 && !isCur ? act('askTab', s.id, i, at) : 'disabled'}
+        title="${escapeHtml(i < n ? p.questions[i].question : 'ตรวจคำตอบแล้วส่ง')}"><span class="ask-tab-mark">${mark}</span>${escapeHtml(label)}</button>`;
+  };
+  return `<div class="ask-tabs" role="tablist" aria-label="คำถาม ${n} ข้อ">${p.questions
+    .map((q, i) => tab(i, q.header || `ข้อ ${i + 1}`, q.answered))
+    .join('')}${tab(n, 'ส่งคำตอบ', false)}</div>`;
+}
+
+// Ticks chosen on the dashboard for a multi-select question, sent to the terminal in one go
+// (ticking in the terminal one by one redraws the prompt after every click).
+// Key: room + question text -> Set of the option positions that should end up ticked.
+const askDrafts = new Map();
+
+function askDraftKey(s, p) {
+  return `${s.id}|${p.question}`;
+}
+
+function isDraftable(p, o) {
+  return Boolean(p.multiSelect && o.claude && typeof o.checked === 'boolean');
+}
+
+/** Whether the option shows as ticked: the dashboard's pending choice, else the terminal's. */
+function draftTicked(s, p, o) {
+  const draft = askDrafts.get(askDraftKey(s, p));
+  return draft && isDraftable(p, o) ? draft.has(o.index) : Boolean(o.checked);
+}
+
+function multiSubmitHtml(s, p) {
+  const draft = askDrafts.get(askDraftKey(s, p));
+  const ticked = p.options.filter((o) => isDraftable(p, o) && draftTicked(s, p, o)).length;
+  const pending = Boolean(draft) && p.options.some((o) => isDraftable(p, o) && draft.has(o.index) !== Boolean(o.checked));
+  const label = p.nextIndex ? `ยืนยัน ${ticked} ข้อ แล้วไปต่อ` : `ยืนยัน ${ticked} ข้อ`;
+  return `
+    <div class="ask-submit">
+      <button class="btn btn-attn btn-sm" ${act('submitMulti', s.id)}>${icon('check', 14)}${escapeHtml(label)}</button>
+      <span class="ask-note">${pending ? 'ยังไม่ได้ส่งเข้า terminal กดยืนยันเพื่อส่งทีเดียว' : 'ติ๊กได้หลายข้อ แล้วกดยืนยันทีเดียว'}</span>
+    </div>`;
+}
+
 function askHtml(s) {
   const p = s.interactivePrompt;
+  // Drafts belong to the question on screen now; drop this room's older ones.
+  if (p && p.question) {
+    const keep = askDraftKey(s, p);
+    for (const k of askDrafts.keys()) if (k.startsWith(`${s.id}|`) && k !== keep) askDrafts.delete(k);
+  }
+  const multi = Boolean(p && Array.isArray(p.questions) && p.questions.length > 1);
+  const tabKey = (dir) =>
+    multi
+      ? `<button class="key" ${act('sendKey', s.id, dir)} aria-label="${dir === 'left' ? 'คำถามก่อนหน้า' : 'คำถามถัดไป'}" title="${dir === 'left' ? 'คำถามก่อนหน้า' : 'คำถามถัดไป'}">${dir === 'left' ? '←' : '→'}</button>`
+      : '';
   const keys = `
     <div class="ask-keys">
+      ${tabKey('left')}
       <button class="key" ${act('sendKey', s.id, 'up')} aria-label="เลื่อนขึ้น" title="เลื่อนขึ้น">${icon('arrowUp', 13)}</button>
       <button class="key" ${act('sendKey', s.id, 'down')} aria-label="เลื่อนลง" title="เลื่อนลง">${icon('arrowDown', 13)}</button>
+      ${tabKey('right')}
       <button class="key" ${act('sendKey', s.id, 'enter')} aria-label="Enter" title="Enter">${icon('enter', 13)}</button>
       <button class="key" ${act('sendKey', s.id, 'esc')} title="ยกเลิก (Esc)">Esc</button>
     </div>`;
   if (p && Array.isArray(p.options) && p.options.length) {
     const cur = p.currentIndex || 1;
+    // Screen-read context lines are only shown when Claude's own question text isn't known,
+    // or on the submit step (its warning, e.g. "Some questions are unanswered").
     const context =
-      Array.isArray(p.context) && p.context.length
+      (p.source !== 'claude' || p.reviewStep) && Array.isArray(p.context) && p.context.length
         ? `<div class="ask-context">${p.context.slice(0, 4).map((l) => `<div>${escapeHtml(l)}</div>`).join('')}</div>`
         : '';
+    const chips = [
+      p.header && !multi ? `<span class="ask-chip">${escapeHtml(p.header)}</span>` : '',
+      p.multiSelect ? '<span class="ask-chip">เลือกได้หลายข้อ</span>' : '',
+    ].join('');
+    const cursorOpt = p.options.find((o) => o.index === cur);
+    const preview = cursorOpt && cursorOpt.preview ? `<pre class="ask-preview">${escapeHtml(cursorOpt.preview)}</pre>` : '';
     return `
       <div class="ask" role="group" aria-label="Claude ถามคุณ">
-        <div class="ask-head">${icon('alert', 16)}<div class="ask-q">${escapeHtml(p.question)}</div></div>
+        ${multi ? askTabsHtml(s, p) : ''}
+        <div class="ask-head">${icon('alert', 16)}<div class="ask-q">${escapeHtml(p.question)}${chips ? `<div class="ask-chips">${chips}</div>` : ''}</div></div>
         ${context}
         <div class="ask-options">${p.options.map((o) => {
           const isCur = o.active || o.index === cur;
-          return `<button class="opt ${isCur ? 'is-cursor' : ''}" ${act('chooseOption', s.id, o.index, cur, o.number, o.label)}>
-              <span class="key">${escapeHtml(o.number)}</span><span class="opt-label">${escapeHtml(o.label)}</span>
-              <span class="opt-hint">${isCur ? 'Enter' : 'เลือก'}</span></button>`;
+          const draftable = isDraftable(p, o);
+          const ticked = draftTicked(s, p, o);
+          const changed = draftable && ticked !== Boolean(o.checked);
+          const check =
+            typeof o.checked === 'boolean'
+              ? `<span class="opt-check ${ticked ? 'is-on' : ''} ${changed ? 'is-pending' : ''}" role="img" aria-label="${ticked ? 'เลือกแล้ว' : 'ยังไม่เลือก'}">${icon('check', 12)}</span>`
+              : '';
+          // Claude's multi-select options tick on the dashboard; everything else goes straight to the terminal.
+          const action = draftable ? act('toggleDraft', s.id, o.index) : act('chooseOption', s.id, o.index, cur, o.number, o.label);
+          const hint = draftable ? (ticked ? 'เอาออก' : 'ติ๊ก') : isCur ? 'Enter' : 'เลือก';
+          return `<button class="opt ${isCur && !draftable ? 'is-cursor' : ''} ${draftable && ticked ? 'is-ticked' : ''}" ${action} ${draftable ? `aria-pressed="${ticked}"` : ''}>
+              <span class="key">${escapeHtml(o.number)}</span>${check}
+              <span class="opt-body"><span class="opt-label">${escapeHtml(o.label)}</span>${o.description ? `<span class="opt-desc">${escapeHtml(o.description)}</span>` : ''}</span>
+              <span class="opt-hint">${hint}</span></button>`;
         }).join('')}</div>
+        ${p.multiSelect && p.options.some((o) => isDraftable(p, o)) ? multiSubmitHtml(s, p) : ''}
+        ${preview}
+        ${keys}
+      </div>`;
+  }
+  if (p && Array.isArray(p.questions) && p.questions.length) {
+    // Claude's questions are open but this terminal layout couldn't be read: list them and let
+    // the keys drive the terminal until the screen is recognised again.
+    return `
+      <div class="ask" role="group" aria-label="Claude ถามคุณ">
+        ${multi ? askTabsHtml(s, p) : ''}
+        <div class="ask-head">${icon('alert', 16)}<div class="ask-q">Claude ถามคุณ${multi ? ` ${p.questions.length} ข้อ` : ''}<div class="ask-chips"><span class="ask-chip">ตอบใน terminal หรือใช้ปุ่มด้านล่าง</span></div></div></div>
+        <ol class="ask-list">${p.questions
+          .map((q) => `<li><span class="ask-list-q">${escapeHtml(q.question)}</span><span class="ask-list-o">${q.options.map((o) => escapeHtml(o.label)).join(' · ')}</span></li>`)
+          .join('')}</ol>
         ${keys}
       </div>`;
   }
@@ -896,22 +1045,79 @@ function onOutputScroll(e) {
   });
 }
 
-function syncOutput(s) {
+/* ---------- Reading back ---------- */
+// The live preview carries only a room's latest ~30 lines. Older messages of its session are
+// fetched a page at a time from where that preview starts (`previewFrom`, a byte offset in the
+// room's own transcript) and kept here per room, so they survive updates of the live part.
+const olderMsgs = new Map(); // room id -> { lines, from, anchor, transcript, done, loading }
+
+function olderFor(s) {
+  const st = olderMsgs.get(s.id);
+  if (!st) return null;
+  if (st.transcript !== s.transcriptPath) {
+    olderMsgs.delete(s.id); // the room moved to another session (e.g. /clear): start over
+    return null;
+  }
+  // The live preview moved forward: refill everything between the oldest loaded line and the
+  // new preview start, so nothing falls into the gap.
+  if (Number.isFinite(s.previewFrom) && s.previewFrom !== st.anchor && !st.loading) {
+    const anchor = s.previewFrom;
+    st.loading = true;
+    getJson(`/api/session/conversation?sessionId=${encodeURIComponent(s.id)}&before=${anchor}&since=${st.from}`).then((r) => {
+      st.loading = false;
+      if (r && r.ok) {
+        st.lines = r.lines;
+        st.anchor = anchor;
+      }
+      const current = appState.sessions.find((x) => x.id === s.id);
+      if (current && mountedFocusId === s.id) syncOutput(current, true);
+    });
+  }
+  return st;
+}
+
+async function getJson(url) {
+  try {
+    const res = await apiFetch(url);
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Everything the output shows for a room: loaded older messages, then the live preview. */
+function outputText(s) {
+  const st = olderFor(s);
+  const older = st && st.lines.length ? `${st.lines.join('\n\n')}\n\n` : '';
+  return older + (s.screenPreview || '');
+}
+
+function olderControlHtml(s) {
+  const st = olderMsgs.get(s.id);
+  if (!Number.isFinite(s.previewFrom) || s.previewFrom <= 0) return '';
+  if (st && st.done) return `<div class="output-start">เริ่มต้น session</div>`;
+  return `<div class="output-older"><button class="btn btn-ghost btn-sm" ${act('loadOlder', s.id)} ${st && st.loading ? 'disabled' : ''}>${icon('arrowUp', 14)}${st && st.loading ? 'กำลังโหลด…' : 'โหลดข้อความก่อนหน้า'}</button></div>`;
+}
+
+function syncOutput(s, force = false) {
   const body = $('#f-out');
   if (!body) return;
   body.style.fontSize = `${ui.fontSize}px`;
-  const text = s.screenPreview || '';
+  const text = outputText(s);
+  const control = olderControlHtml(s);
   const mode = ui.mdMode ? 'md' : 'raw';
-  if (body.__text === text && body.__mode === mode) return;
+  if (!force && body.__text === text && body.__mode === mode && body.__control === control) return;
   body.__text = text;
   body.__mode = mode;
+  body.__control = control;
   body.classList.toggle('is-raw', !ui.mdMode);
   if (!text) {
     body.innerHTML = `<div class="output-empty">ยังไม่มีข้อความจากห้องนี้</div>`;
   } else if (ui.mdMode) {
-    body.innerHTML = renderMarkdown(text);
+    body.innerHTML = control + renderMarkdown(text);
   } else {
-    body.textContent = text;
+    body.innerHTML = `${control}<div class="output-raw"></div>`;
+    body.querySelector('.output-raw').textContent = text;
   }
   const saved = scrollState.get(s.id);
   body.scrollTop = !saved || saved.stick ? body.scrollHeight : saved.top;
@@ -920,7 +1126,10 @@ function syncOutput(s) {
 function renderComposer(s) {
   const el = $('#f-composer');
   el.innerHTML = `
+    <div class="attach-tray" id="attach-tray" aria-label="ไฟล์แนบ"></div>
     <div class="composer-box">
+      <button class="attach-btn" id="attach-btn" ${act('pickFiles')} aria-label="แนบไฟล์หรือรูป" title="แนบไฟล์หรือรูป (วางภาพด้วย Ctrl+V หรือลากไฟล์มาวางได้)">${icon('paperclip', 19)}</button>
+      <input type="file" id="attach-input" multiple hidden />
       <label class="sr-only" for="cmd-input">สั่งงานห้องนี้</label>
       <textarea id="cmd-input" rows="1" placeholder="สั่งงานห้องนี้ (Enter ส่ง, Shift+Enter ขึ้นบรรทัดใหม่)"></textarea>
       <button class="send" id="send-btn" ${act('submitCommand')} aria-label="ส่ง" title="ส่ง (Enter)">${icon('send', 18)}</button>
@@ -939,6 +1148,143 @@ function renderComposer(s) {
       Actions.submitCommand();
     }
   });
+  // A screenshot or a copied image/file pasted into the box becomes an attachment.
+  ta.addEventListener('paste', (e) => {
+    const dt = e.clipboardData;
+    const files = dt ? [...dt.files] : [];
+    if (!files.length) return;
+    if (!(dt.getData('text/plain') || '').trim()) e.preventDefault();
+    addAttachments(mountedFocusId, files);
+  });
+  $('#attach-input').addEventListener('change', (e) => {
+    addAttachments(mountedFocusId, [...e.target.files]);
+    e.target.value = '';
+  });
+  // Files dragged from Explorer or a browser onto the composer.
+  const hasFiles = (e) => [...(e.dataTransfer ? e.dataTransfer.types : [])].includes('Files');
+  el.addEventListener('dragover', (e) => {
+    if (!hasFiles(e) || ta.disabled) return;
+    e.preventDefault();
+    el.classList.add('is-drop');
+  });
+  el.addEventListener('dragleave', (e) => {
+    if (!el.contains(e.relatedTarget)) el.classList.remove('is-drop');
+  });
+  el.addEventListener('drop', (e) => {
+    el.classList.remove('is-drop');
+    if (!hasFiles(e) || ta.disabled) return;
+    e.preventDefault();
+    addAttachments(mountedFocusId, [...e.dataTransfer.files]);
+  });
+  renderAttachTray(s.id);
+}
+
+/* ---------- Composer attachments ---------- */
+// Files wait here per room until the message is sent. Each uploads as soon as it is added
+// (the server stores it outside the repository); the message then carries the file paths.
+const attachments = new Map(); // room id -> [{ id, name, size, isImage, status, path, preview, error, done }]
+const MAX_ATTACH_BYTES = 20 * 1024 * 1024;
+const MAX_ATTACH_FILES = 10;
+
+function formatBytes(n) {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
+}
+
+function attachName(file) {
+  // Screenshots arrive from the clipboard as "image.png"; give them a findable name.
+  if (!file.name || /^image\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name)) {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+    return `screenshot-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`;
+  }
+  return file.name;
+}
+
+function addAttachments(sessionId, files) {
+  if (!sessionId || !files.length) return;
+  const list = attachments.get(sessionId) || [];
+  attachments.set(sessionId, list);
+  for (const file of files) {
+    if (list.length >= MAX_ATTACH_FILES) {
+      toast(`แนบได้ครั้งละไม่เกิน ${MAX_ATTACH_FILES} ไฟล์`, 'warn');
+      break;
+    }
+    if (file.size > MAX_ATTACH_BYTES) {
+      toast(`${file.name || 'ไฟล์'} ใหญ่เกิน 20 MB`, 'warn');
+      continue;
+    }
+    if (file.size === 0) continue; // folders and empty files
+    const isImage = /^image\//.test(file.type);
+    const item = {
+      id: `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      name: attachName(file),
+      size: file.size,
+      isImage,
+      status: 'uploading',
+      path: null,
+      error: '',
+      preview: isImage ? URL.createObjectURL(file) : null,
+    };
+    item.done = uploadAttachment(sessionId, item, file);
+    list.push(item);
+  }
+  renderAttachTray(sessionId);
+}
+
+async function uploadAttachment(sessionId, item, file) {
+  try {
+    const res = await apiFetch(
+      `/api/session/attachment?sessionId=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(item.name)}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file }
+    );
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {}
+    if (!res.ok || data.ok === false || !data.path) throw new Error(data.error || `HTTP ${res.status}`);
+    item.status = 'ready';
+    item.path = data.path;
+  } catch (err) {
+    item.status = 'error';
+    item.error = String(err.message || err);
+  }
+  if (mountedFocusId === sessionId) renderAttachTray(sessionId);
+}
+
+function clearAttachments(sessionId) {
+  for (const a of attachments.get(sessionId) || []) if (a.preview) URL.revokeObjectURL(a.preview);
+  attachments.delete(sessionId);
+  if (mountedFocusId === sessionId) renderAttachTray(sessionId);
+}
+
+function renderAttachTray(sessionId) {
+  const tray = $('#attach-tray');
+  if (!tray) return;
+  const list = attachments.get(sessionId) || [];
+  setHTML(
+    tray,
+    list
+      .map((a) => {
+        const sub = a.status === 'uploading' ? 'กำลังอัปโหลด…' : a.status === 'error' ? `อัปโหลดไม่สำเร็จ: ${a.error}` : formatBytes(a.size);
+        return `
+        <div class="attach-chip is-${a.status}" title="${escapeHtml(a.status === 'ready' ? a.path : a.name)}">
+          ${a.preview ? `<img class="attach-thumb" src="${escapeHtml(a.preview)}" alt="" />` : `<span class="attach-icon">${icon('file', 17)}</span>`}
+          <span class="attach-meta"><span class="attach-name">${escapeHtml(a.name)}</span><span class="attach-sub">${escapeHtml(sub)}</span></span>
+          <button class="attach-x" ${act('removeAttachment', sessionId, a.id)} aria-label="เอา ${escapeHtml(a.name)} ออก" title="เอาออก">${icon('x', 13)}</button>
+        </div>`;
+      })
+      .join('')
+  );
+}
+
+/** The message Claude receives: the text, then one absolute path per line for it to open. */
+function messageWithAttachments(text, files) {
+  if (!files.length) return text;
+  const lead = text || (files.every((f) => f.isImage) ? 'ช่วยดูรูปที่แนบมา' : 'ช่วยดูไฟล์ที่แนบมา');
+  return `${lead}\n\nไฟล์แนบ (${files.length}):\n${files.map((f) => `- ${f.path}`).join('\n')}`;
 }
 
 function autosize(ta) {
@@ -967,6 +1313,8 @@ function updateComposerState(s) {
       ? 'ห้องนี้ปิดแล้ว กด "เปิดต่อ" หรือเปิดโหมดพื้นหลังเพื่อสั่งงาน'
       : 'สั่งงานห้องนี้ (Enter ส่ง, Shift+Enter ขึ้นบรรทัดใหม่)';
   }
+  const attachBtn = $('#attach-btn');
+  if (attachBtn) attachBtn.disabled = closed;
   if (send) {
     send.disabled = held || closed;
     send.title = held ? 'พักรอ usage reset อยู่' : closed ? 'ห้องนี้ปิดแล้ว' : 'ส่ง (Enter)';
@@ -1360,14 +1708,16 @@ function renderOverview() {
     .filter(([k]) => k !== 'hold' || counts.hold)
     .map(([k, cls, label]) => `<span class="pill ${counts[k] ? cls : ''}"><b class="num">${counts[k]}</b>${escapeHtml(label)}</span>`)
     .join('');
-  const head = `<div class="ov-top"><h2 class="ov-title">ภาพรวมทุกห้อง</h2><div class="ov-summary" aria-label="สรุปสถานะ">${summary}</div></div>`;
+  const head = `<div class="ov-top"><h2 class="ov-title">ภาพรวมทุกห้อง</h2><div class="ov-summary" aria-label="สรุปสถานะ">${summary}</div></div>${hooksNoticeHtml()}`;
   if (!list.length) {
     setHTML(el, `${head}<div class="empty-list">ไม่มีห้องที่เปิดอยู่</div>`);
     return;
   }
 
-  // Project lanes, densely packed; lanes holding a room that waits on you come first.
+  // Project lanes, densely packed; lanes holding a room that waits on you come first,
+  // then the order the user dragged rooms into.
   const rank = { attn: 0, work: 1, hold: 2, done: 3, idle: 4, closed: 5 };
+  const position = new Map(manualOrderIds().map((id, i) => [id, i]));
   const lanes = new Map();
   for (const s of list) {
     const k = s.project || 'General';
@@ -1376,10 +1726,11 @@ function renderOverview() {
   }
   const ordered = [...lanes.entries()]
     .map(([name, items]) => {
-      items.sort((a, b) => rank[roomState(a).key] - rank[roomState(b).key] || byPinnedThenAge(a, b));
-      return { name, items, best: rank[roomState(items[0]).key] };
+      items.sort((a, b) => rank[roomState(a).key] - rank[roomState(b).key] || byManualOrder(a, b));
+      const first = Math.min(...items.map((s) => position.get(s.id) ?? Infinity));
+      return { name, items, best: rank[roomState(items[0]).key], first };
     })
-    .sort((a, b) => a.best - b.best || a.name.localeCompare(b.name));
+    .sort((a, b) => a.best - b.best || a.first - b.first || a.name.localeCompare(b.name));
   const html = ordered
     .map(
       ({ name, items }) => `
@@ -1625,6 +1976,50 @@ const Actions = {
     if (!r.ok) return toast(`เลือกไม่สำเร็จ: ${r.data.error || r.data.message || r.status}`, 'err');
     toast(cleanMsg(r.data.message) || `เลือก ${label}`, r.data.delivered === false ? 'warn' : 'ok');
   },
+  /** Tick or untick a multi-select option on the dashboard only; nothing is sent yet. */
+  toggleDraft(id, index) {
+    const s = appState.sessions.find((x) => x.id === id);
+    const p = s && s.interactivePrompt;
+    if (!p) return;
+    const key = askDraftKey(s, p);
+    if (!askDrafts.has(key)) {
+      askDrafts.set(key, new Set(p.options.filter((o) => isDraftable(p, o) && o.checked).map((o) => o.index)));
+    }
+    const draft = askDrafts.get(key);
+    if (draft.has(index)) draft.delete(index);
+    else draft.add(index);
+    renderFocus();
+  },
+  /** Send the ticked set: Enter on every option whose tick differs from the terminal, then Next. */
+  async submitMulti(id) {
+    const s = appState.sessions.find((x) => x.id === id);
+    const p = s && s.interactivePrompt;
+    if (!p) return;
+    const key = askDraftKey(s, p);
+    const toggles = p.options
+      .filter((o) => isDraftable(p, o) && draftTicked(s, p, o) !== Boolean(o.checked))
+      .map((o) => o.index);
+    const r = await postJson('/api/session/multi-select', {
+      sessionId: id,
+      toggles,
+      currentIndex: p.currentIndex || 1,
+      nextIndex: p.nextIndex || null,
+    });
+    if (!r.ok || r.data.ok === false) {
+      return toast(cleanMsg(r.data.message || r.data.error) || 'ส่งคำตอบไม่สำเร็จ', 'err');
+    }
+    askDrafts.delete(key);
+    toast(cleanMsg(r.data.message) || 'ส่งคำตอบแล้ว');
+  },
+  /** Move the terminal's question tab from `from` to `to` with ←/→, one step at a time. */
+  async askTab(id, to, from) {
+    const delta = Number(to) - Number(from);
+    const key = delta > 0 ? 'right' : 'left';
+    for (let i = 0; i < Math.abs(delta); i++) {
+      const r = await postJson('/api/session/send-key', { sessionId: id, key });
+      if (!r.ok || r.data.ok === false) return toast(cleanMsg(r.data.message || r.data.error) || 'สลับคำถามไม่สำเร็จ', 'warn');
+    }
+  },
   async sendKey(id, key) {
     const r = await postJson('/api/session/send-key', { sessionId: id, key });
     if (!r.ok) toast(cleanMsg(r.data.message || r.data.error) || 'ส่งปุ่มไม่สำเร็จ', 'warn');
@@ -1642,14 +2037,36 @@ const Actions = {
   async submitCommand() {
     const s = selected();
     const ta = $('#cmd-input');
-    if (!s || !ta || !ta.value.trim()) return;
+    if (!s || !ta) return;
+    const list = attachments.get(s.id) || [];
+    if (!ta.value.trim() && !list.length) return;
+    if (list.some((a) => a.status === 'uploading')) {
+      toast('รออัปโหลดไฟล์ให้เสร็จแล้วจะส่งให้', 'warn');
+      await Promise.all(list.map((a) => a.done));
+    }
+    const failed = list.filter((a) => a.status === 'error');
+    if (failed.length) {
+      return toast(`มี ${failed.length} ไฟล์ที่อัปโหลดไม่สำเร็จ เอาออกแล้วลองแนบใหม่`, 'err');
+    }
     const text = ta.value.trim();
-    const sent = await sendCommand(s.id, text, false);
+    const sent = await sendCommand(s.id, messageWithAttachments(text, list.filter((a) => a.status === 'ready')), false);
     if (sent) {
       ta.value = '';
       drafts.delete(s.id);
       autosize(ta);
+      clearAttachments(s.id);
     }
+  },
+  pickFiles() {
+    const input = $('#attach-input');
+    if (input && !$('#cmd-input').disabled) input.click();
+  },
+  removeAttachment(sessionId, id) {
+    const list = attachments.get(sessionId) || [];
+    const item = list.find((a) => a.id === id);
+    if (item && item.preview) URL.revokeObjectURL(item.preview);
+    attachments.set(sessionId, list.filter((a) => a.id !== id));
+    renderAttachTray(sessionId);
   },
   toggleHeadless() {
     ui.headless = !ui.headless;
@@ -1668,11 +2085,43 @@ const Actions = {
     const body = $('#f-out');
     if (body) body.style.fontSize = `${ui.fontSize}px`;
   },
+  /** Load the page of messages just before what the output already shows. */
+  async loadOlder(id) {
+    const s = appState.sessions.find((x) => x.id === id);
+    if (!s || !Number.isFinite(s.previewFrom)) return;
+    let st = olderFor(s);
+    if (!st) {
+      st = { lines: [], from: s.previewFrom, anchor: s.previewFrom, transcript: s.transcriptPath, done: false, loading: false };
+      olderMsgs.set(id, st);
+    }
+    if (st.loading || st.done) return;
+    st.loading = true;
+    syncOutput(s, true);
+    const r = await getJson(`/api/session/conversation?sessionId=${encodeURIComponent(id)}&before=${st.from}&limit=40`);
+    st.loading = false;
+    if (!r || !r.ok) {
+      syncOutput(s, true);
+      return toast('โหลดข้อความก่อนหน้าไม่สำเร็จ', 'err');
+    }
+    st.lines = [...r.lines, ...st.lines];
+    st.from = r.from;
+    st.done = r.done;
+    // Keep the reader where they were: the new lines appear above.
+    const body = $('#f-out');
+    const prevHeight = body ? body.scrollHeight : 0;
+    const prevTop = body ? body.scrollTop : 0;
+    scrollState.set(id, { top: prevTop, stick: false });
+    syncOutput(s, true);
+    if (body && mountedFocusId === id) {
+      body.scrollTop = prevTop + (body.scrollHeight - prevHeight);
+      scrollState.set(id, { top: body.scrollTop, stick: false });
+    }
+  },
   async copyOutput() {
     const s = selected();
-    if (!s || !s.screenPreview) return;
+    if (!s || !outputText(s)) return;
     try {
-      await navigator.clipboard.writeText(s.screenPreview);
+      await navigator.clipboard.writeText(outputText(s));
       toast('คัดลอกแล้ว');
     } catch {
       toast('คัดลอกไม่สำเร็จ', 'err');
@@ -1716,7 +2165,9 @@ const Actions = {
 
   async togglePin(id, pinned) {
     const r = await postJson('/api/session/update', { sessionId: id, patch: { pinned: Boolean(pinned) } });
-    if (r.ok) toast(pinned ? 'ปักหมุดแล้ว' : 'เลิกปักหมุดแล้ว');
+    if (!r.ok) return;
+    if (pinned) await saveRoomMove(id); // pinning puts the room at the top of its group
+    toast(pinned ? 'ปักหมุดแล้ว' : 'เลิกปักหมุดแล้ว');
   },
   openEdit(id) {
     closePopover();
@@ -1768,7 +2219,8 @@ const Actions = {
     if (!r.ok) return toast(`ติดตั้ง hooks ไม่สำเร็จ: ${r.data.error || r.status}`, 'err');
     appState.hooks = r.data;
     renderSidebar();
-    toast('เชื่อม Claude Code hooks แล้ว');
+    renderList();
+    toast('เชื่อม Claude Code hooks แล้ว ห้องที่เปิดไว้ก่อนหน้านี้ต้องเปิดใหม่ถึงจะส่งสถานะ');
   },
   async installStatusline() {
     const r = await postJson('/api/statusline/install', {});
@@ -1829,6 +2281,13 @@ document.addEventListener('click', (e) => {
   runAction(el, 'data-act');
 });
 
+// A file dropped outside the composer would make the browser open it and leave the dashboard.
+for (const type of ['dragover', 'drop']) {
+  window.addEventListener(type, (e) => {
+    if (e.dataTransfer && [...e.dataTransfer.types].includes('Files') && !e.defaultPrevented) e.preventDefault();
+  });
+}
+
 document.addEventListener('change', (e) => {
   const el = e.target.closest('[data-change-act]');
   if (el) runAction(el, 'data-change-act', [el.value]);
@@ -1840,10 +2299,19 @@ function isTyping(target) {
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (drag.active) return endDrag(false);
     if (popoverKind) return closePopover();
     if (ide.open) return Actions.closeIde();
     if (ui.expanded) return Actions.toggleExpand();
     if (ui.panel && !isTyping(e.target)) return Actions.togglePanel(ui.panel);
+    return;
+  }
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+    const card = typeof e.target.closest === 'function' && e.target.closest('.rcard[data-group]');
+    if (card) {
+      e.preventDefault();
+      nudgeRoom(card, e.key === 'ArrowUp' ? -1 : 1);
+    }
     return;
   }
   if (isTyping(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1869,6 +2337,211 @@ document.addEventListener('keydown', (e) => {
     }
   }
 });
+
+/* ---------- Drag to reorder rooms (within a status group) ---------- */
+// Mouse: press and move. Touch: hold ~0.3 s, then move (a quick swipe still scrolls).
+// Keyboard: Alt+↑ / Alt+↓ on a focused card.
+const drag = { pending: null, active: null, dirty: false, raf: 0, suppressClickUntil: 0 };
+const DRAG_SLOP_PX = 6;
+const TOUCH_SLOP_PX = 8;
+const LONG_PRESS_MS = 320;
+const reduceMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function groupCards(card) {
+  return [...card.parentElement.querySelectorAll(`.rcard[data-group="${CSS.escape(card.dataset.group)}"]`)];
+}
+
+function scrollParent(el) {
+  for (let n = el.parentElement; n; n = n.parentElement) {
+    const oy = getComputedStyle(n).overflowY;
+    if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight) return n;
+  }
+  return document.scrollingElement;
+}
+
+/** Put `id` just before `beforeId` (or just after `afterId`) in the saved order, then store it. */
+async function saveRoomMove(id, { beforeId = null, afterId = null } = {}) {
+  const order = manualOrderIds().filter((x) => x !== id);
+  let at = beforeId ? order.indexOf(beforeId) : afterId ? order.indexOf(afterId) + 1 : 0;
+  if (at < 0) at = order.length;
+  order.splice(at, 0, id);
+  const byId = new Map(appState.sessions.map((s) => [s.id, s]));
+  order.forEach((x, i) => {
+    const s = byId.get(x);
+    if (s) s.sortOrder = i;
+  });
+  renderAll();
+  const r = await postJson('/api/session/update', { action: 'reorder', order });
+  if (!r.ok) toast(`บันทึกลำดับไม่สำเร็จ: ${r.data.error || r.status}`, 'err');
+}
+
+function startDrag() {
+  const p = drag.pending;
+  drag.pending = null;
+  if (!p || !p.card.isConnected) return;
+  clearTimeout(p.timer);
+  const rect = p.card.getBoundingClientRect();
+  drag.active = {
+    card: p.card,
+    id: p.card.dataset.id,
+    pointerId: p.pointerId,
+    y: p.lastY,
+    grab: p.startY - rect.top,
+    dy: 0,
+    startIndex: groupCards(p.card).indexOf(p.card),
+    scroller: scrollParent(p.card),
+  };
+  try {
+    p.card.setPointerCapture(p.pointerId);
+  } catch {
+    // capture is best effort; window listeners still follow the pointer
+  }
+  p.card.classList.add('is-dragging');
+  document.body.classList.add('is-reordering');
+  drag.raf = requestAnimationFrame(dragFrame);
+}
+
+/** Keep the held card under the pointer and move it past group siblings whose middle it crosses. */
+function followPointer() {
+  const d = drag.active;
+  if (!d) return;
+  const { card } = d;
+  const cards = groupCards(card);
+  const layoutTop = card.getBoundingClientRect().top - d.dy;
+  // The card can't leave its status group, so it stays within the group's span (a little give).
+  const give = 3;
+  const minDy = Math.min(...cards.map((c) => c.offsetTop)) - card.offsetTop - give;
+  const maxDy = Math.max(...cards.map((c) => c.offsetTop + c.offsetHeight)) - card.offsetHeight - card.offsetTop + give;
+  d.dy = Math.min(maxDy, Math.max(minDy, d.y - d.grab - layoutTop));
+  card.style.translate = `0 ${d.dy}px`;
+
+  const sibs = cards.filter((c) => c !== card);
+  const center = card.offsetTop + d.dy + card.offsetHeight / 2;
+  const before = sibs.find((s) => center < s.offsetTop + s.offsetHeight / 2) || null;
+  if (before === (cards[cards.indexOf(card) + 1] || null)) return;
+
+  const oldTops = new Map(sibs.map((s) => [s, s.offsetTop]));
+  const oldTop = card.offsetTop;
+  if (before) before.before(card);
+  else sibs[sibs.length - 1].after(card);
+  d.dy -= card.offsetTop - oldTop;
+  card.style.translate = `0 ${d.dy}px`;
+  if (reduceMotion()) return;
+  for (const s of sibs) {
+    const delta = oldTops.get(s) - s.offsetTop;
+    if (delta) s.animate([{ translate: `0 ${delta}px` }, { translate: '0 0' }], { duration: 170, easing: 'cubic-bezier(0.2, 0.7, 0.3, 1)' });
+  }
+}
+
+/** Auto-scroll near the list's edges while a card is held. */
+function dragFrame() {
+  const d = drag.active;
+  if (!d) return;
+  const sc = d.scroller;
+  const box = sc === document.scrollingElement ? { top: 0, bottom: window.innerHeight } : sc.getBoundingClientRect();
+  const edge = 56;
+  let step = 0;
+  if (d.y < box.top + edge) step = -Math.min(16, Math.ceil((box.top + edge - d.y) / 4));
+  else if (d.y > box.bottom - edge) step = Math.min(16, Math.ceil((d.y - (box.bottom - edge)) / 4));
+  if (step) sc.scrollTop += step;
+  followPointer();
+  drag.raf = requestAnimationFrame(dragFrame);
+}
+
+function cancelPending() {
+  if (drag.pending) clearTimeout(drag.pending.timer);
+  drag.pending = null;
+}
+
+function endDrag(commit) {
+  const d = drag.active;
+  if (!d) return;
+  cancelAnimationFrame(drag.raf);
+  drag.active = null;
+  drag.suppressClickUntil = performance.now() + 400;
+  d.card.classList.remove('is-dragging');
+  d.card.style.translate = '';
+  document.body.classList.remove('is-reordering');
+  const cards = groupCards(d.card);
+  const idx = cards.indexOf(d.card);
+  if (!commit || idx === d.startIndex) {
+    drag.dirty = false;
+    d.card.parentElement.__html = null; // put the DOM back exactly as rendered
+    renderList();
+    return;
+  }
+  const beforeId = cards[idx + 1] ? cards[idx + 1].dataset.id : null;
+  const afterId = beforeId ? null : cards[idx - 1] ? cards[idx - 1].dataset.id : null;
+  drag.dirty = false;
+  saveRoomMove(d.id, { beforeId, afterId });
+}
+
+function nudgeRoom(card, dir) {
+  const cards = groupCards(card);
+  const target = cards[cards.indexOf(card) + dir];
+  if (!target) return;
+  const id = card.dataset.id;
+  saveRoomMove(id, dir < 0 ? { beforeId: target.dataset.id } : { afterId: target.dataset.id });
+  const again = document.querySelector(`.rcard[data-id="${CSS.escape(id)}"]`);
+  if (again) {
+    again.focus({ preventScroll: true });
+    again.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+const railList = $('#rail-list');
+railList.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || drag.active) return;
+  const card = e.target.closest('.rcard[data-group]');
+  if (!card) return;
+  cancelPending();
+  drag.pending = {
+    card,
+    pointerId: e.pointerId,
+    startX: e.clientX,
+    startY: e.clientY,
+    lastY: e.clientY,
+    touch: e.pointerType !== 'mouse',
+    timer: 0,
+  };
+  if (drag.pending.touch) drag.pending.timer = setTimeout(startDrag, LONG_PRESS_MS);
+});
+window.addEventListener('pointermove', (e) => {
+  const p = drag.pending;
+  if (p && e.pointerId === p.pointerId) {
+    p.lastY = e.clientY;
+    const moved = Math.hypot(e.clientX - p.startX, e.clientY - p.startY);
+    if (p.touch && moved > TOUCH_SLOP_PX) cancelPending(); // a swipe: let the list scroll
+    else if (!p.touch && moved > DRAG_SLOP_PX) startDrag();
+    return;
+  }
+  if (drag.active && e.pointerId === drag.active.pointerId) {
+    drag.active.y = e.clientY;
+    followPointer();
+  }
+});
+window.addEventListener('pointerup', (e) => {
+  cancelPending();
+  if (drag.active && e.pointerId === drag.active.pointerId) endDrag(true);
+});
+window.addEventListener('pointercancel', () => {
+  cancelPending();
+  endDrag(false);
+});
+// Once a touch drag has started, stop the page from scrolling under the finger.
+railList.addEventListener('touchmove', (e) => {
+  if (drag.active) e.preventDefault();
+}, { passive: false });
+railList.addEventListener('contextmenu', (e) => {
+  if (drag.pending || drag.active) e.preventDefault();
+});
+// The click that ends a drag must not also open the room.
+railList.addEventListener('click', (e) => {
+  if (performance.now() < drag.suppressClickUntil) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+}, true);
 
 $('#search-input').addEventListener('input', (e) => {
   ui.search = e.target.value || '';

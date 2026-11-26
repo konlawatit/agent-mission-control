@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFile, execFileSync } = require('child_process');
+const { sanitizeQuestions } = require('./ask-prompt');
 
 const GIT_CACHE_TTL_MS = 5000;
 const TRANSCRIPT_LIST_TTL_MS = 2000;
@@ -311,33 +312,99 @@ function estimateClaudeCostUsd(modelName, usage) {
   return Math.round(cost * 10000) / 10000;
 }
 
+/**
+ * The folder name Claude Code keeps a working directory's transcripts under: every character
+ * that is not a letter or digit becomes "-" (C:\repo\app\.wt\x -> C--repo-app--wt-x).
+ */
+function encodeProjectDir(cwd) {
+  return String(cwd || '')
+    .split('>')[0]
+    .trim()
+    .replace(/[\\\/]+$/, '')
+    .replace(/[^A-Za-z0-9]/g, '-');
+}
+
+/**
+ * Where a Claude session was started, from its transcript's folder: the nearest ancestor of
+ * `cwd` (the hook's current directory, which follows Bash `cd`) whose encoding names that folder.
+ */
+function launchCwdFor(cwd, transcriptPath) {
+  if (!cwd || !transcriptPath) return null;
+  const projectDir = path.basename(path.dirname(String(transcriptPath))).toLowerCase();
+  let dir = String(cwd).replace(/[\\\/]+$/, '');
+  for (let i = 0; i < 40 && dir; i++) {
+    if (encodeProjectDir(dir).toLowerCase() === projectDir) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+const entrypointCache = new Map();
+
+/** How a transcript's session was started ("cli" in a terminal, "sdk-cli" for `claude -p`, "sdk-ts"/"sdk-py" for the SDK). */
+function transcriptEntrypoint(transcriptPath) {
+  if (!transcriptPath) return null;
+  const key = String(transcriptPath);
+  if (entrypointCache.has(key)) return entrypointCache.get(key);
+  let found = null;
+  try {
+    const fd = fs.openSync(key, 'r');
+    const buf = Buffer.alloc(64 * 1024);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    fs.closeSync(fd);
+    for (const line of buf.toString('utf8', 0, n).split('\n')) {
+      const m = line.match(/"entrypoint"\s*:\s*"([^"]+)"/);
+      if (m) {
+        found = m[1];
+        break;
+      }
+    }
+  } catch {
+    return null; // not written yet; ask again next time
+  }
+  if (found) {
+    entrypointCache.set(key, found);
+    boundCache(entrypointCache);
+  }
+  return found;
+}
+
+/** A session started by a script or tool (`claude -p`, the Agent SDK), not by a person in a terminal. */
+function isAutomatedEntrypoint(entrypoint) {
+  return /^sdk-/i.test(String(entrypoint || ''));
+}
+
+/** The transcript file of a Claude session id, wherever its project folder is. */
+function findTranscriptById(sessionId) {
+  if (!/^[0-9a-f-]{36}$/i.test(String(sessionId || ''))) return null;
+  try {
+    const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+    for (const d of fs.readdirSync(projectsDir, { withFileTypes: true })) {
+      if (!d.isDirectory()) continue;
+      const file = path.join(projectsDir, d.name, `${sessionId}.jsonl`);
+      if (fs.existsSync(file)) return file;
+    }
+  } catch {}
+  return null;
+}
+
 function scanTranscriptsForCwd(cwd) {
   if (!cwd) return [];
   try {
     const projectsDir = path.join(os.homedir(), '.claude', 'projects');
     if (!fs.existsSync(projectsDir)) return [];
 
-    const normCwd = String(cwd)
-      .split('>')[0]
-      .trim()
-      .replace(/[\\\/]+$/, '');
-    const expectedSlug = normCwd.replace(/[:\\\/\s_]+/g, '-').toLowerCase();
-    const folderBase = path
-      .basename(normCwd)
-      .replace(/[\s_]+/g, '-')
-      .toLowerCase();
-
+    // Only this folder's own transcripts: a loose "name contains" match also pulled in sibling
+    // and nested folders (e2e-forge matched e2e-forge--worktrees-partner) and mixed sessions.
+    const expectedSlug = encodeProjectDir(cwd).toLowerCase();
     const dirs = fs.readdirSync(projectsDir, { withFileTypes: true });
     const matchedFiles = [];
 
     for (const d of dirs) {
       if (!d.isDirectory()) continue;
-      const dNameLower = d.name.toLowerCase();
-      if (
-        dNameLower === expectedSlug ||
-        dNameLower.endsWith(folderBase) ||
-        dNameLower.includes(folderBase)
-      ) {
+      if (d.name.toLowerCase() === expectedSlug) {
         const fullDir = path.join(projectsDir, d.name);
         const files = fs
           .readdirSync(fullDir)
@@ -552,6 +619,251 @@ function getContextWindowTokens(modelName) {
   return 1000000;
 }
 
+const TAIL_CHUNK_BYTES = 256 * 1024;
+const TAIL_MAX_BYTES = 4 * 1024 * 1024;
+const TAIL_MIN_LINES = 30; // the preview shows the last 30 conversation lines
+const NEWLINE = 0x0a;
+
+function isHumanPromptText(entry, text) {
+  if (entry.isMeta || entry.isCompactSummary || entry.isVisibleInTranscriptOnly) return false;
+  const clean = String(text || '').trim();
+  return Boolean(clean) && !clean.startsWith('<');
+}
+
+/** How many preview lines an entry adds, and whether it starts a turn. */
+function countShown(entry) {
+  const msg = entry.message || entry;
+  const role = msg.role || entry.type;
+  const content = msg.content;
+  let lines = 0;
+  let prompts = 0;
+  if (role === 'user') {
+    const texts =
+      typeof content === 'string'
+        ? [content]
+        : Array.isArray(content)
+        ? content.filter((b) => b.type === 'text').map((b) => b.text)
+        : [];
+    for (const t of texts) {
+      if (isHumanPromptText(entry, t)) {
+        lines += 1;
+        prompts += 1;
+      }
+    }
+  } else if (role === 'assistant' && Array.isArray(content)) {
+    for (const b of content) {
+      if ((b.type === 'text' && b.text && b.text.trim()) || (b.type === 'tool_use' && b.name)) lines += 1;
+    }
+  }
+  return { lines, prompts };
+}
+
+/** A transcript line as a conversation entry, or null for bookkeeping and broken lines. */
+function parseConversationLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('{')) return null;
+  let entry;
+  try {
+    entry = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  // Claude Code also stores request copies (`api-request-blob`, which carry a `message`),
+  // tool shapes and attachments in the same file. Only real messages are conversation,
+  // plus the marker written when a turn ends.
+  if (isTurnEndMarker(entry)) return entry;
+  if (typeof entry.type === 'string' && entry.type !== 'user' && entry.type !== 'assistant') {
+    return null;
+  }
+  return entry;
+}
+
+function isTurnEndMarker(entry) {
+  return entry.type === 'system' && entry.subtype === 'turn_duration';
+}
+
+const INTERRUPTED_RE = /^\[Request interrupted by user/;
+
+/**
+ * The AskUserQuestion call still waiting for an answer after `entry`, given the one before.
+ * Its input has every question in full, which the terminal screen cannot show (see ask-prompt).
+ */
+function trackPendingAsk(pending, entry) {
+  if (isTurnEndMarker(entry)) return null;
+  const msg = entry.message || entry;
+  const content = Array.isArray(msg.content) ? msg.content : [];
+  const role = msg.role || entry.type;
+  if (role === 'assistant') {
+    for (const b of content) {
+      if (b.type === 'tool_use' && b.name === 'AskUserQuestion') {
+        const questions = sanitizeQuestions(b.input && b.input.questions);
+        if (questions) pending = { id: String(b.id || ''), questions, at: entry.timestamp || null };
+      }
+    }
+  } else if (role === 'user' && pending) {
+    if (content.some((b) => b.type === 'tool_result' && b.tool_use_id === pending.id)) return null;
+  }
+  return pending;
+}
+
+/**
+ * Whether the turn is still running after this entry ('running'), over ('done'), or unchanged (null).
+ * Lets the dashboard notice a finished turn when no Stop hook reports it.
+ */
+function turnStateAfter(entry) {
+  if (isTurnEndMarker(entry)) return 'done';
+  const msg = entry.message || entry;
+  const role = msg.role || entry.type;
+  if (role === 'assistant') {
+    return msg.stop_reason === 'end_turn' ? 'done' : 'running';
+  }
+  if (role !== 'user' || entry.isMeta || entry.isCompactSummary) return null;
+  const content = msg.content;
+  const texts =
+    typeof content === 'string'
+      ? [content]
+      : Array.isArray(content)
+      ? content.filter((b) => b.type === 'text').map((b) => String(b.text || ''))
+      : [];
+  if (texts.some((t) => INTERRUPTED_RE.test(t.trim()))) return 'done';
+  return 'running'; // a new prompt, or a tool result Claude still has to answer
+}
+
+/**
+ * Conversation entries ending before byte `endOffset`, oldest first, read backwards in chunks
+ * until `enough({ lines, prompts })` says so, the start of the file, or `maxBytes`. Each entry
+ * carries its byte offset (`entryOffset`), which is how the dashboard pages back through a session.
+ * With `sinceOffset`, reading stops at that offset (entries before it are left out).
+ */
+function readEntriesBackward(filePath, endOffset, { enough = () => false, maxBytes = TAIL_MAX_BYTES, sinceOffset = null } = {}) {
+  const batches = [];
+  let lines = 0;
+  let prompts = 0;
+  let end = endOffset;
+  let carry = Buffer.alloc(0); // start of a line whose beginning is in an earlier chunk
+  let reachedStart = false;
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    while (end > 0 && endOffset - end < maxBytes && !enough({ lines, prompts })) {
+      if (sinceOffset !== null && end <= sinceOffset) break;
+      const start = Math.max(0, end - TAIL_CHUNK_BYTES);
+      const chunk = Buffer.alloc(end - start);
+      fs.readSync(fd, chunk, 0, chunk.length, start);
+      end = start;
+      let buf = carry.length ? Buffer.concat([chunk, carry]) : chunk;
+      let bufOffset = start;
+      if (start > 0) {
+        // Bytes before the first newline may continue further back; keep them for the next chunk.
+        // Splitting on the newline byte never cuts a UTF-8 character.
+        const firstNewline = buf.indexOf(NEWLINE);
+        if (firstNewline === -1) {
+          carry = buf;
+          continue;
+        }
+        carry = buf.subarray(0, firstNewline);
+        buf = buf.subarray(firstNewline + 1);
+        bufOffset = start + firstNewline + 1;
+      } else {
+        carry = Buffer.alloc(0);
+        reachedStart = true;
+      }
+      const batch = [];
+      let pos = 0;
+      while (pos < buf.length) {
+        let nl = buf.indexOf(NEWLINE, pos);
+        if (nl === -1) nl = buf.length;
+        const lineOffset = bufOffset + pos;
+        const entry = sinceOffset !== null && lineOffset < sinceOffset ? null : parseConversationLine(buf.toString('utf8', pos, nl));
+        pos = nl + 1;
+        if (!entry) continue;
+        Object.defineProperty(entry, 'entryOffset', { value: lineOffset, enumerable: false });
+        batch.push(entry);
+        const shown = countShown(entry);
+        lines += shown.lines;
+        prompts += shown.prompts;
+      }
+      batches.push(batch);
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  const entries = batches.reverse().flat();
+  const atStart = reachedStart || (end === 0 && carry.length === 0);
+  // Where reading back should continue: the end of the line cut at the last chunk's start.
+  return { entries, reachedStart: atStart, resumeAt: atStart ? 0 : end + carry.length };
+}
+
+/**
+ * The newest conversation entries of a transcript, oldest first: until the preview is full and
+ * the latest human prompt is in, or TAIL_MAX_BYTES is read. A fixed byte window can hold almost
+ * no messages once large bookkeeping records sit at the end of the file.
+ */
+function readConversationTail(filePath, size) {
+  return readEntriesBackward(filePath, size, {
+    enough: ({ lines, prompts }) => lines >= TAIL_MIN_LINES && prompts >= 1,
+  }).entries;
+}
+
+/** What the output panel shows for one transcript entry, in the same form as the live preview. */
+function displayLinesFor(entry) {
+  const msg = entry.message || entry;
+  const role = msg.role || entry.type;
+  const content = msg.content;
+  const out = [];
+  if (role === 'user') {
+    const texts =
+      typeof content === 'string'
+        ? [content]
+        : Array.isArray(content)
+        ? content.filter((b) => b.type === 'text' && b.text).map((b) => b.text)
+        : [];
+    for (const t of texts) if (isHumanPromptText(entry, t)) out.push(`🧑 คุณ: ${t.trim()}`);
+  } else if (role === 'assistant' && Array.isArray(content)) {
+    for (const b of content) {
+      if (b.type === 'text' && b.text && b.text.trim()) out.push(`🤖 Claude:\n${b.text.trim()}`);
+      if (b.type === 'tool_use' && b.name) {
+        const input = b.input || {};
+        const what = input.command || input.file_path || input.path || input.description || input.pattern || '';
+        out.push(`🔧 [Tool: ${b.name}] ${summarizeText(what, 100)}`);
+      }
+    }
+  }
+  return out;
+}
+
+const PAGE_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * An older page of a session's conversation, for reading back past the live preview: the
+ * display lines of entries before byte `before` (at least `limit` lines, whole entries), or,
+ * with `since`, every entry from `since` up to `before`. `from` is where the next page ends.
+ */
+function readConversationPage(filePath, { before, since = null, limit = 40 }) {
+  const size = fs.statSync(filePath).size;
+  const end = Math.max(0, Math.min(Number.isFinite(before) ? before : size, size));
+  const { entries, reachedStart, resumeAt } = readEntriesBackward(filePath, end, {
+    enough: since === null ? ({ lines }) => lines >= limit : () => false,
+    maxBytes: PAGE_MAX_BYTES,
+    sinceOffset: since,
+  });
+  // A chunk can hold far more than a page: keep only the newest whole entries that make `limit` lines.
+  let first = 0;
+  if (since === null) {
+    let count = 0;
+    first = entries.length;
+    while (first > 0 && count < limit) {
+      first -= 1;
+      count += displayLinesFor(entries[first]).length;
+    }
+  }
+  const page = entries.slice(first);
+  const lines = page.flatMap(displayLinesFor);
+  const from = page.length ? page[0].entryOffset : since !== null ? since : resumeAt;
+  // Everything older has been read once the start of the file was reached and nothing was left out.
+  const restHasLines = entries.slice(0, first).some((e) => displayLinesFor(e).length);
+  return { lines, from, done: since === null && reachedStart && !restHasLines };
+}
+
 function parseTranscriptTailUncached(transcriptPath, cwd = null) {
   const allTranscripts = findTranscriptsForCwd(cwd);
   const targetPath =
@@ -598,32 +910,24 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
     };
 
     const seenMessageIds = new Set();
+    let turnState = null;
+    let turnStateAt = null;
+    let pendingAsk = null;
 
     for (const filePath of filesToRead) {
       if (!fs.existsSync(filePath)) continue;
       const stat = fs.statSync(filePath);
-      const maxBytes = 256 * 1024;
-      const start = Math.max(0, stat.size - maxBytes);
-      const length = stat.size - start;
-      const buffer = Buffer.alloc(length);
 
-      const fd = fs.openSync(filePath, 'r');
-      fs.readSync(fd, buffer, 0, length, start);
-      fs.closeSync(fd);
-
-      const raw = buffer.toString('utf8');
-      const lines = raw
-        .split(/\r?\n/)
-        .filter((line) => line.trim().startsWith('{'));
-
-      for (const line of lines) {
-        let entry;
-        try {
-          entry = JSON.parse(line);
-        } catch {
-          continue;
+      for (const entry of readConversationTail(filePath, stat.size)) {
+        if (filePath === targetPath) {
+          const next = turnStateAfter(entry);
+          if (next) {
+            turnState = next;
+            turnStateAt = entry.timestamp || new Date(stat.mtimeMs).toISOString();
+          }
+          pendingAsk = trackPendingAsk(pendingAsk, entry);
         }
-
+        if (isTurnEndMarker(entry)) continue;
         const msg = entry.message || entry;
         const role = msg.role || entry.type;
         const content = msg.content;
@@ -667,10 +971,13 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
         }
 
         const recordUserPrompt = (text) => {
+          // Skill bodies, image notes and compaction summaries are written as user messages
+          // by the harness; they are not the human's prompt.
+          if (!isHumanPromptText(entry, text)) return;
           const clean = text.trim();
-          if (!clean || clean.startsWith('<')) return;
           lastUserText = clean;
-          conversationLines.push(`🧑 คุณ: ${clean}`);
+          // Each preview line remembers its entry (file + byte offset) for paging back.
+          conversationLines.push({ t: `🧑 คุณ: ${clean}`, o: entry.entryOffset, f: filePath });
 
           if (currentTurn && (currentTurn.tldr || currentTurn.tools.length > 0)) {
             turns.push(currentTurn);
@@ -718,7 +1025,7 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
               const clean = block.text.trim();
               lastAssistantFullText = clean;
               lastAssistantText = clean;
-              conversationLines.push(`🤖 Claude:\n${clean}`);
+              conversationLines.push({ t: `🤖 Claude:\n${clean}`, o: entry.entryOffset, f: filePath });
               if (currentTurn) {
                 currentTurn.tldr = summarizeText(clean, 240);
                 currentTurn.timestamp = ts;
@@ -739,9 +1046,11 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
                     ? ': ' + summarizeText(path.basename(String(fileOrCmd)), 35)
                     : ''
                 }`;
-                conversationLines.push(
-                  `🔧 [Tool: ${block.name}] ${summarizeText(fileOrCmd, 100)}`
-                );
+                conversationLines.push({
+                  t: `🔧 [Tool: ${block.name}] ${summarizeText(fileOrCmd, 100)}`,
+                  o: entry.entryOffset,
+                  f: filePath,
+                });
                 if (currentTurn && !currentTurn.tools.includes(badge)) {
                   currentTurn.tools.push(badge);
                 }
@@ -822,7 +1131,22 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
       tokenUsage
     );
 
-    const recentLog = conversationLines.slice(-30).join('\n\n');
+    // The live preview: the last 30 lines, widened to start on a whole entry so that paging back
+    // from `previewFrom` (the byte offset of its first entry) neither repeats nor skips a line.
+    let first = Math.max(0, conversationLines.length - 30);
+    while (
+      first > 0 &&
+      conversationLines[first - 1].f === conversationLines[first].f &&
+      conversationLines[first - 1].o === conversationLines[first].o
+    ) {
+      first -= 1;
+    }
+    const previewLines = conversationLines.slice(first);
+    const recentLog = previewLines.map((l) => l.t).join('\n\n');
+    const previewFrom =
+      previewLines.length && previewLines[0].f === targetPath && Number.isFinite(previewLines[0].o)
+        ? previewLines[0].o
+        : null;
 
     return {
       transcriptPath: targetPath,
@@ -834,6 +1158,10 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
         : null,
       lastUserText: lastUserText ? summarizeText(lastUserText, 160) : null,
       utf8Preview: recentLog || lastAssistantFullText || null,
+      previewFrom,
+      turnState,
+      turnStateAt,
+      pendingAsk,
       turnHistory: turns.reverse().slice(0, 20),
       subAgents: Array.from(subAgentsMap.values()),
     };
@@ -943,6 +1271,12 @@ module.exports = {
   getContextWindowTokens,
   findTranscriptsForCwd,
   findLatestTranscriptForCwd,
+  findTranscriptById,
+  readConversationPage,
+  encodeProjectDir,
+  launchCwdFor,
+  transcriptEntrypoint,
+  isAutomatedEntrypoint,
   parseTranscriptTail,
   parseTranscriptTailUncached,
   clearCaches,

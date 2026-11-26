@@ -139,6 +139,77 @@ async function testHttpLayer(tempDir) {
     assert.notStrictEqual(updated.pid, 4242, 'pid must not be patchable');
     assert.notStrictEqual(updated.cwd, 'C:\\Windows', 'cwd must not be patchable');
 
+    // Manual room order: stored per room, only from a list of known room ids.
+    for (const d of ['order-a', 'order-b']) fs.mkdirSync(path.join(tempDir, d), { recursive: true });
+    const roomA = store.getOrCreateSession('order-a', { cwd: path.join(tempDir, 'order-a') }).id;
+    const roomB = store.getOrCreateSession('order-b', { cwd: path.join(tempDir, 'order-b') }).id;
+    res = await request(port, {
+      method: 'POST',
+      urlPath: '/api/session/update',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ action: 'reorder', order: [roomB, 'no-such-room', roomA] }),
+    });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(store.sessions.get(roomB).sortOrder, 0, 'first id gets position 0');
+    assert.strictEqual(store.sessions.get(roomA).sortOrder, 1, 'unknown ids do not take a position');
+    for (const bad of [{ order: 'x' }, { order: [1, 2] }, { order: new Array(1001).fill('a') }]) {
+      res = await request(port, {
+        method: 'POST',
+        urlPath: '/api/session/update',
+        headers: jsonHeaders(),
+        body: JSON.stringify({ action: 'reorder', ...bad }),
+      });
+      assert.strictEqual(res.status, 400, `reorder rejects ${JSON.stringify(bad).slice(0, 40)}`);
+    }
+    assert.strictEqual(store.sessions.get(roomB).sortOrder, 0, 'a rejected reorder changes nothing');
+    res = await request(port, {
+      method: 'POST',
+      urlPath: '/api/session/update',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ sessionId: roomA, patch: { sortOrder: -5 } }),
+    });
+    assert.strictEqual(store.sessions.get(roomA).sortOrder, 1, 'sortOrder is not a free-form patch field');
+    // Multi-select answers arrive once, validated, and drive the terminal in position order.
+    const keyCalls = [];
+    const realScanner = bridge.consoleScanner;
+    bridge.consoleScanner = {
+      selectOption: async (pid, cur, target) => {
+        keyCalls.push([cur, target]);
+        return { ok: true };
+      },
+    };
+    store.sessions.get(roomA).pid = 4242;
+    for (const bad of [
+      { toggles: 'x', currentIndex: 1 },
+      { toggles: [0], currentIndex: 1 },
+      { toggles: [2, 2], currentIndex: 1 },
+      { toggles: [1], currentIndex: 99 },
+      { toggles: [1], currentIndex: 1, nextIndex: 'next' },
+    ]) {
+      res = await request(port, {
+        method: 'POST',
+        urlPath: '/api/session/multi-select',
+        headers: jsonHeaders(),
+        body: JSON.stringify({ sessionId: roomA, ...bad }),
+      });
+      assert.strictEqual(res.status, 400, `multi-select rejects ${JSON.stringify(bad)}`);
+    }
+    assert.strictEqual(keyCalls.length, 0, 'nothing reaches the terminal from a rejected answer');
+    res = await request(port, {
+      method: 'POST',
+      urlPath: '/api/session/multi-select',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ sessionId: roomA, toggles: [4, 1], currentIndex: 3, nextIndex: 6 }),
+    });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.json.delivered, true);
+    assert.deepStrictEqual(keyCalls, [[3, 1], [1, 4], [4, 6]], 'toggles top-down, then Next');
+    bridge.consoleScanner = realScanner;
+
+    store.flush();
+    const reloaded = new StateStore({ dataDir: tempDir });
+    assert.strictEqual(reloaded.sessions.get(roomB).sortOrder, 0, 'the order survives a restart');
+
     // The terminal launcher never receives a client-supplied command line.
     let launcherOptions = null;
     bridge.openTerminalTab = async (id, opts) => {

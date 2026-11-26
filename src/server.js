@@ -9,6 +9,9 @@ const { UsageGuard } = require('./usage-guard');
 const {
   getWorkspaceChangedFiles,
   getWorkspaceFileDetail,
+  isAutomatedEntrypoint,
+  transcriptEntrypoint,
+  readConversationPage,
 } = require('./transcript-parser');
 const {
   checkHooksStatus,
@@ -24,6 +27,7 @@ const {
   isAllowedOrigin,
   tokensEqual,
 } = require('./security');
+const { MAX_ATTACHMENT_BYTES, saveAttachment, pruneAttachments } = require('./attachments');
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -38,6 +42,8 @@ const MIME_TYPES = {
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const SSE_THROTTLE_MS = 120;
 const EDITABLE_FIELDS = ['room', 'category', 'goal', 'pinned'];
+const MAX_REORDER_IDS = 1000;
+const MAX_PROMPT_POSITION = 30; // arrow-key positions in a terminal prompt
 
 const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
@@ -88,6 +94,8 @@ function createMissionControlServer(options = {}) {
   store.usageGuard = usageGuard;
   const publicDir = path.resolve(__dirname, '..', 'public');
   const sseClients = new Set();
+  // Old composer attachments (two weeks and older) are removed in the background.
+  setImmediate(() => pruneAttachments(store.dataDir));
 
   if (scanner) {
     scanner.start();
@@ -269,7 +277,12 @@ function createMissionControlServer(options = {}) {
       if (req.method === 'POST' && pathname === '/api/hook') {
         const payload = await readJsonBody(req);
         const eventName = payload.hook_event_name || payload.event;
-        if (eventName === 'UserPromptSubmit' && usageGuard.isHolding()) {
+        // `claude -p` / Agent SDK runs started by scripts and tools are not the dashboard's to
+        // manage: they get no room and are never held (their own tooling decides when to stop).
+        const automated =
+          isAutomatedEntrypoint(payload.entrypoint) ||
+          isAutomatedEntrypoint(transcriptEntrypoint(payload.transcript_path));
+        if (eventName === 'UserPromptSubmit' && usageGuard.isHolding() && !automated) {
           // The hook script turns this into a {"decision":"block"} answer for Claude Code.
           const summary = usageGuard.getUsageSummary();
           const resumeAt = summary.resetAt
@@ -287,6 +300,7 @@ function createMissionControlServer(options = {}) {
           });
         }
         const session = store.processHookEvent(payload);
+        if (!session) return sendJson(res, 200, { ok: true, ignored: 'automated' });
         usageGuard.checkAndEnforce().catch(() => {});
         const pendingCommands = store.dequeueCommands(session.id);
         return sendJson(res, 200, {
@@ -306,6 +320,96 @@ function createMissionControlServer(options = {}) {
           body.sessionId,
           body
         );
+        return sendJson(res, 200, result);
+      }
+
+      // 3b. Older messages of a room's own session, a page at a time (reading back past the preview)
+      if (req.method === 'GET' && pathname === '/api/session/conversation') {
+        const session = store.sessions.get(parsedUrl.searchParams.get('sessionId') || '');
+        if (!session) return sendJson(res, 404, { ok: false, error: 'Session not found' });
+        const int = (name) => {
+          const raw = parsedUrl.searchParams.get(name);
+          if (raw === null || raw === '') return null;
+          const n = Number(raw);
+          return Number.isSafeInteger(n) && n >= 0 ? n : NaN;
+        };
+        const before = int('before');
+        const since = int('since');
+        const limit = int('limit');
+        if ([before, since, limit].some(Number.isNaN) || (limit !== null && (limit < 1 || limit > 200))) {
+          return sendJson(res, 400, { ok: false, error: 'Invalid paging parameters' });
+        }
+        // Only a Claude transcript under ~/.claude/projects is ever read here.
+        const projectsDir = path.resolve(os.homedir(), '.claude', 'projects') + path.sep;
+        const file = session.transcriptPath ? path.resolve(String(session.transcriptPath)) : null;
+        if (!file || !file.toLowerCase().startsWith(projectsDir.toLowerCase()) || !file.endsWith('.jsonl') || !fs.existsSync(file)) {
+          return sendJson(res, 200, { ok: true, lines: [], from: 0, done: true });
+        }
+        const page = readConversationPage(file, {
+          before: before === null ? undefined : before,
+          since,
+          limit: limit || 40,
+        });
+        return sendJson(res, 200, { ok: true, ...page });
+      }
+
+      // 4a. Attach a file or image to the next message (raw body, one file per request)
+      if (req.method === 'POST' && pathname === '/api/session/attachment') {
+        // Not a CORS-safelisted type, so a browser on another origin must preflight (and is refused).
+        // Refusals below leave the body unread, so the connection is closed rather than reused.
+        const refuse = (status, error) => {
+          res.setHeader('Connection', 'close');
+          req.resume();
+          return sendJson(res, status, { ok: false, error });
+        };
+        if (!/^application\/octet-stream\b/i.test(String(req.headers['content-type'] || ''))) {
+          return refuse(415, 'Content-Type must be application/octet-stream');
+        }
+        const sessionId = parsedUrl.searchParams.get('sessionId') || '';
+        if (!store.sessions.has(sessionId)) {
+          return refuse(404, 'Session not found');
+        }
+        if (Number(req.headers['content-length'] || 0) > MAX_ATTACHMENT_BYTES) {
+          return refuse(413, 'ไฟล์ใหญ่เกิน 20 MB');
+        }
+        try {
+          const saved = await saveAttachment(req, {
+            dataDir: store.dataDir,
+            sessionId,
+            name: parsedUrl.searchParams.get('name') || 'file',
+          });
+          return sendJson(res, 200, { ok: true, ...saved });
+        } catch (err) {
+          const status = err.statusCode || 500;
+          res.setHeader('Connection', 'close');
+          return sendJson(res, status, {
+            ok: false,
+            error: status === 413 ? 'ไฟล์ใหญ่เกิน 20 MB' : status === 400 ? 'ไฟล์ว่าง' : 'บันทึกไฟล์ไม่สำเร็จ',
+          });
+        }
+      }
+
+      // 4b. Apply a multi-select answer in one go (ticks collected on the dashboard)
+      if (req.method === 'POST' && pathname === '/api/session/multi-select') {
+        const body = await readJsonBody(req);
+        const pos = (v) => Number.isInteger(v) && v >= 1 && v <= MAX_PROMPT_POSITION;
+        const toggles = body.toggles;
+        if (
+          !body.sessionId ||
+          !Array.isArray(toggles) ||
+          toggles.length > MAX_PROMPT_POSITION ||
+          !toggles.every(pos) ||
+          new Set(toggles).size !== toggles.length ||
+          !pos(body.currentIndex) ||
+          !(body.nextIndex == null || pos(body.nextIndex))
+        ) {
+          return sendJson(res, 400, { ok: false, error: 'Invalid multi-select answer' });
+        }
+        const result = await bridge.applyMultiSelect(body.sessionId, {
+          toggles,
+          currentIndex: body.currentIndex,
+          nextIndex: body.nextIndex || null,
+        });
         return sendJson(res, 200, result);
       }
 
@@ -455,6 +559,17 @@ function createMissionControlServer(options = {}) {
         if (body.action === 'clear-history') {
           store.clearHistoryOnly();
           return sendJson(res, 200, { ok: true });
+        }
+        if (body.action === 'reorder') {
+          const order = body.order;
+          if (
+            !Array.isArray(order) ||
+            order.length > MAX_REORDER_IDS ||
+            !order.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 200)
+          ) {
+            return sendJson(res, 400, { ok: false, error: 'order must be a list of room ids' });
+          }
+          return sendJson(res, 200, { ok: true, moved: store.reorderSessions(order) });
         }
         if (!body.sessionId) {
           return sendJson(res, 400, { ok: false, error: 'Missing sessionId' });
@@ -639,8 +754,10 @@ function createMissionControlServer(options = {}) {
         const body = await readJsonBody(req);
         const accepted = usageGuard.observe(body.rate_limits);
         const session = store._findMatchingSession({
-          sessionId: body.session_id,
+          pid: Number(body.claude_pid) || undefined,
+          claudeSessionId: typeof body.session_id === 'string' ? body.session_id : undefined,
           cwd: body.cwd,
+          matchFolder: true,
         });
         if (session) {
           const modelId =

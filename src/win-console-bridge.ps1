@@ -313,19 +313,25 @@ public class WinConsoleBridge {
             return false;
         }
         try {
-            int count = text.Length * 2 + (pressEnter ? 2 : 0);
-            INPUT_RECORD[] recs = new INPUT_RECORD[count];
+            INPUT_RECORD[] recs = new INPUT_RECORD[text.Length * 2];
             int idx = 0;
             foreach (char c in text) {
                 recs[idx++] = MakeKeyRecord(true, 0, c);
                 recs[idx++] = MakeKeyRecord(false, 0, c);
             }
-            if (pressEnter) {
-                recs[idx++] = MakeKeyRecord(true, 0x0D, '\r');
-                recs[idx++] = MakeKeyRecord(false, 0x0D, '\r');
-            }
             uint written = 0;
-            return WriteConsoleInputW(hIn, recs, (uint)count, out written);
+            bool ok = recs.Length == 0 || WriteConsoleInputW(hIn, recs, (uint)recs.Length, out written);
+            if (ok && pressEnter) {
+                // Written together with the text, Enter arrives in the same input chunk, which
+                // Claude Code reads as a paste: it becomes a newline in the prompt instead of
+                // sending it. As its own key a moment later, it submits.
+                System.Threading.Thread.Sleep(Math.Min(1200, 300 + text.Length / 4));
+                INPUT_RECORD[] enter = new INPUT_RECORD[2];
+                enter[0] = MakeKeyRecord(true, 0x0D, '\r');
+                enter[1] = MakeKeyRecord(false, 0x0D, '\r');
+                ok = WriteConsoleInputW(hIn, enter, 2, out written);
+            }
+            return ok;
         } finally {
             CloseHandle(hIn);
             FreeConsole();
@@ -397,6 +403,8 @@ function Invoke-BridgeAction {
             "escape" { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x1B, [char]27) }
             "up"     { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x26, [char]0) }
             "down"   { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x28, [char]0) }
+            "left"   { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x25, [char]0) }
+            "right"  { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x27, [char]0) }
             "tab"    { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x09, "`t") }
             "space"  { $ok = [WinConsoleBridge]::SendVirtualKey([uint32]$TargetPid, 0x20, " ") }
             default  {

@@ -3,7 +3,7 @@ const fs = require('fs');
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NAMED_KEYS = new Set(['enter', 'esc', 'escape', 'up', 'down', 'tab', 'space']);
+const NAMED_KEYS = new Set(['enter', 'esc', 'escape', 'up', 'down', 'left', 'right', 'tab', 'space']);
 const APPROVAL_RE = /^(y|yes|approve)$/i;
 
 /**
@@ -88,6 +88,7 @@ class CommandBridge {
     const labelStr = optionPayload.label || `ตัวเลือกที่ ${numberStr}`;
     const selectedPatch = {
       status: 'working',
+      workingSignalAt: new Date().toISOString(),
       statusLabel: `เลือก [${numberStr}. ${labelStr}] แล้ว`,
       pendingAction: null,
       interactivePrompt: null,
@@ -138,6 +139,44 @@ class CommandBridge {
       delivered: false,
       transport: 'mission-control-queue',
       message: `⏳ ยังส่งเข้า Terminal ของ ${session.room} ไม่ได้ — เก็บตัวเลือก "${numberStr}" ไว้ในคิวแล้ว`,
+    };
+  }
+
+  /**
+   * Applies a multi-select answer in one go: Enter on each option whose tick should flip
+   * (positions are arrow-key positions, top = 1), then, when given, Enter on the "Next" row.
+   * The dashboard collects the ticks first, so the terminal is driven once instead of per click.
+   */
+  async applyMultiSelect(sessionId, { toggles, currentIndex, nextIndex }) {
+    const session = this.store.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+    if (!session.pid || !this.consoleScanner) {
+      return {
+        ok: false,
+        delivered: false,
+        message: `ไม่พบ terminal ของห้อง ${session.room} ที่เปิดอยู่ จึงส่งคำตอบไม่ได้`,
+      };
+    }
+    let cursor = currentIndex;
+    const steps = [...toggles].sort((a, b) => a - b);
+    if (nextIndex) steps.push(nextIndex);
+    for (const target of steps) {
+      const res = await this.consoleScanner.selectOption(session.pid, cursor, target, String(target));
+      if (!res || !res.ok) {
+        return { ok: false, delivered: false, message: 'ส่งคำตอบเข้า terminal ไม่ครบ ลองตรวจในหน้าต่าง terminal' };
+      }
+      cursor = target;
+    }
+    this.store.updateSession(session.id, {
+      tldr: `✓ ส่งคำตอบแบบเลือกหลายข้อเข้า Terminal (PID ${session.pid}) แล้ว`,
+    });
+    return {
+      ok: true,
+      delivered: true,
+      transport: 'win32-console-key',
+      message: nextIndex ? 'ส่งคำตอบแล้ว ไปข้อถัดไป' : 'อัปเดตตัวเลือกแล้ว',
     };
   }
 

@@ -5,12 +5,14 @@
  * folder so a job left running overnight can be judged at a glance: how many runs and when, the
  * tokens they used, which failed, and where nothing ran at all.
  *
- * Reading: every transcript under ~/.claude/projects modified inside the window has its first
- * bytes read once to learn its entrypoint (remembered per file). Automated transcripts are then
- * read forward, only the bytes appended since the previous scan, and each file's result is kept
- * until its size or mtime changes. Reads are async and a scan yields to the event loop between
- * files and between 1 MB chunks, so the server keeps answering while a cold scan runs. Large
- * bookkeeping records (`api-request-blob`, attachments) are skipped without being buffered.
+ * Reading: every transcript under ~/.claude/projects modified inside the window is read forward
+ * until the first message that names its entrypoint (at most a few MB per scan: a `claude -p`
+ * prompt can be that large and the entrypoint is written after it; a file that names none yet is
+ * asked again once it grows). Automated transcripts are then read on, only the bytes appended
+ * since the previous scan, and each file's result is kept until its size or mtime changes. Reads
+ * are async and a scan yields to the event loop between files and between chunks, so the server
+ * keeps answering while a cold scan runs. Large bookkeeping records (`api-request-blob`,
+ * attachments) are skipped without being buffered.
  *
  * When a run counts as failed (decided from real e2e-forge transcripts, Claude Code 2.1.3xx):
  * - ok          the last main-chain message is Claude's reply that ended the turn
@@ -18,13 +20,18 @@
  * - api_error   the last assistant message is an API error (`isApiErrorMessage`, model
  *               "<synthetic>": "API Error: Server error mid-response", rate_limit, 403 …).
  * - interrupted the last prompt is "[Request interrupted by user…]".
+ * - max_tokens, refusal, context_full
+ *               the last reply stopped on that stop_reason (`max_tokens`, `refusal`,
+ *               `model_context_window_exceeded`) and nothing followed it; its text is the detail.
  * - cut_off     the run stopped mid-work: the last entry is a tool call, a tool result or a
- *               prompt Claude never answered, and the file has been quiet for 10 minutes. In
+ *               prompt Claude never answered, and the run has been quiet for 20 minutes. In
  *               practice a `-p` run that hit "This command requires approval", or one its runner
  *               killed on a timeout. The last failed tool result, if any, is kept as the detail.
  * - no_reply    Claude never answered at all (e.g. a hook blocked the prompt); the hook's
  *               message is the detail.
- * A run that is mid-work and was written to in the last 10 minutes is "running", not failed.
+ * A run that is not finished and was written to in the last 20 minutes (longer than the 10-minute
+ * Bash limit) is "running", not failed. A sub-agent writes only its own transcript
+ * (`<session>/subagents/*.jsonl`), so the newest write there counts as the run's activity too.
  * Failed tool calls (`tool_result.is_error`) do not fail a run, since Claude carries on after a
  * failed command all the time (most successful e2e-forge runs have several); they are counted.
  * Retried API errors (`system`/`api_error` entries) are counted too, not treated as failures.
@@ -43,9 +50,10 @@ const fsp = fs.promises;
 const DEFAULT_WINDOW_HOURS = 24;
 const MAX_WINDOW_HOURS = 7 * 24;
 const HOUR_MS = 3600 * 1000;
-const RUNNING_GRACE_MS = 10 * 60 * 1000;
+const RUNNING_GRACE_MS = 20 * 60 * 1000;
 const READ_CHUNK_BYTES = 1024 * 1024;
-const HEAD_BYTES = 128 * 1024; // where the entrypoint is looked for
+const ENTRYPOINT_CHUNK_BYTES = 128 * 1024; // most transcripts name their entrypoint in this much
+const ENTRYPOINT_SCAN_BYTES = 4 * 1024 * 1024; // read per scan, at most, while looking for it
 const DECIDE_BYTES = 160; // enough of a line to tell a bookkeeping record from a message
 const RECENT_RUNS = 30;
 const RESCAN_MIN_MS = 3000;
@@ -54,6 +62,14 @@ const DETAIL_CHARS = 200;
 const RECENT_IDS = 16; // one API message is written as several entries, close together
 const NEWLINE = 0x0a;
 const INTERRUPTED_RE = /^\[Request interrupted by user/;
+// Text Claude Code itself puts in a user message (slash commands, `!` shell, reminders, hook and
+// background-task notes). Any other text is a prompt, even one that starts with a tag.
+const HARNESS_TAG_RE =
+  /^<(?:command-[a-z-]+|local-command-[a-z-]+|system-reminder|bash-(?:input|stdout|stderr)|user-prompt-submit-hook|task-notification|user-memory-input)>/;
+// A reply that ended on one of these stop reasons, with nothing after it, failed for that reason.
+const STOP_FAILURES = { max_tokens: 'max_tokens', refusal: 'refusal', model_context_window_exceeded: 'context_full' };
+const STOPPED = new Set(Object.values(STOP_FAILURES));
+const FINISHED = new Set(['ok', 'api_error', 'interrupted']);
 // Records that start with `{"type":"…"` are read only for these types; the rest (api-request
 // blobs and shapes, session owner, tool lists …) are skipped without being parsed.
 const READ_TYPES = new Set(['user', 'assistant', 'system', 'cost-state', 'queue-operation']);
@@ -95,6 +111,7 @@ function freshRun(file) {
     projectDir: path.basename(path.dirname(file)),
     size: 0,
     mtimeMs: 0,
+    subagentMs: 0, // newest write to one of its sub-agents' transcripts
     offset: 0, // bytes consumed: always the start of a line
     entrypoint: null,
     cwd: null,
@@ -168,6 +185,9 @@ function ingestAssistant(run, e, at) {
   } else if (msg.stop_reason === 'end_turn' || msg.stop_reason === 'stop_sequence') {
     run.end = 'ok';
     run.endDetail = null;
+  } else if (Object.prototype.hasOwnProperty.call(STOP_FAILURES, msg.stop_reason)) {
+    run.end = STOP_FAILURES[msg.stop_reason];
+    run.endDetail = shortText(blockText(content), DETAIL_CHARS) || null;
   } else {
     run.end = 'working'; // a tool call (or a streamed part) that Claude still has to follow up
   }
@@ -195,7 +215,7 @@ function ingestUser(run, e) {
       : [];
   for (const raw of texts) {
     const text = String(raw).trim();
-    if (!text || text.startsWith('<')) continue; // harness tags, local commands
+    if (!text || HARNESS_TAG_RE.test(text)) continue; // local commands, reminders, hook notes
     if (INTERRUPTED_RE.test(text)) {
       run.end = 'interrupted';
       continue;
@@ -237,7 +257,7 @@ function ingestLine(run, line) {
       return;
     case 'queue-operation':
       // The prompt as handed to `claude -p`; kept in case no user message follows (hook block).
-      if (e.operation === 'enqueue' && !run.queuedPrompt && typeof e.content === 'string' && !e.content.trim().startsWith('<')) {
+      if (e.operation === 'enqueue' && !run.queuedPrompt && typeof e.content === 'string' && e.content.trim() && !HARNESS_TAG_RE.test(e.content.trim())) {
         run.queuedPrompt = shortText(e.content, PROMPT_CHARS);
       }
       return;
@@ -245,16 +265,22 @@ function ingestLine(run, line) {
   }
 }
 
-/** Reads whole lines appended after `run.offset`, up to `size`; a partial last line waits. */
-async function readAppended(run, size, stats) {
+/**
+ * Reads whole lines appended after `run.offset`, up to `size`; a partial last line waits.
+ * Reading also ends once `stop()` is true after a line, or at the first line end past `maxBytes`
+ * (a line is always read to its end, so a huge one cannot stall it). Returns true when every
+ * complete line up to `size` was read.
+ */
+async function readAppended(run, size, stats, { maxBytes = Infinity, chunkBytes = READ_CHUNK_BYTES, stop = null } = {}) {
   const fh = await fsp.open(run.file, 'r');
+  const from = run.offset;
   try {
     let pos = run.offset;
     let parts = [];
     let partLen = 0;
     let mode = 0; // 0 undecided, 1 keep, 2 skip
     while (pos < size) {
-      const len = Math.min(READ_CHUNK_BYTES, size - pos);
+      const len = Math.min(chunkBytes, size - pos);
       const buf = Buffer.allocUnsafe(len);
       const { bytesRead } = await fh.read(buf, 0, len, pos);
       if (bytesRead <= 0) break;
@@ -285,42 +311,42 @@ async function readAppended(run, size, stats) {
         mode = 0;
         p = nl + 1;
         run.offset = pos + p;
+        if ((stop && stop()) || run.offset - from >= maxBytes) return false;
       }
       pos += bytesRead;
       await yieldToLoop();
     }
+    return true;
   } finally {
     await fh.close();
   }
 }
 
-/** The entrypoint named by a transcript's first entries, or null when none is written yet. */
-async function readEntrypoint(file, size) {
-  const fh = await fsp.open(file, 'r');
+/** When one of the session's sub-agents last wrote its transcript (0 when it has none). */
+async function newestSubagentWrite(file) {
+  const sessionDir = file.slice(0, -'.jsonl'.length);
+  const dir = path.join(sessionDir, 'subagents');
+  let newest = 0;
   try {
-    const len = Math.min(HEAD_BYTES, size);
-    const buf = Buffer.alloc(len);
-    const { bytesRead } = await fh.read(buf, 0, len, 0);
-    const lines = buf.toString('utf8', 0, bytesRead).split('\n');
-    if (bytesRead < size) lines.pop(); // cut off by the read window
-    for (const line of lines) {
-      if (!line.includes('"entrypoint"')) continue;
-      try {
-        const e = JSON.parse(line);
-        if (e && typeof e.entrypoint === 'string') return e.entrypoint;
-      } catch {}
+    // Real folders only: never follow a link out of ~/.claude/projects.
+    if (!(await fsp.lstat(sessionDir)).isDirectory() || !(await fsp.lstat(dir)).isDirectory()) return 0;
+    for (const d of await fsp.readdir(dir, { withFileTypes: true })) {
+      if (!d.isFile() || !d.name.endsWith('.jsonl')) continue;
+      const st = await fsp.lstat(path.join(dir, d.name));
+      if (st.isFile() && st.mtimeMs > newest) newest = st.mtimeMs;
     }
-    return null;
-  } finally {
-    await fh.close();
+  } catch {
+    // No sub-agents, or one removed mid-listing: what was seen so far stands.
   }
+  return newest;
 }
 
 function runStatus(run, now) {
   if (run.end === 'ok') return { status: 'ok', reason: null, detail: null };
   if (run.end === 'api_error') return { status: 'failed', reason: 'api_error', detail: run.endDetail };
   if (run.end === 'interrupted') return { status: 'failed', reason: 'interrupted', detail: null };
-  if (now - run.mtimeMs < RUNNING_GRACE_MS) return { status: 'running', reason: null, detail: null };
+  if (now - Math.max(run.mtimeMs, run.subagentMs) < RUNNING_GRACE_MS) return { status: 'running', reason: null, detail: null };
+  if (STOPPED.has(run.end)) return { status: 'failed', reason: run.end, detail: run.endDetail };
   if (!run.sawAssistant) return { status: 'failed', reason: 'no_reply', detail: run.notice };
   return { status: 'failed', reason: 'cut_off', detail: run.lastToolError };
 }
@@ -368,18 +394,24 @@ function idleGaps(intervals, windowStart) {
   return { merged, longest };
 }
 
-/** The per-folder summary of every cached run active inside the last `hours`. */
+/**
+ * The per-folder summary of every cached run active inside the window: the last `hours` local
+ * hours, the current one included, which are exactly the chart's bars. Counts, failures and
+ * tokens are those of the bars, so the totals always add up to what the chart shows.
+ */
 function summarize(runs, { hours, now }) {
-  const windowStart = now - hours * HOUR_MS;
   const firstHour = hourFloor(now) - (hours - 1) * HOUR_MS;
+  const windowStart = firstHour;
   const groups = new Map();
   for (const run of runs) {
-    if ((run.lastAt || run.mtimeMs) < windowStart) continue;
     const view = publicRun(run, now);
+    const start = Date.parse(view.startedAt);
+    const end = view.status === 'running' ? now : Date.parse(view.endedAt);
+    if (end < windowStart) continue;
     const cwd = run.cwd || null;
     const key = (cwd || run.projectDir).replace(/[\\/]+/g, '/').replace(/\/$/, '').toLowerCase();
     if (!groups.has(key)) groups.set(key, { key, folder: view.folder, cwd, items: [] });
-    groups.get(key).items.push({ run, view });
+    groups.get(key).items.push({ run, view, start, end });
   }
 
   const out = [];
@@ -397,22 +429,22 @@ function summarize(runs, { hours, now }) {
     let running = 0;
     let tokens = 0;
     let lastRunAt = 0;
-    for (const { run, view } of g.items) {
-      const start = Date.parse(view.startedAt);
-      const end = view.status === 'running' ? now : Date.parse(view.endedAt);
+    for (const { run, view, start, end } of g.items) {
       intervals.push([start, end]);
-      tokens += view.tokens;
       if (view.status === 'failed') failed += 1;
       if (view.status === 'running') running += 1;
       lastRunAt = Math.max(lastRunAt, end);
-      const h = slot(start);
+      // A run that began before the window still going in it counts in the first bar.
+      const h = slot(Math.min(Math.max(start, windowStart), now));
       if (h) {
         h.runs += 1;
         if (view.status === 'failed') h.failed += 1;
       }
       for (const [hourStart, n] of run.byHour) {
         const hs = slot(hourStart);
-        if (hs) hs.tokens += n;
+        if (!hs) continue; // spent before the window
+        hs.tokens += n;
+        tokens += n;
       }
     }
     const { merged, longest } = idleGaps(intervals, windowStart);
@@ -452,7 +484,7 @@ function summarize(runs, { hours, now }) {
     totals.running += g.running;
     totals.tokens += g.tokens;
   }
-  return { generatedAt: iso(now), windowHours: hours, groups: out, totals };
+  return { generatedAt: iso(now), windowHours: hours, windowStart: iso(windowStart), groups: out, totals };
 }
 
 class AutomatedRuns {
@@ -465,6 +497,7 @@ class AutomatedRuns {
     this.projectsDir = projectsDir;
     this.rescanMinMs = rescanMinMs;
     this.runs = new Map(); // transcript path -> run state (automated transcripts only)
+    this.pending = new Map(); // transcript path -> run state of one that has not named its entrypoint yet
     this.skipped = new Map(); // transcript path -> entrypoint of a session that is not automated
     this.inflight = null; // { hours, promise }
     this.lastScan = null; // { hours, at, stats }
@@ -503,7 +536,7 @@ class AutomatedRuns {
     const started = Date.now();
     const since = started - hours * HOUR_MS;
     const stats = { files: 0, automated: 0, filesRead: 0, bytesRead: 0, ms: 0 };
-    const seen = new Set();
+    const seen = new Map(); // transcript path -> mtime
     let dirs = [];
     try {
       dirs = await fsp.readdir(this.dir(), { withFileTypes: true });
@@ -529,7 +562,7 @@ class AutomatedRuns {
           continue;
         }
         if (!st.isFile()) continue; // never follow a link out of ~/.claude/projects
-        seen.add(file);
+        seen.set(file, st.mtimeMs);
         if (st.mtimeMs < since) continue;
         stats.files += 1;
         if (this.skipped.has(file)) continue;
@@ -543,41 +576,67 @@ class AutomatedRuns {
     }
     // Forget files that are gone or older than the largest window.
     const oldest = started - (MAX_WINDOW_HOURS + 1) * HOUR_MS;
-    for (const [file, run] of this.runs) if (!seen.has(file) || run.mtimeMs < oldest) this.runs.delete(file);
-    for (const file of this.skipped.keys()) if (!seen.has(file)) this.skipped.delete(file);
+    for (const map of [this.runs, this.pending, this.skipped]) {
+      for (const file of map.keys()) if (!(seen.get(file) >= oldest)) map.delete(file);
+    }
     stats.ms = Date.now() - started;
     this.lastScan = { hours, at: Date.now(), stats };
     return stats;
   }
 
   async update(file, st, stats) {
-    let run = this.runs.get(file);
-    if (!run) {
-      const entrypoint = await readEntrypoint(file, st.size);
-      if (!entrypoint) {
-        // Nothing that names it yet: ask again once it grows, unless it is already large.
-        if (st.size > HEAD_BYTES) this.skipped.set(file, null);
+    const known = this.runs.has(file);
+    const map = known ? this.runs : this.pending;
+    let run = map.get(file);
+    if (run && st.size === run.size && st.mtimeMs === run.mtimeMs) {
+      // Unchanged: cache hit.
+      if (known) {
+        stats.automated += 1;
+        await this.checkSubagents(run);
+      }
+      return;
+    }
+    if (!run || st.size < run.offset) {
+      run = freshRun(file); // new, or rewritten shorter: start over
+      map.set(file, run);
+    }
+    if (!known) {
+      // Read until a message names the entrypoint; what was read already counts for the run.
+      stats.filesRead += 1;
+      const complete = await readAppended(run, st.size, stats, {
+        chunkBytes: ENTRYPOINT_CHUNK_BYTES,
+        maxBytes: ENTRYPOINT_SCAN_BYTES,
+        stop: () => Boolean(run.entrypoint),
+      });
+      if (!run.entrypoint) {
+        // Not named yet: carry on from here next scan, or once it grows when all of it was read.
+        if (complete) {
+          run.size = st.size;
+          run.mtimeMs = st.mtimeMs;
+        }
         return;
       }
-      if (!isAutomatedEntrypoint(entrypoint)) {
-        this.skipped.set(file, entrypoint);
+      this.pending.delete(file);
+      if (!isAutomatedEntrypoint(run.entrypoint)) {
+        this.skipped.set(file, run.entrypoint);
         return;
       }
-      run = freshRun(file);
       this.runs.set(file, run);
     }
     stats.automated += 1;
-    if (st.size === run.size && st.mtimeMs === run.mtimeMs) return; // unchanged: cache hit
-    if (st.size < run.offset) {
-      run = freshRun(file); // rewritten: start over
-      this.runs.set(file, run);
-    }
     if (st.size > run.offset) {
-      stats.filesRead += 1;
+      if (known) stats.filesRead += 1;
       await readAppended(run, st.size, stats);
     }
     run.size = st.size;
     run.mtimeMs = st.mtimeMs;
+    await this.checkSubagents(run);
+  }
+
+  /** A run waiting on a sub-agent writes nothing itself; the sub-agent's transcript shows it is alive. */
+  async checkSubagents(run) {
+    if (FINISHED.has(run.end) || Date.now() - run.mtimeMs < RUNNING_GRACE_MS) return;
+    run.subagentMs = await newestSubagentWrite(run.file);
   }
 }
 

@@ -637,7 +637,7 @@
     .md-table th, .md-table td { border: 1px solid var(--line); padding: 4px 9px; text-align: left; }
     .md-table th { color: var(--text); background: var(--soft); }
     .md-tool-line { display: flex; align-items: center; gap: 7px; margin: 4px 0; font-family: var(--font-mono); font-size: 12px; color: var(--text-3); }
-    .md-tool-line b { color: var(--work-ink); font-weight: 650; }
+    .md-tool-line b { flex-shrink: 0; color: var(--work-ink); font-weight: 650; }
 
     /* Composer: a white pill with a round violet send button, as in the reference */
     .composer { padding: 14px 24px 20px 18px; display: flex; flex-direction: column; gap: 10px; }
@@ -846,6 +846,8 @@
       .auto-run, .auto-runs.is-days .auto-run { grid-template-columns: auto auto auto minmax(0, 1fr); row-gap: 3px; }
       .ar-state { justify-self: end; }
       .ar-prompt { grid-column: 1 / -1; }
+    }
+
     /* ---------- Search across sessions (roadmap 2) ---------- */
     .work.is-search { grid-template-columns: minmax(0, 1fr); }
     .work.is-search .list, .work.is-search .focus, .work.is-search .strip, .work.is-search .panel, .work.is-search .overview { display: none; }
@@ -1053,8 +1055,13 @@
       .side { margin: 0 0 -22px; padding: 16px 16px 36px; border-radius: var(--r-xl) var(--r-xl) 0 0; gap: 12px; }
       .brand { padding: 0; }
       .new-btn { height: 38px; }
-      .nav { flex-direction: row; overflow-x: auto; gap: 4px; }
-      .nav-item { flex-shrink: 0; height: 36px; }
+      /* Six destinations do not fit one row on a phone: a 3 × 2 grid of icon-over-label buttons
+         (the icon strip's form) keeps every one on screen without sideways scrolling. */
+      .nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+      .nav-item { position: relative; flex-direction: column; justify-content: center; gap: 3px; min-width: 0; height: 54px; padding: 0 6px; font-size: 11.5px; font-weight: 650; text-align: center; }
+      .nav-item .label { flex: none; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      .nav-item .count { position: absolute; top: 5px; right: 8px; font-size: 10.5px; }
+      .nav-item .badge-attn { position: absolute; top: 3px; right: 5px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; font-size: 10.5px; line-height: 18px; }
       .side-spacer { display: none; }
       .usage-card { flex-direction: row; align-items: center; flex-wrap: wrap; padding: 10px 12px; }
       .usage-card .bar { flex: 1; min-width: 80px; }
@@ -1076,6 +1083,11 @@
       .ide-files { max-height: 30vh; border-right: 0; border-bottom: 1px solid var(--line); }
       .overview { padding: 18px 14px; }
       .rcard[aria-current="true"] { transform: none; box-shadow: var(--shadow-lift), inset 0 0 0 2px var(--primary); }
+    }
+    /* Small phones: the four-step stepper is ~366px at rest and pushed a 360px screen sideways. */
+    @media (max-width: 440px) {
+      .step { gap: 5px; font-size: 12px; }
+      .step-line { min-width: 6px; margin: 0 5px; }
     }
   </style>
 </head>

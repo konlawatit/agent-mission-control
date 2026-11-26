@@ -64,8 +64,8 @@ function run(cwd, entrypoint, sessionId = uuid()) {
       lines.push(obj);
       return api;
     },
-    write(mtimeMinAgo) {
-      const dir = path.join(projects, encodeProjectDir(cwd));
+    write(mtimeMinAgo, root = projects) {
+      const dir = path.join(root, encodeProjectDir(cwd));
       fs.mkdirSync(dir, { recursive: true });
       const file = path.join(dir, `${sessionId}.jsonl`);
       fs.writeFileSync(file, lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n') + '\n');
@@ -144,14 +144,14 @@ const r9 = run(OTHER, 'sdk-cli')
 // ---- A person's terminal session: never counted ----
 run(HUMAN, 'cli').prompt(30, 'fix the invoice bug').assistant(29, { text: 'Fixed.' }).write(29);
 
-const hourIndex = (ms, hours) => {
-  const floor = (x) => {
-    const d = new Date(x);
-    d.setMinutes(0, 0, 0);
-    return d.getTime();
-  };
-  return Math.round((floor(ms) - (floor(NOW) - (hours - 1) * HOUR)) / HOUR);
+const hourFloor = (x) => {
+  const d = new Date(x);
+  d.setMinutes(0, 0, 0);
+  return d.getTime();
 };
+// Summaries below are taken at NOW, so an hour boundary passing while the test runs (or a slow
+// scan) cannot shift the buckets these indexes point at.
+const hourIndex = (ms, hours) => Math.round((hourFloor(ms) - (hourFloor(NOW) - (hours - 1) * HOUR)) / HOUR);
 
 function byFolder(summary, name) {
   const g = summary.groups.find((x) => x.folder === name);
@@ -161,7 +161,7 @@ function byFolder(summary, name) {
 const runOf = (g, r) => g.recent.find((x) => x.sessionId === r.sessionId);
 
 async function testSummary(ar) {
-  const s = await ar.summary({ hours: 24 });
+  const s = await ar.summary({ hours: 24, now: NOW });
   assert.strictEqual(s.windowHours, 24);
   assert.deepStrictEqual(s.groups.map((g) => g.folder).sort(), ['other-tool', 'partner'], 'only sdk-* runs, grouped by the folder they ran in');
   assert.ok(!JSON.stringify(s).includes('invoice'), 'the terminal session never shows up');
@@ -238,13 +238,13 @@ async function testSummary(ar) {
   assert.deepStrictEqual(s.totals, { groups: 2, runs: 9, failed: 4, running: 1, tokens: p.tokens + o.tokens });
   assert.strictEqual(s.groups[0].folder, 'other-tool', 'the folder with the newest activity first');
 
-  const week = await ar.summary({ hours: 72 });
+  const week = await ar.summary({ hours: 72, now: NOW });
   assert.strictEqual(byFolder(week, 'partner').runs, 6, 'the day-old run is in the 3-day window');
   assert.strictEqual(byFolder(week, 'partner').hourly.length, 72);
 }
 
 async function testCacheAndAppend(ar) {
-  const warm = await ar.summary({ hours: 24 });
+  const warm = await ar.summary({ hours: 24, now: NOW });
   assert.strictEqual(warm.scan.filesRead, 0, `unchanged files are not read again ${JSON.stringify(warm.scan)}`);
   assert.strictEqual(warm.scan.bytesRead, 0);
   assert.strictEqual(warm.scan.automated, 9);
@@ -259,7 +259,7 @@ async function testCacheAndAppend(ar) {
       .map((l) => JSON.stringify(l))
       .join('\n') + '\n';
   fs.appendFileSync(r5.file, extra);
-  let s = await ar.summary({ hours: 24 });
+  let s = await ar.summary({ hours: 24, now: NOW });
   assert.strictEqual(s.scan.filesRead, 1, 'only the grown file is read');
   assert.strictEqual(s.scan.bytesRead, Buffer.byteLength(extra), 'and only its new bytes');
   let v5 = runOf(byFolder(s, 'partner'), r5);
@@ -271,27 +271,138 @@ async function testCacheAndAppend(ar) {
   // A line still being written waits until it is complete, and is counted once.
   const line = JSON.stringify({ parentUuid: null, isSidechain: false, message: { id: 'msg_last', role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: 'Last.' }], stop_reason: 'end_turn', usage: { input_tokens: 5, output_tokens: 5 } }, type: 'assistant', timestamp: at(8) });
   fs.appendFileSync(r5.file, line.slice(0, 40));
-  s = await ar.summary({ hours: 24 });
+  s = await ar.summary({ hours: 24, now: NOW });
   assert.strictEqual(runOf(byFolder(s, 'partner'), r5).tokens, 2 * FRESH + 6, 'a partial line is not read yet');
   fs.appendFileSync(r5.file, `${line.slice(40)}\n`);
-  s = await ar.summary({ hours: 24 });
+  s = await ar.summary({ hours: 24, now: NOW });
   v5 = runOf(byFolder(s, 'partner'), r5);
   assert.strictEqual(v5.tokens, 2 * FRESH + 16, 'the completed line is read once');
-  s = await ar.summary({ hours: 24 });
+  s = await ar.summary({ hours: 24, now: NOW });
   assert.strictEqual(runOf(byFolder(s, 'partner'), r5).tokens, 2 * FRESH + 16);
 
   // A rewritten (shorter) file is read again from the start.
   fs.writeFileSync(r2.file, `${JSON.stringify(r2.lines[0])}\n`);
   const t = new Date(NOW - 570 * 60000);
   fs.utimesSync(r2.file, t, t);
-  s = await ar.summary({ hours: 24 });
+  s = await ar.summary({ hours: 24, now: NOW });
   const v2 = runOf(byFolder(s, 'partner'), r2);
   assert.deepStrictEqual([v2.status, v2.reason, v2.tokens], ['failed', 'no_reply', 0], 'a prompt Claude never answered');
 
   // A removed transcript drops out.
   fs.rmSync(r9.file);
-  s = await ar.summary({ hours: 24 });
+  s = await ar.summary({ hours: 24, now: NOW });
   assert.ok(!runOf(byFolder(s, 'other-tool'), r9), 'a deleted run is forgotten');
+}
+
+// ---- Edge cases, in their own projects folder so the counts above stay as they are ----
+const edgeProjects = path.join(isolatedHome, 'edge-projects');
+
+function findRun(s, r) {
+  for (const g of s.groups) {
+    const v = runOf(g, r);
+    if (v) return v;
+  }
+  return null;
+}
+
+async function testEdgeCases() {
+  const E = 'C:\\Repo\\edge';
+  const W = 'C:\\Repo\\edge-window';
+  const queued = (minAgo, content) => ({ type: 'queue-operation', operation: 'enqueue', timestamp: at(minAgo), sessionId: 'x', content });
+  const touch = (file, minAgo) => {
+    const t = new Date(NOW - minAgo * 60000);
+    fs.utimesSync(file, t, t);
+  };
+
+  // 1. A piped prompt larger than the first read, written twice (queued, then as the message)
+  // before the first entry that names the entrypoint.
+  const BIG = `Review this diff:\n${'+ a changed line\n'.repeat(20 * 1024)}`;
+  const big = run(E, 'sdk-cli').raw(queued(30, BIG)).prompt(30, BIG).assistant(29, { text: 'Reviewed.' }).write(29, edgeProjects);
+  // More than one scan's worth of records before the first message.
+  const filler = 'z'.repeat(1536 * 1024);
+  const late = run(E, 'sdk-ts').raw(queued(28, filler)).raw(queued(28, filler)).raw(queued(28, filler)).prompt(28, 'After the filler').assistant(27, { text: 'ok' }).write(27, edgeProjects);
+  // Nothing that names it yet.
+  const growing = run(E, 'sdk-cli').raw(queued(26, 'q'.repeat(200 * 1024))).write(26, edgeProjects);
+
+  // 2. Quiet main transcripts: one waiting on a sub-agent, one whose sub-agent stopped long ago,
+  // one in a long Bash command.
+  const subagent = (r, minAgo) => {
+    const dir = path.join(path.dirname(r.file), r.sessionId, 'subagents');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'agent-a1.jsonl');
+    fs.writeFileSync(file, '{}\n');
+    touch(file, minAgo);
+  };
+  const viaSub = run(E, 'sdk-cli').prompt(40, 'Fan out').assistant(30, { stop: 'tool_use', tool: 'Task' }).write(30, edgeProjects);
+  subagent(viaSub, 2);
+  const deadSub = run(E, 'sdk-cli').prompt(90, 'Fan out').assistant(80, { stop: 'tool_use', tool: 'Task' }).write(80, edgeProjects);
+  subagent(deadSub, 60);
+  const quiet = run(E, 'sdk-cli').prompt(20, 'Long test run').assistant(15, { stop: 'tool_use', tool: 'Bash' }).write(15, edgeProjects);
+
+  // 3. The window is the chart's hours: one run began before it and finished inside it, one
+  // ended just before it.
+  const firstHour = hourFloor(NOW) - 23 * HOUR;
+  const ago = (ms) => (NOW - ms) / 60000;
+  const straddle = run(W, 'sdk-cli')
+    .prompt(ago(firstHour - 40 * 60000), 'Overnight job')
+    .assistant(ago(firstHour - 30 * 60000), { stop: 'tool_use', tool: 'Bash' })
+    .toolResult(ago(firstHour - 29 * 60000))
+    .assistant(ago(firstHour + 10 * 60000), { text: 'Done.' })
+    .write(ago(firstHour + 10 * 60000), edgeProjects);
+  const before = run(W, 'sdk-cli').prompt(ago(firstHour - 20 * 60000), 'Earlier').assistant(ago(firstHour - 15 * 60000), { text: 'ok' }).write(ago(firstHour - 15 * 60000), edgeProjects);
+
+  // 4. Prompts that start with a tag, and Claude Code's own tags.
+  const xml = run(E, 'sdk-ts').prompt(100, '<task>Fix the flaky spec</task>').assistant(99, { text: 'Fixed.' }).write(99, edgeProjects);
+  const harness = run(E, 'sdk-cli').prompt(91, '<command-name>/clear</command-name>').prompt(90, 'Real prompt').assistant(89, { text: 'ok' }).write(89, edgeProjects);
+  const followUp = run(E, 'sdk-ts').prompt(80, 'First step').assistant(79, { text: 'Done.' }).prompt(78, '<instructions>Now the next step</instructions>').write(78, edgeProjects);
+
+  // 5. Replies that stopped on other stop reasons.
+  const maxTok = run(E, 'sdk-cli').prompt(70, 'Write it all').assistant(69, { stop: 'max_tokens', text: 'Here is the first half' }).write(69, edgeProjects);
+  const refused = run(E, 'sdk-cli').prompt(68, 'Do it').assistant(67, { stop: 'refusal' }).write(67, edgeProjects);
+  const full = run(E, 'sdk-cli').prompt(66, 'Read everything').assistant(65, { stop: 'model_context_window_exceeded' }).write(65, edgeProjects);
+  const maxTokNow = run(E, 'sdk-cli').prompt(3, 'Write it all').assistant(2, { stop: 'max_tokens', text: 'Half' }).write(2, edgeProjects);
+
+  const ar = new AutomatedRuns({ projectsDir: edgeProjects, rescanMinMs: 0 });
+  let s = await ar.summary({ hours: 24, now: NOW });
+
+  const vBig = findRun(s, big);
+  assert.ok(vBig, 'a run whose prompt is larger than the first read is found');
+  assert.strictEqual(vBig.status, 'ok');
+  assert.ok(vBig.firstPrompt.startsWith('Review this diff'), vBig.firstPrompt);
+  assert.ok(!findRun(s, late), 'one scan reads at most a few MB looking for the entrypoint');
+  assert.ok(!findRun(s, growing), 'a transcript that names nothing yet is not a run yet');
+  growing.prompt(25, 'Now the prompt').assistant(24, { text: 'Done.' }).write(24, edgeProjects);
+  s = await ar.summary({ hours: 24, now: NOW });
+  assert.strictEqual((findRun(s, late) || {}).status, 'ok', 'the next scan carries on where the last one stopped');
+  assert.strictEqual((findRun(s, growing) || {}).firstPrompt, 'Now the prompt', 'it is asked again once it grows');
+
+  assert.strictEqual(findRun(s, viaSub).status, 'running', 'a sub-agent still writing keeps its run alive');
+  assert.deepStrictEqual([findRun(s, deadSub).status, findRun(s, deadSub).reason], ['failed', 'cut_off']);
+  assert.strictEqual(findRun(s, quiet).status, 'running', '15 quiet minutes (a long Bash command) are not a failure');
+
+  const w = byFolder(s, 'edge-window');
+  assert.strictEqual(s.windowStart, new Date(firstHour).toISOString(), 'the window starts with the first bar');
+  assert.ok(!findRun(s, before), 'a run that ended before the window is left out');
+  assert.strictEqual(w.runs, 1);
+  assert.strictEqual(w.hourly[0].runs, 1, 'a run that began before the window counts in the first bar');
+  assert.strictEqual(w.tokens, FRESH, 'tokens spent before the window are not counted');
+  assert.strictEqual(findRun(s, straddle).tokens, 2 * FRESH, 'the run row still shows all it used');
+  for (const g of s.groups) {
+    assert.strictEqual(g.hourly.reduce((n, h) => n + h.runs, 0), g.runs, `${g.folder}: bars add up to the run count`);
+    assert.strictEqual(g.hourly.reduce((n, h) => n + h.failed, 0), g.failed, `${g.folder}: and to the failures`);
+    assert.strictEqual(g.hourly.reduce((n, h) => n + h.tokens, 0), g.tokens, `${g.folder}: and to the tokens`);
+  }
+  assert.strictEqual(s.totals.tokens, s.groups.reduce((n, g) => n + g.tokens, 0));
+
+  assert.strictEqual(findRun(s, xml).firstPrompt, '<task>Fix the flaky spec</task>', 'a prompt that starts with a tag is still the prompt');
+  assert.strictEqual(findRun(s, harness).firstPrompt, 'Real prompt', "Claude Code's own tags are not the prompt");
+  assert.deepStrictEqual([findRun(s, followUp).status, findRun(s, followUp).reason], ['failed', 'cut_off'], 'a tagged follow-up Claude never answered is not a finished run');
+
+  const vMax = findRun(s, maxTok);
+  assert.deepStrictEqual([vMax.status, vMax.reason, vMax.detail], ['failed', 'max_tokens', 'Here is the first half']);
+  assert.deepStrictEqual([findRun(s, refused).status, findRun(s, refused).reason], ['failed', 'refusal']);
+  assert.deepStrictEqual([findRun(s, full).status, findRun(s, full).reason], ['failed', 'context_full']);
+  assert.strictEqual(findRun(s, maxTokNow).status, 'running', 'a stop Claude Code may still follow up is not judged yet');
 }
 
 async function testConcurrentAndYielding() {
@@ -368,10 +479,11 @@ async function testApi() {
 }
 
 async function main() {
-  assert.ok(RUNNING_GRACE_MS >= 5 * 60000);
+  assert.ok(RUNNING_GRACE_MS > 10 * 60000, "longer than the Bash tool's 10-minute limit");
   const ar = new AutomatedRuns({ rescanMinMs: 0 });
   await testSummary(ar);
   await testCacheAndAppend(ar);
+  await testEdgeCases();
   await testConcurrentAndYielding();
   await testApi();
   console.log('✅ Automated runs checks passed!');

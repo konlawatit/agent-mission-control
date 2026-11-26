@@ -160,6 +160,23 @@ async function runTests() {
   const testInference = inferWorkflowFromTool('Bash', { command: 'npm run test:unit' });
   assert.strictEqual(testInference.stageIndex, 2);
 
+  // The dashboard's stylesheet must close every block: one missing `}` (easy to lose when a merge
+  // joins two @media blocks) silently moves every later rule inside that media query.
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const css = html
+    .slice(html.indexOf('<style>') + '<style>'.length, html.indexOf('</style>'))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, '""');
+  let depth = 0;
+  css.split('\n').forEach((text, i) => {
+    for (const ch of text) {
+      if (ch === '{') depth++;
+      if (ch === '}') depth--;
+      assert.ok(depth >= 0, `index.html <style>: unmatched "}" on style line ${i + 1}`);
+    }
+  });
+  assert.strictEqual(depth, 0, 'index.html <style>: a block is never closed');
+
   // Cleanup temp test dir
   fs.rmSync(tempDir, { recursive: true, force: true });
   console.log('✅ All verification assertions (No Demo + Session Memory/History + Project Categorization) passed!');

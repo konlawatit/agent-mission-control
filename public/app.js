@@ -2519,7 +2519,15 @@ const AUTO_WINDOWS = [
 const AUTO_REFRESH_MS = 30000;
 const AUTO_ROWS = 8;
 const AUTO_HOURS_KEY = 'amc.auto.hours';
-const AUTO_REASON = { cut_off: 'จบกลางคัน', api_error: 'API error', interrupted: 'ถูกหยุด', no_reply: 'ไม่ได้ตอบ' };
+const AUTO_REASON = {
+  cut_off: 'จบกลางคัน',
+  api_error: 'API error',
+  interrupted: 'ถูกหยุด',
+  no_reply: 'ไม่ได้ตอบ',
+  max_tokens: 'ตอบยาวเกินกำหนด',
+  refusal: 'Claude ปฏิเสธ',
+  context_full: 'context เต็ม',
+};
 const auto = { hours: 24, data: null, loading: false, error: false, seq: 0, expanded: new Set() };
 try {
   const saved = Number(localStorage.getItem(AUTO_HOURS_KEY));

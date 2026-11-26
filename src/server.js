@@ -35,6 +35,7 @@ const {
   tokensEqual,
 } = require('./security');
 const { MAX_ATTACHMENT_BYTES, saveAttachment, pruneAttachments } = require('./attachments');
+const { AutomatedRuns, DEFAULT_WINDOW_HOURS, MAX_WINDOW_HOURS } = require('./automated-runs');
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -313,6 +314,9 @@ function createMissionControlServer(options = {}) {
     });
     res.end(html);
   }
+
+  // Automated runs (`claude -p`, Agent SDK) are summarised from their transcripts on request.
+  const automatedRuns = options.automatedRuns || new AutomatedRuns();
 
   const server = http.createServer(async (req, res) => {
     // DNS-rebinding guard: a hostile domain resolving to 127.0.0.1 still sends its own Host.
@@ -941,6 +945,18 @@ function createMissionControlServer(options = {}) {
       if (req.method === 'POST' && pathname === '/api/statusline/install') {
         const status = installStatusline();
         return sendJson(res, status.error ? 500 : 200, { ok: !status.error, ...status });
+      }
+
+      // ---------- Automated runs: GET /api/automated?hours=24 ----------
+      // `claude -p` / Agent SDK runs per working folder: runs per hour, tokens, failures and the
+      // longest idle gap. Reads only .jsonl transcripts under ~/.claude/projects (src/automated-runs).
+      if (req.method === 'GET' && pathname === '/api/automated') {
+        const raw = parsedUrl.searchParams.get('hours');
+        const hours = raw === null || raw === '' ? DEFAULT_WINDOW_HOURS : Number(raw);
+        if (!Number.isSafeInteger(hours) || hours < 1 || hours > MAX_WINDOW_HOURS) {
+          return sendJson(res, 400, { ok: false, error: `hours must be a whole number from 1 to ${MAX_WINDOW_HOURS}` });
+        }
+        return sendJson(res, 200, { ok: true, ...(await automatedRuns.summary({ hours })) });
       }
 
       if (pathname.startsWith('/api/')) {

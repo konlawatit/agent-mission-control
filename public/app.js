@@ -579,6 +579,7 @@ function ensureSelection() {
 }
 
 function currentNav() {
+  if (ui.view === 'automation') return 'automation';
   if (ui.view === 'grid') return 'overview';
   if (ui.lifecycle === 'history') return 'history';
   return ui.filter === 'attn' ? 'attn' : 'live';
@@ -611,7 +612,8 @@ function renderSidebar() {
     item('live', 'rows', 'Live', `<span class="count">${live.length}</span>`) +
       item('attn', 'alert', 'รอคุณ', waiting ? `<span class="badge-attn">${waiting}</span>` : `<span class="count">0</span>`) +
       item('overview', 'grid', 'ภาพรวม', '') +
-      item('history', 'clock', 'ประวัติ', `<span class="count">${hist}</span>`)
+      item('history', 'clock', 'ประวัติ', `<span class="count">${hist}</span>`) +
+      item('automation', 'bot', 'งานอัตโนมัติ', '')
   );
 
   const u = appState.usageGuard;
@@ -1516,7 +1518,7 @@ function renderStrip() {
 function renderPanel() {
   const panel = $('#panel');
   const s = selected();
-  if (!ui.panel || !s || ui.view === 'grid') {
+  if (!ui.panel || !s || ui.view === 'grid' || ui.view === 'automation') {
     panel.hidden = true;
     return;
   }
@@ -1972,10 +1974,12 @@ function filtersPopoverHtml() {
 function renderAll() {
   ensureSelection();
   $('#work').classList.toggle('is-grid', ui.view === 'grid');
+  $('#work').classList.toggle('is-auto', ui.view === 'automation');
   renderSidebar();
   renderHoldBanner();
   renderList();
   if (ui.view === 'grid') renderOverview();
+  else if (ui.view === 'automation') renderAutomation();
   else renderFocus();
   renderStrip();
   renderPanel();
@@ -2014,7 +2018,7 @@ function openVscodeUri(uri) {
 const Actions = {
   selectRoom(id) {
     ui.selectedId = id;
-    if (ui.view === 'grid') ui.view = 'focus';
+    if (ui.view === 'grid' || ui.view === 'automation') ui.view = 'focus';
     const s = selected();
     if (s && s.lifecycle === 'history' && ui.lifecycle !== 'history') ui.lifecycle = 'history';
     if (s && s.lifecycle !== 'history' && ui.lifecycle === 'history') ui.lifecycle = 'live';
@@ -2043,12 +2047,13 @@ const Actions = {
     renderAll();
   },
   navigate(key) {
-    ui.view = key === 'overview' ? 'grid' : 'focus';
+    ui.view = key === 'overview' ? 'grid' : key === 'automation' ? 'automation' : 'focus';
     ui.lifecycle = key === 'history' ? 'history' : 'live';
     ui.filter = key === 'attn' ? 'attn' : 'all';
-    if (key === 'overview') ui.panel = null;
+    if (key === 'overview' || key === 'automation') ui.panel = null;
     savePrefs();
     renderAll();
+    if (key === 'automation' && !auto.loading) loadAutomation(); // refresh what was loaded before
   },
   cycleTheme() {
     ui.theme = ui.theme === 'auto' ? 'light' : ui.theme === 'light' ? 'dark' : 'auto';
@@ -2069,7 +2074,7 @@ const Actions = {
     renderPanel();
   },
   openPanel(key) {
-    if (ui.view === 'grid') ui.view = 'focus';
+    if (ui.view === 'grid' || ui.view === 'automation') ui.view = 'focus';
     ui.panel = key;
     savePrefs();
     renderAll();
@@ -2492,6 +2497,262 @@ const Actions = {
     $('#spawn-dialog').showModal();
   },
 };
+
+/* ---------- Automated runs (claude -p, Agent SDK) ---------- */
+// A full-width view like the overview: one card per working folder with its runs per hour, the
+// longest idle gap and the newest runs; a run opens in the shared transcript viewer. Data comes
+// from GET /api/automated and is refreshed every 30 s while the view is open.
+ICON_PATHS.bot =
+  '<rect x="4.5" y="8" width="15" height="11" rx="3.5"/><path d="M12 8V5"/><circle cx="12" cy="4" r="1" fill="currentColor" stroke="none"/><path d="M9.5 12.5v2M14.5 12.5v2"/><path d="M2.5 12.5v3M21.5 12.5v3"/>';
+
+const AUTO_WINDOWS = [
+  { hours: 24, label: '24 ชม.' },
+  { hours: 72, label: '3 วัน' },
+  { hours: 168, label: '7 วัน' },
+];
+const AUTO_REFRESH_MS = 30000;
+const AUTO_ROWS = 8;
+const AUTO_HOURS_KEY = 'amc.auto.hours';
+const AUTO_REASON = { cut_off: 'จบกลางคัน', api_error: 'API error', interrupted: 'ถูกหยุด', no_reply: 'ไม่ได้ตอบ' };
+const auto = { hours: 24, data: null, loading: false, error: false, seq: 0, expanded: new Set() };
+try {
+  const saved = Number(localStorage.getItem(AUTO_HOURS_KEY));
+  if (AUTO_WINDOWS.some((w) => w.hours === saved)) auto.hours = saved;
+} catch {}
+
+async function loadAutomation() {
+  const seq = ++auto.seq;
+  auto.loading = true;
+  const r = await getJson(`/api/automated?hours=${auto.hours}`);
+  if (seq !== auto.seq) return; // a newer request (another window) is on its way
+  auto.loading = false;
+  auto.error = !(r && r.ok);
+  if (r && r.ok) auto.data = r;
+  renderAutomation();
+}
+
+function autoSameDay(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+/** "01:10" today, "25 พ.ย. 23:10" on another day (or always with `withDay`). */
+function autoTime(iso, withDay = false) {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  const t = d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+  if (!withDay && autoSameDay(d, new Date())) return t;
+  return `${d.toLocaleDateString('th-TH', { day: 'numeric', month: 'short' })} ${t}`;
+}
+
+function autoSpan(minutes) {
+  const m = Math.max(0, Math.round(minutes));
+  if (m < 60) return `${m} นาที`;
+  const days = Math.floor(m / 1440);
+  const h = Math.floor((m % 1440) / 60);
+  if (days) return h ? `${days} วัน ${h} ชม.` : `${days} วัน`;
+  return m % 60 ? `${h} ชม. ${m % 60} นาที` : `${h} ชม.`;
+}
+
+function autoDuration(ms) {
+  const s = Math.round(Number(ms || 0) / 1000);
+  return s < 60 ? `${s} วิ` : autoSpan(s / 60);
+}
+
+function autoRange(fromIso, toIso) {
+  const a = new Date(fromIso);
+  const b = new Date(toIso);
+  if (autoSameDay(a, b) && autoSameDay(b, new Date())) return `${autoTime(fromIso)}–${autoTime(toIso)}`;
+  return `${autoTime(fromIso, true)} – ${autoTime(toIso, true)}`;
+}
+
+/** Runs per hour as bars (failed part in rose), over a strip that shows how long work ran. */
+function autoSparkHtml(g, hours) {
+  const n = g.hourly.length;
+  const slot = 10;
+  const H = 52;
+  const strip = 4;
+  const floor = H - strip - 2; // bars stand on the activity strip
+  const max = Math.max(1, ...g.hourly.map((h) => h.runs));
+  const pad = (x) => String(x).padStart(2, '0');
+  const cells = g.hourly
+    .map((h, i) => {
+      const x = i * slot + 1.5;
+      const w = slot - 3;
+      const from = new Date(h.hourStart);
+      const when = `${autoTime(h.hourStart, hours > 24)}–${pad((from.getHours() + 1) % 24)}:00`;
+      const tip =
+        h.runs || h.activeMinutes
+          ? [when, `${h.runs} รัน${h.failed ? ` (พัง ${h.failed})` : ''}`, `${formatTokens(h.tokens)} tokens`, h.activeMinutes ? `มีงานรัน ${h.activeMinutes} นาที` : '']
+              .filter(Boolean)
+              .join(' · ')
+          : `${when} · ไม่มีงาน`;
+      let bars = '';
+      if (h.runs) {
+        const bh = Math.max(4, (h.runs / max) * (floor - 2));
+        const fh = h.failed ? Math.min(bh, Math.max(3, (bh * h.failed) / h.runs)) : 0;
+        if (bh - fh > 0) bars += `<rect class="sp-run" x="${x}" y="${(floor - bh).toFixed(1)}" width="${w}" height="${(bh - fh).toFixed(1)}"/>`;
+        if (fh) bars += `<rect class="sp-fail" x="${x}" y="${(floor - fh).toFixed(1)}" width="${w}" height="${fh.toFixed(1)}"/>`;
+      }
+      const base = h.activeMinutes
+        ? `<rect class="sp-active" x="${x}" y="${H - strip}" width="${w}" height="${strip}" fill-opacity="${(0.3 + 0.7 * Math.min(1, h.activeMinutes / 60)).toFixed(2)}"/>`
+        : `<rect class="sp-track" x="${x}" y="${H - strip}" width="${w}" height="${strip}"/>`;
+      return `<g><title>${escapeHtml(tip)}</title><rect class="sp-hit" x="${i * slot}" y="0" width="${slot}" height="${H}"/>${bars}${base}</g>`;
+    })
+    .join('');
+  const step = hours <= 24 ? 6 : hours <= 72 ? 12 : 24;
+  const labels = g.hourly
+    .map((h, i) => {
+      const d = new Date(h.hourStart);
+      const left = (i / n) * 100;
+      if (d.getHours() % step !== 0 || left > 94) return '';
+      const text = d.getHours() === 0 && hours > 24 ? d.toLocaleDateString('th-TH', { day: 'numeric', month: 'short' }) : `${pad(d.getHours())}:00`;
+      return `<span class="${left < 4 ? 'is-first' : ''}" style="left:${left.toFixed(2)}%">${escapeHtml(text)}</span>`;
+    })
+    .join('');
+  const label = `จำนวนรันต่อชั่วโมง ${g.runs} รัน${g.failed ? ` พัง ${g.failed}` : ''}`;
+  return `<div class="auto-spark">
+      <svg viewBox="0 0 ${n * slot} ${H}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(label)}">${cells}</svg>
+      <div class="auto-axis" aria-hidden="true">${labels}</div>
+    </div>`;
+}
+
+function autoIdleHtml(g) {
+  const parts = [];
+  if (g.longestIdle && g.longestIdleMinutes >= 1) {
+    parts.push(`ว่างนานสุด <b>${escapeHtml(autoSpan(g.longestIdleMinutes))}</b> (${escapeHtml(autoRange(g.longestIdle.from, g.longestIdle.to))})`);
+  }
+  if (!g.running && g.idleSinceMinutes >= 30) parts.push(`ไม่มีรันใหม่มา ${escapeHtml(autoSpan(g.idleSinceMinutes))}`);
+  if (!parts.length) parts.push(g.runs < 2 ? 'มีรันเดียวในช่วงนี้' : 'รันต่อเนื่อง ไม่มีช่วงว่าง');
+  return `<p class="auto-idle">${icon('clock', 15)}<span>${parts.join(' · ')}</span></p>`;
+}
+
+function autoRunHtml(r, g) {
+  const [cls, label] =
+    r.status === 'ok' ? ['s-done', 'สำเร็จ'] : r.status === 'running' ? ['s-work', 'กำลังรัน'] : ['s-hold', AUTO_REASON[r.reason] || 'ไม่สำเร็จ'];
+  const note =
+    r.status === 'failed' ? [r.reason === 'cut_off' ? `หยุดหลัง ${r.turns} turns` : '', r.detail || ''].filter(Boolean).join(' · ') : '';
+  const tip = [
+    r.firstPrompt || '',
+    [r.model ? modelLabel(r.model) : '', `${r.turns} turns`, `${r.toolCalls} tool calls${r.toolErrors ? ` (error ${r.toolErrors})` : ''}`].filter(Boolean).join(' · '),
+  ]
+    .filter(Boolean)
+    .join('\n');
+  const title = `${g.folder} · ${autoTime(r.startedAt, true)}`;
+  return `<li><button class="auto-run" ${act('openAutoRun', r.sessionId, title)} title="${escapeHtml(tip)}">
+      <span class="ar-time num">${escapeHtml(autoTime(r.startedAt))}</span>
+      <span class="ar-dur num">${escapeHtml(autoDuration(r.durationMs))}</span>
+      <span class="ar-tok num">${escapeHtml(formatTokens(r.tokens))}</span>
+      <span class="ar-state"><span class="pill ${cls}">${escapeHtml(label)}</span></span>
+      <span class="ar-prompt"><span class="ar-text">${escapeHtml(r.firstPrompt || 'ไม่มีข้อความสั่งงาน')}</span>${note ? `<span class="ar-note">${escapeHtml(note)}</span>` : ''}</span>
+    </button></li>`;
+}
+
+function autoGroupHtml(g, hours) {
+  const stats = [
+    `<span class="pill"><b class="num">${g.runs}</b>รัน</span>`,
+    g.failed ? `<span class="pill s-hold"><b class="num">${g.failed}</b>ไม่สำเร็จ</span>` : '',
+    g.running ? `<span class="pill s-work"><b class="num">${g.running}</b>กำลังรัน</span>` : '',
+    `<span class="pill" title="tokens ใหม่ (input, output และ cache write)"><b class="num">${escapeHtml(formatTokens(g.tokens))}</b>tokens</span>`,
+    `<span class="pill" title="${escapeHtml(g.lastRunAt ? new Date(g.lastRunAt).toLocaleString('th-TH') : '')}">ล่าสุด ${escapeHtml(autoTime(g.lastRunAt))}</span>`,
+  ].join('');
+  const expanded = auto.expanded.has(g.key);
+  const rows = expanded ? g.recent : g.recent.slice(0, AUTO_ROWS);
+  const today = new Date();
+  const multiDay = rows.some((r) => !autoSameDay(new Date(r.startedAt), today));
+  const more =
+    g.recent.length > AUTO_ROWS
+      ? `<button class="btn btn-ghost btn-sm auto-more" ${act('toggleAutoRuns', g.key)}>${expanded ? 'ย่อรายการ' : `ดูอีก ${g.recent.length - AUTO_ROWS} รัน`}</button>`
+      : '';
+  const capped = g.runs > g.recent.length ? `<span class="auto-cap">${g.recent.length} จาก ${g.runs} รัน</span>` : '';
+  return `
+    <section class="auto-card" aria-label="${escapeHtml(g.folder)}">
+      <div class="auto-head">${icon('folder', 16)}<span class="auto-name">${escapeHtml(g.folder)}</span></div>
+      <div class="auto-path mono" title="${escapeHtml(g.cwd || '')}">${escapeHtml(g.cwd || '')}</div>
+      <div class="auto-stats">${stats}</div>
+      ${autoSparkHtml(g, hours)}
+      ${autoIdleHtml(g)}
+      <div class="auto-sub">รันล่าสุด${capped}</div>
+      <ol class="auto-runs ${multiDay ? 'is-days' : ''}">${rows.map((r) => autoRunHtml(r, g)).join('')}</ol>
+      ${more}
+    </section>`;
+}
+
+function renderAutomation() {
+  const el = $('#automation');
+  if (!el || ui.view !== 'automation') return;
+  const d = auto.data && auto.data.windowHours === auto.hours ? auto.data : null;
+  if (!d && !auto.loading && !auto.error) loadAutomation();
+  const win = AUTO_WINDOWS.find((w) => w.hours === auto.hours) || AUTO_WINDOWS[0];
+  const chips = AUTO_WINDOWS.map(
+    (w) => `<button class="chip" aria-pressed="${w.hours === auto.hours}" ${act('setAutoWindow', w.hours)}>${escapeHtml(w.label)}</button>`
+  ).join('');
+  const t = d && d.totals;
+  const summary =
+    t && t.runs
+      ? [
+          `<span class="pill"><b class="num">${t.runs}</b>รัน</span>`,
+          t.failed ? `<span class="pill s-hold"><b class="num">${t.failed}</b>ไม่สำเร็จ</span>` : '',
+          t.running ? `<span class="pill s-work"><b class="num">${t.running}</b>กำลังรัน</span>` : '',
+          `<span class="pill"><b class="num">${escapeHtml(formatTokens(t.tokens))}</b>tokens</span>`,
+        ].join('')
+      : '';
+  const updated = auto.error ? 'อัปเดตไม่สำเร็จ' : d ? `อัปเดต ${autoTime(d.generatedAt)}` : '';
+  const head = `
+    <div class="ov-top">
+      <h2 class="ov-title">งานอัตโนมัติ</h2>
+      <div class="ov-summary" aria-label="สรุปงานอัตโนมัติ">${summary}</div>
+      <div class="auto-tools">
+        <span class="auto-updated">${escapeHtml(updated)}</span>
+        <div class="auto-win" role="group" aria-label="ช่วงเวลา">${chips}</div>
+        <button class="icon-btn icon-btn-sm" ${act('refreshAutomation')} aria-label="โหลดใหม่" title="โหลดใหม่">${icon('refresh', 16)}</button>
+      </div>
+    </div>
+    <p class="auto-intro">งานที่รันด้วย <code>claude -p</code> หรือ Agent SDK ไม่มีห้องใน dashboard จึงสรุปไว้ที่นี่ แยกตามโฟลเดอร์ที่รัน</p>`;
+  let body;
+  if (!d) {
+    body = auto.error
+      ? `<div class="empty-list">อ่านข้อมูลงานอัตโนมัติไม่ได้<br><button class="btn btn-sm" ${act('refreshAutomation')}>ลองอีกครั้ง</button></div>`
+      : '<div class="empty-list">กำลังอ่าน transcript…</div>';
+  } else if (!d.groups.length) {
+    body = `<div class="empty-list">ช่วง ${escapeHtml(win.label)} ที่ผ่านมาไม่มีงานอัตโนมัติ<br>เมื่อสคริปต์หรือเครื่องมือรัน <code>claude -p</code> หรือ Agent SDK งานจะขึ้นที่นี่ตามโฟลเดอร์ที่รัน</div>`;
+  } else {
+    body = `<div class="auto-groups">${d.groups.map((g) => autoGroupHtml(g, d.windowHours)).join('')}</div>`;
+  }
+  setHTML(el, head + body);
+}
+
+Object.assign(Actions, {
+  setAutoWindow(hours) {
+    if (!AUTO_WINDOWS.some((w) => w.hours === hours) || hours === auto.hours) return;
+    auto.hours = hours;
+    try {
+      localStorage.setItem(AUTO_HOURS_KEY, String(hours));
+    } catch {}
+    auto.error = false;
+    loadAutomation();
+    renderAutomation();
+  },
+  refreshAutomation() {
+    auto.error = false;
+    loadAutomation();
+    renderAutomation();
+  },
+  toggleAutoRuns(key) {
+    if (auto.expanded.has(key)) auto.expanded.delete(key);
+    else auto.expanded.add(key);
+    renderAutomation();
+  },
+  openAutoRun(sessionId, title) {
+    openTranscriptViewer(String(sessionId || ''), { title: String(title || '') });
+  },
+});
+
+setInterval(() => {
+  if (ui.view === 'automation' && !document.hidden && !auto.loading) loadAutomation();
+}, AUTO_REFRESH_MS);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && ui.view === 'automation' && !auto.loading) loadAutomation();
+});
 
 /* ---------- Event delegation ---------- */
 document.addEventListener('click', (e) => {

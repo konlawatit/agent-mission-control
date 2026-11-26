@@ -231,9 +231,9 @@ A lavender family on hue 276–287 with one violet signal and four semantic stat
 
 ### Secondary (status hues; meaning only)
 - **Lamp Amber** (`attn`, `attn-ink`, `attn-soft`, `attn-line`): needs you. The "รอคุณ" group head and pill, the prompt card, its cursor option, the current stage step while the room waits, the nav badge (amber ink on white).
-- **Working Blue** (`work`, `work-ink`, `work-soft`): working. The spinning avatar, the "กำลังทำงาน" pill, the current stage dot, tool names in output.
-- **Done Green** (`done`, `done-ink`, `done-soft`): done. Finished steps and dots, done avatars, the A/U file badge, success toasts, the live connection dot.
-- **Quota Rose** (`hold`, `hold-ink`, `hold-soft`, `hold-line`, `hold-fill`): quota hold. The hold banner, the held-room notice, the held composer and its note chip, the low end of meters. `hold-fill` is the darker rose used under white text (the "ทำต่อเลย" button).
+- **Working Blue** (`work`, `work-ink`, `work-soft`): working. The spinning avatar, the "กำลังทำงาน" pill, the current stage dot, tool names in output, an automated run that is still going ("กำลังรัน").
+- **Done Green** (`done`, `done-ink`, `done-soft`): done. Finished steps and dots, done avatars, the A/U file badge, success toasts, the live connection dot, a finished automated run ("สำเร็จ").
+- **Quota Rose** (`hold`, `hold-ink`, `hold-soft`, `hold-line`, `hold-fill`): quota hold, or an automated run that failed. The hold banner, the held-room notice, the held composer and its note chip, the low end of meters; on the งานอัตโนมัติ view the failed-run count pill (only when above zero), a failed run's reason pill and the failed part of an hourly bar. `hold-fill` is the darker rose used under white text (the "ทำต่อเลย" button).
 - **Diff tints** (`add-bg`, `del-bg`): row tints in diffs. They share hue with done and hold but are separate tokens.
 
 ### Neutral
@@ -249,7 +249,7 @@ A lavender family on hue 276–287 with one violet signal and four semantic stat
 Deep indigo glass, same structure: `ground` 0.175/0.035/285, `glass` 0.245 at 62%, `card` 0.30 at 70%, `card-sel` 0.345, text 0.96 / 0.83 / 0.71, `primary` 0.56/0.22/287 → `primary-2` 0.55/0.17/268 (still dark enough for white text), `primary-ink` and `ring` lifted to 0.80 / 0.78, status inks lifted to ~0.80 lightness, shell 0.43/0.165/303 → 0.34/0.12/274. The theme follows `prefers-color-scheme`; the sidebar's theme button cycles auto → light → dark and pins it with `data-theme` on `<html>`.
 
 ### Named Rules
-**The Meaning-Only Rule.** Status hues carry meaning only: amber means needs you, blue means working, green means done or a diff addition, rose means quota hold or a diff deletion. Never use them for decoration, category or emphasis.
+**The Meaning-Only Rule.** Status hues carry meaning only: amber means needs you, blue means working, green means done or a diff addition, rose means quota hold, a failed automated run or a diff deletion. Never use them for decoration, category or emphasis.
 
 **The One Violet Rule.** Violet is the only colour that says "you can act here" or "this is selected". It never stands in for a status, and a status never borrows it.
 
@@ -360,7 +360,7 @@ A white pill (26px radius) with a 40px paperclip button on the left, an auto-gro
 Attachments: files come from the paperclip, a paste (a screenshot or copied image becomes `screenshot-HHMMSS.png`) or a drop on the composer (a dashed `ring` outline while dragging). Each uploads at once and waits above the pill as a white chip (14px radius): a 40px thumbnail for images or a violet file tile, the name (ellipsis), the size or "กำลังอัปโหลด…" in `work-ink`, a rose state with the error when it fails, and a remove button; two per row on a phone. Sending waits for uploads and appends one absolute path per line under "ไฟล์แนบ (N):", which Claude opens itself. Files live in the data folder, never the repository, 20 MB and 10 files at most, removed after 14 days.
 
 ### Navigation
-- **Sidebar:** brand mark (40px, white 18% glass) and name with the connection dot; a white "ห้องใหม่" button with violet text; nav items Live, รอคุณ (white badge with amber count), ภาพรวม, ประวัติ, 42px high, white 12% on hover and 22% when current; then the usage card and three tool buttons (hooks, scan terminals, theme).
+- **Sidebar:** brand mark (40px, white 18% glass) and name with the connection dot; a white "ห้องใหม่" button with violet text; nav items Live, รอคุณ (white badge with amber count), ภาพรวม, ประวัติ, งานอัตโนมัติ, 42px high, white 12% on hover and 22% when current; then the usage card and three tool buttons (hooks, scan terminals, theme).
 - **Usage card:** white 14% glass, "Usage 5 ชม.", the remaining percentage at 22px/750, a white meter with the threshold tick, and a footer with the reset time and the reading's source. During a hold it gains a rose inner ring.
 - **Icon strip:** 52px stacked icon-over-label buttons (10.5px/650) for ไฟล์, Agents, ประวัติ, Usage, with violet count badges; pressed violet ink on `primary-soft`.
 
@@ -371,6 +371,14 @@ Attachments: files come from the paperclip, a paste (a screenshot or copied imag
 
 ### Overview
 Status pills with counts, then project lanes (see Layout). Every lane shows the project name, its room count and the folder path (truncated, full path on hover), and stacks the same room cards as the list, sorted attention first and then in the dragged order; lanes follow the same rule. When Claude Code hooks are not installed an amber notice above the lanes (and above the room list) says the status is not live, with an "ติดตั้ง" button.
+
+### Automated Runs
+The งานอัตโนมัติ view shows what `claude -p` and Agent SDK sessions did (they get no room). Like the overview it replaces list, room and strip: the 23px title with total pills (runs, failed in rose only when above zero, running in blue when any, tokens), and on the right the update time, three window chips (24 ชม. / 3 วัน / 7 วัน; the chosen one violet ink on `primary-soft`) and a refresh icon button; one `text-3` line says why these runs are here. Below, one card per working folder (`card`, 26px radius, card shadow) in a `minmax(540px, 1fr)` grid: the folder name at 15px/750 with its full path in mono under it; stat pills (runs, failed, running, tokens, last run); the hourly chart; the idle sentence; then "รันล่าสุด" and eight run rows, with a ghost "ดูอีก N รัน" button for the rest (the API sends the newest 30).
+
+- **Hourly chart:** inline SVG, one slot per hour of the window, 52px high. A bar is the runs started in that hour, violet like a resting meter, with the failed share stacked at its foot in `hold`. Under every slot sits a 4px strip: `soft-2` when nothing ran, violet while a run was going, its opacity rising with the minutes of work, so a long run still shows in the hours after it started and empty hours read as gaps. Each slot has a native tooltip (hour, runs, failed, tokens, minutes of work). Hour labels every 6 hours (24 ชม.), 12 hours (3 วัน) or a date per day (7 วัน), 11px `text-3` tabular.
+- **Idle sentence:** a clock glyph and "ว่างนานสุด **3 ชม. 20 นาที** (01:10–04:30)", the longest gap between runs inside the window (with dates when it is not today), then "ไม่มีรันใหม่มา …" once nothing has run for 30 minutes.
+- **Run row:** a full-width button (10px radius, `soft` on hover) in five columns: start time (650, `text`), duration and tokens (`text-3`, right-aligned, tabular), a status pill (สำเร็จ green, กำลังรัน blue, or the failure reason in rose: จบกลางคัน, API error, ถูกหยุด, ไม่ได้ตอบ) and the first prompt on one line. A failed run adds a `text-3` line saying what stopped it ("หยุดหลัง 60 turns · This command requires approval"). The tooltip carries the prompt, model, turns and tool calls; a click opens the run in the transcript viewer. On a phone the prompt moves to its own line under time, duration, tokens and the pill.
+- **States:** "กำลังอ่าน transcript…" during the first scan; an empty state that says nothing ran in the chosen window and what will show up here; an error line with "ลองอีกครั้ง". The view refreshes every 30 seconds while it is open and the tab is visible.
 
 ### Icons
 An authored set on a 24-unit grid, stroked at 1.75 with round caps and joins, in `currentColor`, rendered at 11–20px. Icons inherit colour from context and are never multicolour.

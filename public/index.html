@@ -784,6 +784,66 @@
     .ov-stack { display: flex; flex-direction: column; gap: 10px; }
     .ov-stack .rcard { margin: 0; }
 
+    /* ---------- Automated runs (claude -p, Agent SDK) ---------- */
+    .auto-view { display: none; grid-row: 2; overflow-y: auto; padding: 24px 26px 30px; }
+    .work.is-auto { grid-template-columns: minmax(0, 1fr); }
+    .work.is-auto .list, .work.is-auto .focus, .work.is-auto .strip { display: none; }
+    .work.is-auto .auto-view { display: block; }
+    .auto-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+    .auto-updated { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .auto-win { display: flex; gap: 4px; }
+    .auto-win .chip[aria-pressed="true"] { background: var(--primary-soft); color: var(--primary-ink); font-weight: 650; }
+    .auto-intro { margin: -6px 0 18px; font-size: 13px; color: var(--text-3); }
+    .auto-view code { font-family: var(--font-mono); font-size: 0.9em; }
+    .auto-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 540px), 1fr)); gap: 16px; align-items: start; }
+    .auto-card {
+      display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 16px 16px 10px;
+      border-radius: var(--r-xl); background: var(--card); box-shadow: var(--shadow-card), inset 0 0 0 1px var(--glass-edge);
+    }
+    .auto-head { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 15px; font-weight: 750; }
+    .auto-head > svg { color: var(--text-3); }
+    .auto-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .auto-path { margin-top: -8px; padding-left: 24px; font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .auto-stats { display: flex; flex-wrap: wrap; gap: 6px; }
+    .auto-stats .pill, .auto-view .ov-summary .pill { gap: 5px; }
+    .auto-stats .pill b { font-weight: 800; }
+    .auto-spark svg { display: block; width: 100%; height: 52px; }
+    .sp-hit { fill: transparent; }
+    .auto-spark g:hover > .sp-hit { fill: var(--primary-soft); }
+    .sp-run { fill: var(--primary); fill-opacity: 0.8; }
+    .sp-fail { fill: var(--hold); }
+    .sp-track { fill: var(--soft-2); }
+    .sp-active { fill: var(--primary); }
+    .auto-axis { position: relative; height: 16px; margin-top: 4px; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .auto-axis span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+    .auto-axis span.is-first { transform: none; }
+    .auto-idle { display: flex; align-items: flex-start; gap: 7px; font-size: 13px; color: var(--text-2); }
+    .auto-idle > svg { margin-top: 2px; color: var(--text-3); }
+    .auto-idle b { color: var(--text); font-weight: 700; }
+    .auto-sub { display: flex; align-items: baseline; gap: 8px; margin-top: 4px; padding: 0 2px; font-size: 12.5px; font-weight: 700; color: var(--text-3); }
+    .auto-cap { font-size: 11.5px; font-weight: 500; }
+    .auto-runs { list-style: none; display: flex; flex-direction: column; gap: 2px; margin: 0 -8px; }
+    .auto-run {
+      display: grid; grid-template-columns: 44px 62px 48px 92px minmax(0, 1fr); align-items: center; column-gap: 10px;
+      width: 100%; padding: 7px 8px; border-radius: var(--r-sm); text-align: left; font-size: 12.5px; color: var(--text-2);
+      transition: background-color 140ms;
+    }
+    .auto-runs.is-days .auto-run { grid-template-columns: 92px 62px 48px 92px minmax(0, 1fr); }
+    .auto-run:hover { background: var(--soft); color: var(--text); }
+    .ar-time { color: var(--text); font-weight: 650; white-space: nowrap; }
+    .ar-dur, .ar-tok { color: var(--text-3); white-space: nowrap; text-align: right; }
+    .ar-prompt { display: flex; flex-direction: column; min-width: 0; }
+    .ar-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ar-note { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .auto-more { align-self: flex-start; margin: 0 0 4px; }
+    @media (max-width: 900px) {
+      .auto-view { padding: 18px 14px; }
+      .auto-tools { margin-left: 0; width: 100%; }
+      .auto-run, .auto-runs.is-days .auto-run { grid-template-columns: auto auto auto minmax(0, 1fr); row-gap: 3px; }
+      .ar-state { justify-self: end; }
+      .ar-prompt { grid-column: 1 / -1; }
+    }
+
     /* ---------- Popover ---------- */
     .popover {
       position: fixed; z-index: 60; min-width: 230px; max-width: 320px; padding: 8px; border-radius: var(--r-lg);
@@ -995,6 +1055,7 @@
 
       <section class="focus" id="focus" aria-label="ห้องที่เลือก"></section>
       <section class="overview" id="overview" aria-label="ภาพรวมทุกห้อง"></section>
+      <section class="auto-view" id="automation" aria-label="งานอัตโนมัติ"></section>
       <nav class="strip" id="strip" aria-label="เปิดรายละเอียด"></nav>
       <div class="panel" id="panel" hidden></div>
     </main>

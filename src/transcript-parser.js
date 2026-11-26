@@ -679,6 +679,81 @@ function trackPendingAsk(pending, entry) {
 }
 
 /**
+ * Claude Code's built-in slash commands that run in the terminal without a model turn: no Stop
+ * hook ever follows them. (Custom commands, skills and /init, /review, … are prompts: Claude
+ * answers them like any message.) `/compact` calls the model but is not a turn either.
+ */
+const LOCAL_COMMANDS = new Set([
+  'add-dir', 'agents', 'allowed-tools', 'bashes', 'btw', 'bug', 'checkpoint', 'chrome', 'clear',
+  'color', 'compact', 'config', 'context', 'continue', 'copy', 'cost', 'desktop', 'doctor', 'effort',
+  'exit', 'export', 'extra-usage', 'fast', 'feedback', 'help', 'hooks', 'ide', 'install-github-app',
+  'install-slack-app', 'keybindings', 'login', 'logout', 'mcp', 'memory', 'migrate-installer',
+  'mobile', 'model', 'output-style', 'passes', 'permissions', 'plan', 'plugin', 'plugins',
+  'privacy-settings', 'quit', 'release-notes', 'reload-plugins', 'remote-env', 'rename', 'resume',
+  'rewind', 'sandbox', 'settings', 'skills', 'stats', 'status', 'tag', 'tasks', 'terminal-setup',
+  'theme', 'todos', 'upgrade', 'usage', 'vim', 'voice',
+]);
+
+/**
+ * The command name when `text` is a local command typed into Claude Code (`/effort high`,
+ * `/usage`, or a `!` shell command), else null. Such input changes settings or shows something;
+ * it never starts a turn, so the room must not be marked working for it.
+ */
+function localCommandName(text) {
+  const t = String(text || '').trim();
+  if (/^![^\s]/.test(t)) return '!';
+  const m = t.match(/^\/([a-z][a-z0-9:-]*)(?=\s|$)/i);
+  const name = m ? m[1].toLowerCase() : '';
+  // Bare `/plan` toggles plan mode; `/plan <task>` hands Claude a task.
+  if (name === 'plan' && t.length > m[0].length) return null;
+  return LOCAL_COMMANDS.has(name) ? name : null;
+}
+
+/**
+ * Transcript entries Claude Code writes for a local command: the command line itself
+ * (`<command-name>/model</command-name>…`, `rowSource: "local"` since 2.1.33x) and its output
+ * (`<local-command-stdout>`), or a `!` shell command (`<bash-input>`, `<bash-stdout>`). They
+ * record a setting change or a shell run, not a turn.
+ */
+function isLocalCommandEntry(entry, texts) {
+  if (entry.rowSource === 'local') return true;
+  return texts.some((t) => {
+    const s = t.trim();
+    if (/^<(?:local-command-(?:stdout|stderr|caveat)|bash-(?:input|stdout|stderr))>/.test(s)) return true;
+    const m = s.match(/^<command-name>\s*(\/[^<\s]*)\s*<\/command-name>/);
+    return Boolean(m && localCommandName(m[1]));
+  });
+}
+
+/**
+ * A model id (`claude-opus-5-5`) from text that names one: the banner ("Opus 5.5 · Claude Max"),
+ * /model output ("Set model to `Fable 5.2`"), or an alias ("sonnet"). Null when none is named.
+ */
+function modelIdFromText(text) {
+  const s = String(text || '');
+  const named = s.match(/\b(opus|sonnet|haiku|fable|mythos)\s+(\d+)(?:\.(\d+))?\b/i);
+  if (named) return `claude-${named[1].toLowerCase()}-${named[2]}${named[3] ? `-${named[3]}` : ''}`;
+  const id = s.match(/\bclaude-(?:opus|sonnet|haiku|fable|mythos)-[0-9][a-z0-9-]*/i);
+  if (id) return id[0].toLowerCase();
+  const alias = s.match(/\b(opus|sonnet|haiku|fable|mythos)\b/i);
+  return alias ? alias[1].toLowerCase() : null;
+}
+
+/** The model a local `/model` command switched to (or kept), from its output; null otherwise. */
+function modelFromCommandOutput(text) {
+  const m = String(text || '').match(/(?:Set model to|Kept model as)\s+([^\n<]+)/i);
+  return m ? modelIdFromText(m[1]) : null;
+}
+
+function userTexts(content) {
+  return typeof content === 'string'
+    ? [content]
+    : Array.isArray(content)
+    ? content.filter((b) => b.type === 'text').map((b) => String(b.text || ''))
+    : [];
+}
+
+/**
  * Whether the turn is still running after this entry ('running'), over ('done'), or unchanged (null).
  * Lets the dashboard notice a finished turn when no Stop hook reports it.
  */
@@ -690,14 +765,9 @@ function turnStateAfter(entry) {
     return msg.stop_reason === 'end_turn' ? 'done' : 'running';
   }
   if (role !== 'user' || entry.isMeta || entry.isCompactSummary) return null;
-  const content = msg.content;
-  const texts =
-    typeof content === 'string'
-      ? [content]
-      : Array.isArray(content)
-      ? content.filter((b) => b.type === 'text').map((b) => String(b.text || ''))
-      : [];
+  const texts = userTexts(msg.content);
   if (texts.some((t) => INTERRUPTED_RE.test(t.trim()))) return 'done';
+  if (isLocalCommandEntry(entry, texts)) return null; // /model, /effort, …: no turn
   return 'running'; // a new prompt, or a tool result Claude still has to answer
 }
 
@@ -968,7 +1038,9 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
     let lastAssistantFullText = null;
     let lastAssistantText = null;
     let lastUserText = null;
-    let detectedModel = null;
+    let detectedModel = null; // the model that last answered (prices the tokens)
+    let currentModel = null; // the model in use now: the last answer's, or a later /model switch
+    let currentModelAt = null;
     const conversationLines = [];
     const subAgentsMap = new Map();
     const turns = [];
@@ -1013,8 +1085,22 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
         const content = msg.content;
         const ts = entry.timestamp || new Date(stat.mtimeMs).toISOString();
 
-        if (msg.model && typeof msg.model === 'string') {
+        // '<synthetic>' marks a message Claude Code wrote itself (an API error, "No response
+        // requested."), not a model.
+        if (msg.model && typeof msg.model === 'string' && msg.model !== '<synthetic>') {
           detectedModel = msg.model;
+          currentModel = msg.model;
+          currentModelAt = ts;
+        }
+        if (role === 'user' && filePath === targetPath) {
+          // `/model` switches the model before the next reply says so.
+          for (const t of userTexts(content)) {
+            const switched = /^\s*<local-command-stdout>/.test(t) ? modelFromCommandOutput(t) : null;
+            if (switched) {
+              currentModel = switched;
+              currentModelAt = ts;
+            }
+          }
         }
 
         // Accumulate real Claude token usage per unique message/entry
@@ -1237,6 +1323,8 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
     return {
       transcriptPath: targetPath,
       detectedModel,
+      currentModel,
+      currentModelAt,
       tokenUsage,
       lastAssistantFullText,
       lastAssistantText: lastAssistantText
@@ -1380,4 +1468,7 @@ module.exports = {
   clearCaches,
   summarizeText,
   inferWorkflowFromTool,
+  localCommandName,
+  modelIdFromText,
+  modelFromCommandOutput,
 };

@@ -312,12 +312,9 @@ class CommandBridge {
       const sent = await this.consoleScanner.sendText(session.pid, trimmed);
       if (sent && sent.ok) {
         session.lastTypedText = trimmed; // to recognise it if it ends up unsent in the input box
-        this.store.processHookEvent({
-          session_id: session.id,
-          cwd: session.cwd,
-          hook_event_name: 'UserPromptSubmit',
-          prompt: trimmed,
-        });
+        // As Claude Code takes it: a local command (/effort, /model, /usage) starts no turn, and a
+        // message sent mid-turn waits in Claude's queue (see StateStore.recordSentPrompt).
+        this.store.recordSentPrompt(session.id, trimmed);
         return {
           ok: true,
           delivered: true,
@@ -327,15 +324,12 @@ class CommandBridge {
       }
     }
 
-    const recordPrompt = () =>
-      this.store.processHookEvent({
-        session_id: session.id,
-        cwd: session.cwd,
-        hook_event_name: 'UserPromptSubmit',
-        prompt: isApproval
-          ? `[Approved] ${session.pendingAction || trimmed}`
-          : trimmed,
-      });
+    const recordPrompt = ({ viaTerminal = true } = {}) =>
+      this.store.recordSentPrompt(
+        session.id,
+        isApproval ? `[Approved] ${session.pendingAction || trimmed}` : trimmed,
+        { viaTerminal }
+      );
 
     if ((mode === 'auto' || mode === 'wezterm') && session.paneId) {
       const wezSent = await this._tryWezTermSend(session.paneId, trimmed);
@@ -351,7 +345,7 @@ class CommandBridge {
     }
 
     if (mode === 'claude-resume' || options.runHeadless) {
-      recordPrompt();
+      recordPrompt({ viaTerminal: false });
       this._spawnClaudeHeadless(session, trimmed);
       return {
         ok: true,

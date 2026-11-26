@@ -12,6 +12,7 @@ const {
   isAutomatedEntrypoint,
   findTranscriptById,
   findTranscriptsForCwd,
+  localCommandName,
 } = require('./transcript-parser');
 const { lookupClaudeSessionByPid } = require('./claude-sessions');
 const { parseConsoleScreen } = require('./console-scanner');
@@ -51,6 +52,20 @@ function isDefaultTldr(text) {
     text === 'เปิด Claude Session พร้อมเริ่มงาน'
   );
 }
+
+// The TL;DR of a room with nothing running and nothing better to say (a default: the transcript's
+// last reply replaces it as soon as there is one).
+const IDLE_TLDR = 'ว่างอยู่ พร้อมรับคำสั่งผ่าน Terminal หรือสั่งการจากหน้า Dashboard';
+
+// A TL;DR written for a prompt on screen ("⚠️ Select model — …"); it is over when the prompt is.
+const PROMPT_TLDR_RE = /^⚠️/;
+
+// How long a room said to be "working" must show an idle terminal (input box, no spinner, no
+// "esc to interrupt") with no hook activity before it is taken as not working. A real turn shows
+// the spinner the whole time, so this only catches turns that will never report a Stop.
+const STALE_WORKING_MS = 10000;
+// How long a background `claude -p` run is trusted to be working without its Stop.
+const BACKGROUND_RUN_MAX_MS = 60 * 60 * 1000;
 
 /**
  * Cleans any raw `cwd` string (stripping PowerShell prompt suffixes like `> claude`)
@@ -118,6 +133,9 @@ class StateStore extends EventEmitter {
     this.saveDebounceMs = options.saveDebounceMs ?? 400;
     this._saveTimer = null;
     this._dirty = false;
+    this._now = typeof options.now === 'function' ? options.now : Date.now; // overridable for tests
+    this._idleScreenSince = new Map(); // room id -> when its terminal started to look idle
+    this.staleWorkingMs = options.staleWorkingMs ?? STALE_WORKING_MS;
     this._ensureDataDir();
     this._loadFromDisk();
   }
@@ -371,9 +389,7 @@ class StateStore extends EventEmitter {
     if (parsed.transcriptPath) {
       session.transcriptPath = parsed.transcriptPath;
     }
-    if (parsed.detectedModel) {
-      session.model = parsed.detectedModel;
-    }
+    this._setModel(session, parsed.currentModel || parsed.detectedModel, Date.parse(parsed.currentModelAt || '') || 0);
     if (parsed.tokenUsage) {
       session.tokenUsage = parsed.tokenUsage;
     }
@@ -388,6 +404,7 @@ class StateStore extends EventEmitter {
     }
     if (parsed.utf8Preview && !session.interactivePrompt) {
       session.screenPreview = parsed.utf8Preview;
+      session.previewSource = 'transcript';
       // Where that preview starts in the transcript; older messages are paged from here.
       session.previewFrom = Number.isFinite(parsed.previewFrom) ? parsed.previewFrom : null;
     }
@@ -438,6 +455,20 @@ class StateStore extends EventEmitter {
         }
       }
     }
+  }
+
+  /**
+   * The model a room runs, from whichever source saw it last: the transcript (the last reply's
+   * model, or a later /model switch) or the screen (the start-up banner, /model output). A reading
+   * older than the one shown is ignored, so a resumed session's banner beats yesterday's reply.
+   * Never guessed: a room shows no model until one of them names it.
+   */
+  _setModel(session, model, atMs) {
+    if (!model) return;
+    const at = Number.isFinite(atMs) ? atMs : 0;
+    if (Number.isFinite(session.modelAt) && at < session.modelAt && session.model) return;
+    session.model = model;
+    session.modelAt = Math.max(at, Number.isFinite(session.modelAt) ? session.modelAt : 0);
   }
 
   _enrichAllFromTranscripts() {
@@ -609,7 +640,8 @@ class StateStore extends EventEmitter {
       taskHistory: Array.isArray(defaults.taskHistory)
         ? defaults.taskHistory
         : [],
-      model: defaults.model || 'opus',
+      // Unknown until the banner, a /model switch or the transcript says (see _setModel).
+      model: defaults.model || null,
       effort: defaults.effort || 'high',
       tokenUsage: defaults.tokenUsage || {
         inputTokens: 0,
@@ -639,7 +671,8 @@ class StateStore extends EventEmitter {
   ingestConsoleScan(scanItems = []) {
     if (!Array.isArray(scanItems)) return;
     let changed = false;
-    const now = new Date().toISOString();
+    const nowMs = this._now();
+    const now = new Date(nowMs).toISOString();
     const activePids = new Set();
     for (const i of scanItems) {
       if (!i || !i.pid) continue;
@@ -665,13 +698,27 @@ class StateStore extends EventEmitter {
         continue;
       }
 
+      // Claude Code's session registry says which session this process is on, so the room gets
+      // its own transcript at once (and the new one after /clear), with no guessing by folder.
+      const registered = lookupClaudeSessionByPid(numericPid, { sessionsDir: this.claudeSessionsDir });
+
+      // A room the person archived while this terminal stayed open stays in history: the terminal
+      // being there is not news. New activity from it (a hook) brings it back (processHookEvent).
+      const dismissed = this._dismissedRoomFor(numericPid, registered);
+      if (dismissed) {
+        if (Number(dismissed.pid) !== numericPid) {
+          dismissed.pid = numericPid;
+          changed = true;
+        }
+        this._idleScreenSince.delete(dismissed.id);
+        continue;
+      }
+
       const { project, category } = this._inferProjectMeta(cwd);
       const cliLabel = [
         'claude',
         parsed.version || '',
-        parsed.model
-          ? `(${parsed.model.split('·')[0].trim()})`
-          : `(PID ${numericPid})`,
+        parsed.model ? `(${parsed.model})` : `(PID ${numericPid})`,
       ]
         .filter(Boolean)
         .join(' ');
@@ -698,12 +745,14 @@ class StateStore extends EventEmitter {
         prompt: session.interactivePrompt,
         preview: session.screenPreview,
         tldr: session.tldr,
+        model: session.model,
         historyCount: (session.taskHistory || []).length,
       });
 
       if (session.lifecycle === 'history') {
         session.lifecycle = 'live';
         session.closedAt = null;
+        session.archivedAt = null;
         session.openCount = (session.openCount || 1) + 1;
         if (session.status === 'closed') {
           session.status = 'idle';
@@ -715,9 +764,6 @@ class StateStore extends EventEmitter {
       // Always bind the exact console PID discovered for this specific `cwd`!
       session.pid = numericPid;
       session.cli = cliLabel;
-      // Claude Code's session registry says which session this process is on, so the room gets
-      // its own transcript at once (and the new one after /clear), with no guessing by folder.
-      const registered = lookupClaudeSessionByPid(numericPid, { sessionsDir: this.claudeSessionsDir });
       if (registered && registered.sessionId && registered.sessionId !== session.claudeSessionId) {
         session.claudeSessionId = registered.sessionId;
         session.transcriptPath = null; // found by id in _transcriptFor
@@ -738,14 +784,25 @@ class StateStore extends EventEmitter {
 
       this._enrichSessionFromTranscript(session);
 
-      if (!session.screenPreview || parsed.interactivePrompt) {
-        const cleanConsolePreview = (parsed.screenPreview || '').replace(
-          /\uFFFD+/g,
-          ''
-        );
-        if (!session.screenPreview) {
-          session.screenPreview = cleanConsolePreview;
+      // The banner, or a /model switch, on screen: the model this terminal runs, as of when the
+      // scanner first saw that line (a newer transcript reading still wins).
+      if (parsed.model) {
+        if (session.screenModel !== parsed.model) {
+          session.screenModel = parsed.model;
+          session.screenModelAt = nowMs;
         }
+        this._setModel(session, parsed.model, session.screenModelAt);
+      }
+
+      // Until the session has a transcript, the output shows the terminal itself (from the
+      // banner down) and follows it; the transcript's conversation replaces it once there is one.
+      const screenOnly =
+        !session.screenPreview ||
+        session.previewSource === 'screen' ||
+        (!session.previewSource && !session.transcriptPath);
+      if (screenOnly) {
+        session.screenPreview = (parsed.screenPreview || '').replace(/\uFFFD+/g, '');
+        session.previewSource = 'screen';
       }
 
       if (parsed.interactivePrompt) {
@@ -764,6 +821,7 @@ class StateStore extends EventEmitter {
         session.status = 'needs_input';
         session.statusLabel = askStatusLabel(prompt);
         session.pendingAction = prompt.question;
+        this._rememberTldr(session);
         session.tldr = `⚠️ ${prompt.question} — คลิกเลือกตัวเลือก (${prompt.options
           .map((o) => `${o.number}. ${o.label}`)
           .join(' / ')}) จากด้านล่างได้เลย`;
@@ -793,6 +851,9 @@ class StateStore extends EventEmitter {
         session.hookPromptAt = null;
         session.promptOnScreen = false;
         session.permissionDetail = null;
+        // The prompt is gone (answered, or closed with Esc like the /model picker): so is the
+        // TL;DR that pointed at it.
+        this._restoreTldr(session);
         if (session.status === 'needs_input') {
           session.status = 'idle';
           session.statusLabel = 'พร้อมรับคำสั่ง';
@@ -813,6 +874,7 @@ class StateStore extends EventEmitter {
         }
       }
       session.terminalBusy = Boolean(parsed.busy);
+      this._settleIfIdle(session, parsed, nowMs);
 
       const nextStateSig = JSON.stringify({
         input: session.terminalInput,
@@ -824,6 +886,7 @@ class StateStore extends EventEmitter {
         prompt: session.interactivePrompt,
         preview: session.screenPreview,
         tldr: session.tldr,
+        model: session.model,
         historyCount: (session.taskHistory || []).length,
       });
 
@@ -860,12 +923,95 @@ class StateStore extends EventEmitter {
         });
         session.pid = null;
         changed = true;
+      } else if (this._isDismissed(session) && session.pid && !activePids.has(Number(session.pid))) {
+        // The terminal of an archived room has closed: it is an ordinary closed room now, and
+        // resuming its session later brings it back like any other.
+        session.pid = null;
+        session.archivedAt = null;
+        session.isProcessAlive = false;
+        changed = true;
       }
+    }
+    for (const id of this._idleScreenSince.keys()) {
+      if (!this.sessions.has(id)) this._idleScreenSince.delete(id);
     }
 
     if (changed) {
       this._emitChange('console_scan_updated', {});
     }
+  }
+
+  /** Archived by the person while live (not a closed tab): stays in history until new activity. */
+  _isDismissed(session) {
+    return Boolean(session && session.lifecycle === 'history' && session.archivedAt);
+  }
+
+  /**
+   * The archived room a scanned terminal belongs to, if any: the one holding this process, or,
+   * for a room archived before its process was known, the one on the session this process runs.
+   * A live room already holding the process wins.
+   */
+  _dismissedRoomFor(pid, registered) {
+    const rooms = Array.from(this.sessions.values());
+    if (rooms.some((s) => s.lifecycle !== 'history' && Number(s.pid) === pid)) return null;
+    return (
+      rooms.find((s) => this._isDismissed(s) && Number(s.pid) === pid) ||
+      (registered &&
+        registered.sessionId &&
+        rooms.find((s) => this._isDismissed(s) && !s.pid && s.claudeSessionId === registered.sessionId)) ||
+      null
+    );
+  }
+
+  /** Keeps the TL;DR shown before a prompt replaces it, to put back when the prompt is gone. */
+  _rememberTldr(session) {
+    if (!PROMPT_TLDR_RE.test(String(session.tldr || ''))) session.tldrBeforePrompt = session.tldr || null;
+  }
+
+  _restoreTldr(session) {
+    if (!PROMPT_TLDR_RE.test(String(session.tldr || ''))) return;
+    session.tldr = session.tldrBeforePrompt || IDLE_TLDR;
+    session.tldrBeforePrompt = null;
+  }
+
+  /**
+   * A room still marked "working" whose terminal plainly is not (input box up, no spinner, no
+   * "esc to interrupt", no prompt) for STALE_WORKING_MS, with no hook activity in that time, is
+   * ready again: a turn that ended without a Stop hook (one started before the hooks were
+   * installed, a lost hook) or work that was never a turn. A running turn keeps the spinner on
+   * screen and sends hooks, so it is never settled here.
+   */
+  _settleIfIdle(session, parsed, nowMs) {
+    const idleScreen =
+      !parsed.busy && !parsed.interactivePrompt && parsed.inputText !== null && parsed.inputText !== undefined;
+    if (!idleScreen) {
+      this._idleScreenSince.delete(session.id);
+      return false;
+    }
+    if (!this._idleScreenSince.has(session.id)) this._idleScreenSince.set(session.id, nowMs);
+    if (session.status !== 'working' || session.pendingAsk || session.hookPromptAt) return false;
+    const backgroundRun = Date.parse(session.backgroundRunAt || '') || 0;
+    if (nowMs - backgroundRun < BACKGROUND_RUN_MAX_MS) return false; // a `claude -p` run, not this terminal
+    const idleFor = nowMs - this._idleScreenSince.get(session.id);
+    const lastSignal = Date.parse(session.workingSignalAt || '') || 0;
+    if (idleFor < this.staleWorkingMs || nowMs - lastSignal < this.staleWorkingMs) return false;
+
+    session.status = 'idle';
+    session.statusLabel = 'พร้อมรับคำสั่ง';
+    session.currentTool = 'Idle';
+    session.workingSignalAt = null;
+    session.tldr = IDLE_TLDR; // the last reply takes its place below, if there is one
+    this._enrichSessionFromTranscript(session);
+    session.recentEvents.unshift({
+      id: `${nowMs}-idle`,
+      timestamp: new Date(nowMs).toISOString(),
+      event: 'Idle',
+      title: 'Terminal ว่างอยู่ ไม่มีรอบคำสั่งที่กำลังทำงาน — ปรับเป็นพร้อมรับคำสั่ง',
+      badge: 'Idle',
+      level: 'info',
+    });
+    if (session.recentEvents.length > 30) session.recentEvents.length = 30;
+    return true;
   }
 
   /**
@@ -937,8 +1083,26 @@ class StateStore extends EventEmitter {
         matchFolder: true,
       });
 
-    const now = new Date().toISOString();
-    session.updatedAt = now;
+    const now = new Date(this._now()).toISOString();
+    const hookEvent =
+      payload.hook_event_name || payload.event || payload.type || 'Heartbeat';
+    // `/effort high`, `/usage`, `!ls`: typed into Claude Code, run there, no turn and no Stop.
+    const localCommand =
+      hookEvent === 'UserPromptSubmit' &&
+      Boolean(localCommandName(payload.prompt || payload.user_prompt || payload.message));
+
+    // A room the person archived while its terminal stayed open stays in history until that
+    // session does something new; an idle notice, or the tail of a turn already running when it
+    // was archived, is not that.
+    if (this._isDismissed(session) && hookEvent !== 'SessionEnd' && !this._isNewActivity(hookEvent, payload, localCommand)) {
+      if (isUuid) session.claudeSessionId = String(rawSessionId);
+      if (payload.transcript_path) session.transcriptPath = payload.transcript_path;
+      if (Number(payload.claude_pid) > 0 && !session.pid) session.pid = Number(payload.claude_pid);
+      this._scheduleSave();
+      return session;
+    }
+
+    if (!localCommand) session.updatedAt = now;
     if (isUuid) {
       session.claudeSessionId = String(rawSessionId);
     }
@@ -973,15 +1137,20 @@ class StateStore extends EventEmitter {
       session.dirtyFiles = gitMeta.dirtyFiles;
     }
 
-    const hookEvent =
-      payload.hook_event_name || payload.event || payload.type || 'Heartbeat';
     const toolName = payload.tool_name || payload.toolName || '';
     const toolInput = payload.tool_input || payload.toolInput || {};
 
     if (hookEvent !== 'SessionEnd') {
+      if (session.lifecycle === 'history' && session.status === 'closed') {
+        // Back from history: start from "ready"; the event below sets what it is doing now.
+        session.status = 'idle';
+        session.statusLabel = 'พร้อมรับคำสั่ง';
+        session.currentTool = 'Idle';
+      }
       session.lifecycle = 'live';
       session.isProcessAlive = true;
       session.closedAt = null;
+      session.archivedAt = null;
     }
 
     const pushTimeline = (title, badge, level = 'info') => {
@@ -1002,6 +1171,9 @@ class StateStore extends EventEmitter {
       session.status = 'idle';
       session.statusLabel = 'เปิดห้องพร้อมใช้งาน';
       pushTimeline('เริ่มต้น Session ใน ' + session.cwd, 'SessionStart', 'info');
+    } else if (hookEvent === 'UserPromptSubmit' && localCommand) {
+      // A setting or a readout (/model, /effort, /usage, /context, …): the room's status, goal and
+      // TL;DR stay what they were. No Stop hook will follow it.
     } else if (hookEvent === 'UserPromptSubmit') {
       const promptText =
         payload.prompt ||
@@ -1170,6 +1342,7 @@ class StateStore extends EventEmitter {
       session.status = 'needs_input';
       session.statusLabel = 'รอคุณเลือกตอบ / Approve';
       session.pendingAction = summarizeText(cmdDetail, 120);
+      this._rememberTldr(session);
       session.tldr = `⚠️ รอการตัดสินใจจากคุณ: ${summarizeText(cmdDetail, 160)}`;
 
       if (!session.interactivePrompt) {
@@ -1207,6 +1380,7 @@ class StateStore extends EventEmitter {
       session.lifecycle = 'history';
       session.isProcessAlive = false;
       session.closedAt = now;
+      session.archivedAt = null; // the process is gone: nothing left to keep archived
       session.pid = null;
       session.status = 'closed';
       session.statusLabel = 'ปิด Tab ไปแล้ว • กู้คืนได้';
@@ -1221,14 +1395,16 @@ class StateStore extends EventEmitter {
     }
 
     // Any of these means a permission prompt reported earlier has been answered or abandoned.
-    if (['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionEnd'].includes(hookEvent)) {
+    if (['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionEnd'].includes(hookEvent) && !localCommand) {
       session.hookPromptAt = null;
       session.promptOnScreen = false;
       session.permissionDetail = null;
+      // A tool ran after its permission prompt: the prompt's "⚠️" TL;DR is over too.
+      if (hookEvent === 'PostToolUse') this._restoreTldr(session);
     }
 
     // The last moment anything said this room is working; a transcript turn end after it means done.
-    if (session.status === 'working') {
+    if (session.status === 'working' && !localCommand) {
       session.workingSignalAt = now;
     }
 
@@ -1237,6 +1413,60 @@ class StateStore extends EventEmitter {
 
     this._emitChange('hook_event', { sessionId: session.id, hookEvent });
     return session;
+  }
+
+  /**
+   * Events that bring an archived room back: the session took a new prompt (typed in its
+   * terminal, or a background task's notification), or it needs the person (a permission prompt,
+   * a question). Tool events and Stop of a turn that was already running, and idle notices, do not.
+   */
+  _isNewActivity(hookEvent, payload, localCommand) {
+    const toolName = payload.tool_name || payload.toolName || '';
+    if (hookEvent === 'UserPromptSubmit') return !localCommand;
+    if (hookEvent === 'PermissionRequest') return true;
+    if (hookEvent === 'Notification') return notificationKind(payload) === 'attention';
+    return hookEvent === 'PreToolUse' && toolName === 'AskUserQuestion';
+  }
+
+  /**
+   * Records text the dashboard just typed into a room's terminal, as Claude Code will take it:
+   * - a local command (`/effort high`, `/model sonnet`, `/usage`) changes a setting or shows
+   *   something and starts no turn, so the room stays as it is (no Stop would ever end it);
+   * - a message sent while a turn is running waits in Claude's queue: the room keeps describing
+   *   the running turn, and Claude Code's own UserPromptSubmit marks the new turn when it starts;
+   * - anything else is a new prompt.
+   * `viaTerminal: false` (a background `claude -p` run) never queues.
+   */
+  recordSentPrompt(sessionId, text, { viaTerminal = true } = {}) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    const prompt = String(text || '');
+    if (localCommandName(prompt)) return session;
+    const turnRunning = session.status === 'working' && session.terminalBusy !== false;
+    if (viaTerminal && turnRunning && session.lifecycle !== 'history') {
+      const at = new Date(this._now()).toISOString();
+      session.recentEvents.unshift({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: at,
+        event: 'Queued',
+        title: `ส่งเข้าคิว (รอรอบที่ทำอยู่จบ): ${summarizeText(prompt, 90)}`,
+        badge: 'Queued',
+        level: 'info',
+      });
+      if (session.recentEvents.length > 30) session.recentEvents.length = 30;
+      session.updatedAt = at;
+      this._emitChange('prompt_queued', { sessionId: session.id });
+      return session;
+    }
+    // A background run works while the terminal (if any) sits idle: the idle-screen check must
+    // not take its room for idle (see _settleIfIdle). Its Stop clears this.
+    if (!viaTerminal) session.backgroundRunAt = new Date(this._now()).toISOString();
+    return this.processHookEvent({
+      session_id: session.id,
+      cwd: session.cwd,
+      hook_event_name: 'UserPromptSubmit',
+      prompt,
+    });
   }
 
   /** Claude asked AskUserQuestion: show every question, exactly as written; the screen adds the cursor. */
@@ -1248,6 +1478,7 @@ class StateStore extends EventEmitter {
     session.status = 'needs_input';
     session.statusLabel = askStatusLabel(session.interactivePrompt);
     session.pendingAction = questions[0].question || 'Claude ต้องการให้คุณเลือกคำตอบ';
+    this._rememberTldr(session);
     session.tldr = `⚠️ Claude ถามคุณ${questions.length > 1 ? ` ${questions.length} ข้อ` : ''}: ${questions[0].question}`;
   }
 
@@ -1260,6 +1491,7 @@ class StateStore extends EventEmitter {
     session.stageIndex = 3;
     session.currentTool = 'Ready';
     session.workingSignalAt = null;
+    session.backgroundRunAt = null;
     session.pendingAsk = null;
     session.hookPromptAt = null;
     session.promptOnScreen = false;
@@ -1315,6 +1547,8 @@ class StateStore extends EventEmitter {
     if (patch.room && patch.room !== session.room) {
       patch.customNamed = true;
     }
+    // Reopened (e.g. resumed in a terminal from the dashboard): no longer an archived room.
+    if (patch.lifecycle === 'live') patch.archivedAt = null;
     Object.assign(session, patch, { updatedAt: new Date().toISOString() });
     this._emitChange('session_updated', { sessionId });
     return session;
@@ -1348,14 +1582,21 @@ class StateStore extends EventEmitter {
       this._emitChange('session_removed', { sessionId });
       return true;
     }
+    const now = new Date(this._now()).toISOString();
     session.lifecycle = 'history';
     session.isProcessAlive = false;
-    session.closedAt = new Date().toISOString();
-    session.updatedAt = new Date().toISOString();
+    session.closedAt = now;
+    session.updatedAt = now;
+    // Archived by the person, not closed: the terminal may still be open. Its pid stays with the
+    // room so the scanner keeps that terminal here instead of reviving the room or giving it a
+    // new one; only new activity from the session brings it back (see processHookEvent).
+    session.archivedAt = now;
     session.status = 'closed';
     session.statusLabel = 'เก็บเข้าประวัติแล้ว • กู้คืนได้';
     session.interactivePrompt = null;
     session.pendingAction = null;
+    session.workingSignalAt = null;
+    this._idleScreenSince.delete(sessionId);
     this._emitChange('session_archived', { sessionId });
     return true;
   }

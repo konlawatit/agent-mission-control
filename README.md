@@ -17,6 +17,7 @@
 - 📌 **Auto-TL;DR Summary**: สกัดข้อความสรุปล่าสุดจาก Claude Transcript อัตโนมัติ **ไม่ต้องอ่าน Log ยาวๆ**
 - 🌳 **Live Sub-Agent Tree**: แสดงโครงสร้าง `Main Agent → Sub-Agents` พร้อมสถานะและ Tool ที่กำลังรัน
 - ⚠️ **Attention Queue**: แจ้งเตือนเฉพาะห้องที่รอคุณตัดสินใจ (รอ Approve / ติดปัญหา) ไว้ด้านบนสุด
+- 🔔 **แจ้งเตือนของระบบ**: กดกระดิ่งใน sidebar เพื่อให้ Windows แจ้งเตือนเมื่อห้องไหนรอคุณหรือทำเสร็จ (ไม่เตือนห้องที่เปิดดูอยู่) กดแจ้งเตือนเพื่อเปิดห้องนั้นทันที และชื่อแท็บจะขึ้นจำนวนห้องที่รอคุณ เช่น `(2) Mission Control`
 - ⌨️ **Bi-Directional Command Center**: สั่งการหรือกด Approve ส่งกลับไปยังแต่ละ Session ได้จากหน้าจอเดียว (ผ่าน WezTerm IPC, CLI Wrapper, หรือ `claude --resume`)
 - 🗂️ **ไฟล์ที่แก้ไข + Web IDE**: กดดูรายการไฟล์ที่เปลี่ยน แล้วเปิดดู Diff / Source แบบเต็มจอ หรือกดเลขบรรทัดเพื่อเปิดไฟล์นั้นใน VS Code ที่บรรทัดนั้นทันที (ผ่าน `vscode://` link ไม่ผ่าน shell)
 - ✦ **เปลี่ยน Model / Effort**: เลือก Opus / Sonnet / Haiku / Fable และ effort `low` ถึง `max` ระบบส่ง `/model` และ `/effort` เข้า terminal ของห้องนั้นให้

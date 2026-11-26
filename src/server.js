@@ -36,6 +36,7 @@ const {
 } = require('./security');
 const { MAX_ATTACHMENT_BYTES, saveAttachment, pruneAttachments } = require('./attachments');
 const { AutomatedRuns, DEFAULT_WINDOW_HOURS, MAX_WINDOW_HOURS } = require('./automated-runs');
+const { SearchIndex } = require('./search-index');
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -104,6 +105,9 @@ function createMissionControlServer(options = {}) {
   const sseClients = new Set();
   // Old composer attachments (two weeks and older) are removed in the background.
   setImmediate(() => pruneAttachments(store.dataDir));
+  // Search across every session: an in-memory index of ~/.claude/projects, built in the
+  // background once the server listens (or on the first search) and kept current by rescans.
+  const searchIndex = options.searchIndex || new SearchIndex();
 
   if (scanner) {
     scanner.start();
@@ -504,6 +508,31 @@ function createMissionControlServer(options = {}) {
         const end = at !== null ? entryEndOffset(file, at) : before;
         const page = readConversationPage(file, { before: end === null ? undefined : end, since, limit: limit || 40 });
         return sendJson(res, 200, { ok: true, meta, ...page, to: end === null ? meta.size : end });
+      }
+
+      // 3d. Search every session's conversation (`q`, `scope` all | people | automated, `limit`).
+      //     Answers from the in-memory index (src/search-index.js), which only ever reads
+      //     <uuid>.jsonl files directly inside ~/.claude/projects/<project>/; `indexing` says
+      //     whether its first build has finished. A snippet's `offset` opens /api/transcript?at=.
+      if (req.method === 'GET' && (pathname === '/api/search' || pathname === '/api/search/status')) {
+        searchIndex.kick(); // first use starts the build; later ones pick up new messages
+        if (pathname === '/api/search/status') {
+          return sendJson(res, 200, { ok: true, indexing: searchIndex.status() });
+        }
+        const q = String(parsedUrl.searchParams.get('q') || '').trim();
+        const scope = parsedUrl.searchParams.get('scope') || 'people';
+        const rawLimit = parsedUrl.searchParams.get('limit');
+        const limit = rawLimit === null || rawLimit === '' ? 20 : Number(rawLimit);
+        if (q.length < 2 || q.length > 200 || /[\u0000-\u001f\u007f]/.test(q)) {
+          return sendJson(res, 400, { ok: false, error: 'q must be 2-200 characters' });
+        }
+        if (!['all', 'people', 'automated'].includes(scope)) {
+          return sendJson(res, 400, { ok: false, error: 'scope must be all, people or automated' });
+        }
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+          return sendJson(res, 400, { ok: false, error: 'limit must be 1-50' });
+        }
+        return sendJson(res, 200, { ok: true, ...searchIndex.search(q, { scope, limit }) });
       }
 
       // 4a. Attach a file or image to the next message (raw body, one file per request)
@@ -995,6 +1024,13 @@ function createMissionControlServer(options = {}) {
     }
   });
 
+  // The search index builds a few seconds after start (the dashboard app; tests and fixtures
+  // build it on their first search) and stops with the server.
+  if (options.searchIndexAutoStart ?? !options.disableScanner) {
+    server.once('listening', () => searchIndex.start());
+  }
+  server.on('close', () => searchIndex.stop());
+
   server.on('close', () => {
     if (scanner) scanner.stop();
     if (usageGuard) usageGuard.stop();
@@ -1002,7 +1038,7 @@ function createMissionControlServer(options = {}) {
     store.flush();
   });
 
-  return { server, store, bridge, scanner, usageGuard, token };
+  return { server, store, bridge, scanner, usageGuard, token, searchIndex };
 }
 
 module.exports = { createMissionControlServer };

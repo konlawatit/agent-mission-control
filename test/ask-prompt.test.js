@@ -14,6 +14,7 @@ const { parseConsoleScreen } = require('../src/console-scanner');
 const { sanitizeQuestions, matchQuestionIndex, mergeScreenPrompt } = require('../src/ask-prompt');
 const { parseTranscriptTailUncached } = require('../src/transcript-parser');
 const { StateStore } = require('../src/state-store');
+const { CommandBridge } = require('../src/command-bridge');
 
 const QUESTIONS = [
   {
@@ -395,4 +396,308 @@ const SCREEN_MULTI = [
   store.flush();
 }
 
-console.log('✅ Multi-question prompt checks passed!');
+// Two questions, the second multi-select, as asked in a real Claude Code 2.1.332 session.
+const FAV = [
+  {
+    question: 'คุณชอบสีอะไร?',
+    header: 'สี',
+    multiSelect: false,
+    options: [
+      { label: 'แดง', description: 'สีของความกล้า' },
+      { label: 'เขียว', description: 'สีของธรรมชาติ' },
+    ],
+  },
+  {
+    question: 'คุณชอบผลไม้อะไรบ้าง?',
+    header: 'ผลไม้',
+    multiSelect: true,
+    options: [{ label: 'มะม่วง' }, { label: 'มังคุด' }, { label: 'ทุเรียน' }],
+  },
+];
+
+const RULE = '───────────────────────────────────────────────';
+
+// The submit step after both were answered (read from a real 2.1.332 session; Thai cells with
+// combining marks come back as U+FFFD). The answered list's "● …?" line was taken for the
+// question, matched question 1, and its options "แดง / เขียว" were laid over "Submit answers /
+// Cancel": clicking "แดง" submitted, "เขียว" cancelled.
+const SCREEN_FAV_REVIEW = [
+  RULE,
+  '←  ☒ �  ☒ ผลไ�  ✔ Submit  →',
+  '',
+  'Review your answers',
+  '',
+  ' ● �ณชอบ�อะไร?',
+  '   → เ�ยว',
+  ' ● �ณชอบผลไ�อะไร�าง?',
+  '   → มะ�วง, �ง�ด',
+  '',
+  '❯ 1. Submit answers',
+  '  2. Cancel',
+].join('\n');
+
+// The same step with a question left unanswered: a warning instead of the answered list.
+const SCREEN_FAV_REVIEW_UNANSWERED = [
+  RULE,
+  '←  ☐ �  ☒ ผลไ�  ✔ Submit  →',
+  '',
+  'Review your answers',
+  '',
+  '⚠ Some questions are unanswered',
+  '',
+  '❯ 1. Submit answers',
+  '  2. Cancel',
+].join('\n');
+
+// A warning and the questions that were answered, in case both are shown.
+const SCREEN_FAV_REVIEW_MIXED = [
+  RULE,
+  '←  ☐ �  ☒ ผลไ�  ✔ Submit  →',
+  '',
+  'Review your answers',
+  '',
+  '⚠ Some questions are unanswered',
+  '',
+  ' ● �ณชอบผลไ�อะไร�าง?',
+  '   → มะ�วง',
+  '',
+  '❯ 1. Submit answers',
+  '  2. Cancel',
+].join('\n');
+
+const SCREEN_FAV_Q1 = [
+  RULE,
+  '←  ☐ �  ☐ ผลไ�  ✔ Submit  →',
+  '',
+  '�ณชอบ�อะไร?',
+  '',
+  '❯ 1. แดง',
+  '     �ของความก�า',
+  '  2. เ�ยว',
+  '     �ของธรรมชา�',
+  '  3. Type something.',
+  '  4. Chat about this',
+  '',
+  'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+].join('\n');
+
+// 2.1.332's multi-select: checkboxes, no "Next" row; the tab bar moves on with ←/→.
+const SCREEN_FAV_Q2 = [
+  RULE,
+  '←  ☒ �  ☐ ผลไ�  ✔ Submit  →',
+  '',
+  '�ณชอบผลไ�อะไร�าง?',
+  '',
+  '❯ 1. [ ] มะ�วง',
+  '  2. [ ] �ง�ด',
+  '  3. [ ] �เ�ยน',
+  '  4. [ ] Type something',
+  RULE,
+  '  5. Chat about this',
+  '',
+  'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+].join('\n');
+
+// 9. The submit step is recognised before any question is matched, and keeps its own options.
+{
+  const ask = { questions: sanitizeQuestions(FAV) };
+  const p = parseConsoleScreen(SCREEN_FAV_REVIEW).interactivePrompt;
+  assert.strictEqual(p.question, 'Review your answers', `the heading, not an answered-list line: ${p.question}`);
+  const m = mergeScreenPrompt(p, ask);
+  assert.strictEqual(m.reviewStep, true, 'it is the submit step');
+  assert.strictEqual(m.activeQuestion, -1, 'no question is on screen');
+  assert.deepStrictEqual(m.options.map((o) => o.label), ['Submit answers', 'Cancel'], "the step's own options");
+  assert.ok(!m.options.some((o) => o.claude), "neither is taken for one of Claude's options");
+  assert.deepStrictEqual(m.questions.map((q) => q.answered), [true, true]);
+  assert.ok(!m.context.some((l) => l.includes('�')), 'garbled lines are dropped');
+
+  // Even if the question line were an answered-list line, the step stays the submit step.
+  const fromList = mergeScreenPrompt({ ...p, question: '● �ณชอบ�อะไร?' }, ask);
+  assert.strictEqual(fromList.reviewStep, true);
+  assert.strictEqual(fromList.activeQuestion, -1);
+  assert.deepStrictEqual(fromList.options.map((o) => o.label), ['Submit answers', 'Cancel']);
+
+  for (const [name, screen] of [
+    ['unanswered', SCREEN_FAV_REVIEW_UNANSWERED],
+    ['mixed', SCREEN_FAV_REVIEW_MIXED],
+  ]) {
+    const pu = parseConsoleScreen(screen).interactivePrompt;
+    assert.strictEqual(pu.question, 'Review your answers', `${name}: heading is the question`);
+    const mu = mergeScreenPrompt(pu, ask);
+    assert.strictEqual(mu.reviewStep, true, `${name}: the submit step`);
+    assert.strictEqual(mu.activeQuestion, -1, `${name}: no question on screen`);
+    assert.deepStrictEqual(mu.options.map((o) => o.label), ['Submit answers', 'Cancel'], `${name}: own options`);
+    assert.ok(mu.context.includes('⚠ Some questions are unanswered'), `${name}: the warning stays`);
+    assert.deepStrictEqual(mu.questions.map((q) => q.answered), [false, true], `${name}: progress from the tabs`);
+  }
+
+  // Readable answers are kept for the person to check; the tab bar is not repeated there.
+  const en = sanitizeQuestions([
+    { question: 'Which color?', header: 'Color', options: [{ label: 'Red' }, { label: 'Green' }] },
+    { question: 'Which fruits?', header: 'Fruit', multiSelect: true, options: [{ label: 'Mango' }, { label: 'Mangosteen' }] },
+  ]);
+  const enScreen = [
+    RULE,
+    '←  ☒ Color  ☒ Fruit  ✔ Submit  →',
+    '',
+    'Review your answers',
+    '',
+    ' ● Which color?',
+    '   → Green',
+    ' ● Which fruits?',
+    '   → Mango, Mangosteen',
+    '',
+    '❯ 1. Submit answers',
+    '  2. Cancel',
+  ].join('\n');
+  const me = mergeScreenPrompt(parseConsoleScreen(enScreen).interactivePrompt, { questions: en });
+  assert.strictEqual(me.reviewStep, true);
+  assert.deepStrictEqual(me.options.map((o) => o.label), ['Submit answers', 'Cancel']);
+  assert.deepStrictEqual(me.context, ['● Which color?', '→ Green', '● Which fruits?', '→ Mango, Mangosteen']);
+}
+
+// 10. Question screens still merge, including one whose own words sound like the submit step.
+{
+  const ask = { questions: sanitizeQuestions(FAV) };
+  const m1 = mergeScreenPrompt(parseConsoleScreen(SCREEN_FAV_Q1).interactivePrompt, ask);
+  assert.strictEqual(m1.activeQuestion, 0);
+  assert.ok(!m1.reviewStep, 'a question is not the submit step');
+  assert.strictEqual(m1.question, FAV[0].question);
+  assert.deepStrictEqual(m1.options.map((o) => o.label), ['แดง', 'เขียว', 'Type something.', 'Chat about this']);
+
+  const p2 = parseConsoleScreen(SCREEN_FAV_Q2).interactivePrompt;
+  assert.strictEqual(p2.tabBar, true, 'the tab bar is on screen');
+  assert.strictEqual(p2.nextIndex, undefined, 'no Next row in 2.1.332');
+  const m2 = mergeScreenPrompt(p2, ask);
+  assert.strictEqual(m2.activeQuestion, 1);
+  assert.strictEqual(m2.multiSelect, true);
+  assert.strictEqual(m2.tabBar, true, 'kept through the merge (the tab names are not)');
+  assert.deepStrictEqual(m2.options.map((o) => o.label), ['มะม่วง', 'มังคุด', 'ทุเรียน', 'Type something', 'Chat about this']);
+  assert.deepStrictEqual(m2.options.map((o) => Boolean(o.claude)), [true, true, true, false, false]);
+
+  const own = sanitizeQuestions([
+    { question: 'Ready to submit the release notes?', header: 'Release', options: [{ label: 'Submit answers' }, { label: 'Not yet' }] },
+    { question: 'Which channel?', header: 'Channel', options: [{ label: 'Slack' }, { label: 'Email' }] },
+  ]);
+  const ownScreen = [
+    RULE,
+    '←  ☐ Release  ☐ Channel  ✔ Submit  →',
+    '',
+    'Ready to submit the release notes?',
+    '',
+    '❯ 1. Submit answers',
+    '  2. Not yet',
+    '  3. Type something.',
+    '  4. Chat about this',
+    '',
+    'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+  ].join('\n');
+  const mo = mergeScreenPrompt(parseConsoleScreen(ownScreen).interactivePrompt, { questions: own });
+  assert.strictEqual(mo.activeQuestion, 0, "Claude's own wording does not make it the submit step");
+  assert.ok(!mo.reviewStep);
+  assert.strictEqual(mo.options[0].claude, true);
+}
+
+// 11. "ยืนยัน N ข้อ" on a multi-select: the ticks, then on to the next question. Older Claude Code
+//     has a "Next" row (Enter on it); 2.1.332 has none and its tab bar moves on with →. With
+//     neither on screen only the ticks are sent. Driven through a fake console bridge.
+async function testMultiSelectAdvance() {
+  const store = new StateStore({ dataDir: fs.mkdtempSync(path.join(isolatedHome, 'store-')) });
+  const calls = [];
+  const fakeScanner = {
+    failKey: null,
+    async selectOption(pid, cur, target) {
+      calls.push(['select', cur, target]);
+      return { ok: true };
+    },
+    async sendKey(pid, key) {
+      calls.push(['key', key]);
+      return { ok: key !== this.failKey };
+    },
+  };
+  const bridge = new CommandBridge(store, fakeScanner);
+
+  const roomFor = (pid, questions, screen) => {
+    const cwd = fs.mkdtempSync(path.join(isolatedHome, 'room-'));
+    const transcript = path.join(cwd, 'ask.jsonl');
+    const entry = {
+      type: 'assistant',
+      timestamp: new Date().toISOString(),
+      message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: `toolu_${pid}`, name: 'AskUserQuestion', input: { questions } }] },
+    };
+    fs.writeFileSync(transcript, [{ type: 'user', message: { role: 'user', content: 'ask' } }, entry].map((e) => JSON.stringify(e)).join('\n') + '\n');
+    const room = store.getOrCreateSession(`claude-pid-${pid}`, { cwd, pid });
+    room.transcriptPath = transcript;
+    store.ingestConsoleScan([{ pid, cwd, screen }]);
+    return room;
+  };
+
+  // 2.1.332, the last question: ticks top-down, then → to the submit tab.
+  const room = roomFor(881, FAV, SCREEN_FAV_Q2);
+  assert.strictEqual(room.interactivePrompt.activeQuestion, 1, 'question 2 is on screen');
+  let res = await bridge.applyMultiSelect(room.id, { toggles: [3, 1], currentIndex: 1, nextIndex: null });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.delivered, true);
+  assert.deepStrictEqual(calls, [['select', 1, 1], ['select', 1, 3], ['key', 'right']], 'ticks, then the next tab');
+  assert.ok(/ไป/.test(res.message) && res.message !== 'อัปเดตตัวเลือกแล้ว', `says it moved on: ${res.message}`);
+  assert.ok(res.message.includes('ตรวจคำตอบ'), `the last question moves to the submit step: ${res.message}`);
+
+  // The terminal then shows the submit step: the room offers its own options, not question 1's.
+  store.ingestConsoleScan([{ pid: 881, cwd: room.cwd, screen: SCREEN_FAV_REVIEW }]);
+  assert.strictEqual(room.status, 'needs_input');
+  assert.strictEqual(room.interactivePrompt.reviewStep, true);
+  assert.strictEqual(room.interactivePrompt.activeQuestion, -1);
+  assert.deepStrictEqual(room.interactivePrompt.options.map((o) => o.label), ['Submit answers', 'Cancel']);
+  store.ingestConsoleScan([{ pid: 881, cwd: room.cwd, screen: SCREEN_FAV_Q2 }]); // back on question 2
+  assert.strictEqual(room.interactivePrompt.activeQuestion, 1);
+
+  // Nothing to change, cursor left on "Type something": back onto Claude's last option first,
+  // so the arrow is not taken by that row's text box.
+  calls.length = 0;
+  res = await bridge.applyMultiSelect(room.id, { toggles: [], currentIndex: 4, nextIndex: null });
+  assert.strictEqual(res.ok, true);
+  assert.deepStrictEqual(calls, [['key', 'up'], ['key', 'right']]);
+
+  // The move fails: reported, not claimed.
+  calls.length = 0;
+  fakeScanner.failKey = 'right';
+  res = await bridge.applyMultiSelect(room.id, { toggles: [2], currentIndex: 1, nextIndex: null });
+  assert.strictEqual(res.ok, false, 'a failed move is reported');
+  assert.deepStrictEqual(calls, [['select', 1, 2], ['key', 'right']]);
+  fakeScanner.failKey = null;
+
+  // A multi-select that is not the last question: "next question".
+  const firstMulti = [FAV[1], FAV[0]];
+  const screenFirst = SCREEN_FAV_Q2.replace('←  ☒ �  ☐ ผลไ�  ✔ Submit  →', '←  ☐ ผลไ�  ☐ �  ✔ Submit  →');
+  const room2 = roomFor(882, firstMulti, screenFirst);
+  assert.strictEqual(room2.interactivePrompt.activeQuestion, 0);
+  calls.length = 0;
+  res = await bridge.applyMultiSelect(room2.id, { toggles: [2], currentIndex: 1, nextIndex: null });
+  assert.deepStrictEqual(calls, [['select', 1, 2], ['key', 'right']]);
+  assert.ok(res.message.includes('ข้อถัดไป'), `moves to the next question: ${res.message}`);
+
+  // Older Claude Code: the Next row moves on; → is not pressed as well (it would skip a question).
+  const room3 = roomFor(883, QUESTIONS, SCREEN_MULTI);
+  assert.strictEqual(room3.interactivePrompt.nextIndex, 6);
+  calls.length = 0;
+  res = await bridge.applyMultiSelect(room3.id, { toggles: [1], currentIndex: 3, nextIndex: 6 });
+  assert.deepStrictEqual(calls, [['select', 3, 1], ['select', 1, 6]], 'Enter on Next, no arrow');
+  assert.ok(res.message.includes('ข้อถัดไป'));
+
+  // Neither a Next row nor a tab bar on screen: only the ticks, as before.
+  const screenBare = SCREEN_FAV_Q2.replace('←  ☒ �  ☐ ผลไ�  ✔ Submit  →\n', '');
+  const room4 = roomFor(884, [FAV[1]], screenBare);
+  assert.ok(!room4.interactivePrompt.tabBar, 'no tab bar');
+  calls.length = 0;
+  res = await bridge.applyMultiSelect(room4.id, { toggles: [1, 2], currentIndex: 1, nextIndex: null });
+  assert.deepStrictEqual(calls, [['select', 1, 1], ['select', 1, 2]], 'no key after the ticks');
+  assert.strictEqual(res.message, 'อัปเดตตัวเลือกแล้ว');
+  store.flush();
+}
+
+testMultiSelectAdvance()
+  .then(() => console.log('✅ Multi-question prompt checks passed!'))
+  .catch((err) => {
+    console.error('❌ Multi-question prompt checks failed:', err);
+    process.exit(1);
+  });

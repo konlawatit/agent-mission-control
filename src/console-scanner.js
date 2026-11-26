@@ -67,6 +67,10 @@ const NEXT_ROW_RE = /^\s*([❯>])?\s*Next\s*$/;
 // Only prompts say this; the working spinner says "esc to interrupt", which must not match.
 const PROMPT_KEY_HINT_RE = /Esc to cancel|Enter to (?:select|confirm)/i;
 
+// The heading of the submit step after the last question. Under it the answered questions are
+// listed as "● question?" / "→ answer", and those lines must not be taken for the question.
+const REVIEW_HEADING_RE = /^(?:review your answers|ready to submit your answers)\b/i;
+
 /** An option line can carry a preview box to its right; keep only the option text. */
 function stripSidePanel(text) {
   const m = text.match(/\s{3,}[─-╿]/);
@@ -234,6 +238,7 @@ function parseConsoleScreen(rawScreen, cursor = {}) {
     const headerLines = allHeaderLines.filter((l) => l !== tabLine);
 
     const question =
+      headerLines.find((l) => REVIEW_HEADING_RE.test(l)) ||
       headerLines.find((l) => l.endsWith('?') || l.endsWith(':')) ||
       headerLines[0] ||
       'Claude กำลังรอให้คุณเลือกคำตอบ';
@@ -255,7 +260,11 @@ function parseConsoleScreen(rawScreen, cursor = {}) {
       options,
       footer: footerLines.join(' · ') || 'Enter to confirm · Esc to cancel',
     };
-    if (tabLine) interactivePrompt.tabs = parseQuestionTabs(tabLine);
+    if (tabLine) {
+      interactivePrompt.tabs = parseQuestionTabs(tabLine);
+      // ←/→ move between its tabs; a multi-select with no "Next" row moves on that way.
+      interactivePrompt.tabBar = true;
+    }
     if (nextItem) interactivePrompt.nextIndex = nextItem.index;
   }
 

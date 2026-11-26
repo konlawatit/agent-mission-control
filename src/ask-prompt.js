@@ -93,12 +93,30 @@ function matchQuestionIndex(screenQuestion, questions) {
 
 const REVIEW_RE = /review your answers|submit answers|ready to submit/i;
 
-function isReviewStep(screenPrompt) {
+/** Whether the readable characters of on-screen `text` appear, in order, in `candidate`. */
+function readableIn(text, candidate) {
+  const s = comparable(text);
+  return s.length > 0 && lcsLength(s, comparable(candidate)) / s.length >= 0.85;
+}
+
+/**
+ * Whether the screen is the submit step after the last question: "Review your answers" over
+ * "1. Submit answers / 2. Cancel". Only the TUI's own wording counts; a question or option of
+ * Claude's that happens to say "submit answers" is still that question.
+ */
+function isReviewStep(screenPrompt, questions = []) {
+  const claudeSays = questions
+    .flatMap((q) => [q.question, ...(q.options || []).map((o) => o.label)])
+    .filter((t) => REVIEW_RE.test(t || ''));
+  const tuiSays = (t) => REVIEW_RE.test(t || '') && !claudeSays.some((c) => readableIn(t, c));
   return (
-    REVIEW_RE.test(screenPrompt.question || '') ||
-    (screenPrompt.options || []).some((o) => REVIEW_RE.test(o.label || ''))
+    [screenPrompt.question, ...(screenPrompt.context || [])].some(tuiSays) ||
+    (screenPrompt.options || []).some((o) => tuiSays(o.label))
   );
 }
+
+/** A multi-question prompt's tab bar ("←  ☒ สี  ☐ ผลไม้  ✔ Submit  →"); the tabs come from `questions`. */
+const isTabBar = (line) => /[←→]/.test(line) && /[☐☑☒✔✓■□]/.test(line);
 
 /**
  * Whether garbled on-screen text is a copy of `candidate`: its readable characters appear in
@@ -124,7 +142,10 @@ function mergeScreenPrompt(screenPrompt, ask) {
     ...q,
     answered: tabs[i] ? Boolean(tabs[i].done) : false,
   }));
-  const active = matchQuestionIndex(screenPrompt.question, ask.questions);
+  // The submit step first: it lists the answered questions ("● question?" / "→ answer"), and such
+  // a line matches its question, whose options would then be laid over "Submit answers / Cancel".
+  const reviewStep = isReviewStep(screenPrompt, ask.questions);
+  const active = reviewStep ? -1 : matchQuestionIndex(screenPrompt.question, ask.questions);
   const merged = {
     ...screenPrompt,
     context: [], // the tab bar and wrapped question lines are garbled; tabs come from `questions`
@@ -135,9 +156,9 @@ function mergeScreenPrompt(screenPrompt, ask) {
   delete merged.tabs;
   if (active < 0) {
     // The submit step sits after the last question; knowing it lets the tabs move back from it.
-    merged.reviewStep = isReviewStep(screenPrompt);
-    // Its own lines (e.g. "⚠ Some questions are unanswered") are worth keeping when readable.
-    merged.context = (screenPrompt.context || []).filter((l) => !l.includes('�'));
+    merged.reviewStep = reviewStep;
+    // Its own lines (e.g. "⚠ Some questions are unanswered", readable answers) are worth keeping.
+    merged.context = (screenPrompt.context || []).filter((l) => !l.includes('�') && !isTabBar(l));
     return merged; // keep the screen's own options (Submit answers / Cancel)
   }
   const q = ask.questions[active];

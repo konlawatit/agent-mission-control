@@ -444,7 +444,11 @@ function Invoke-BridgeAction {
     if ($Action -eq "read") {
         $cwd = [WinConsoleBridge]::GetProcessCwd([uint32]$TargetPid)
         $screen = [WinConsoleBridge]::ReadConsoleText([uint32]$TargetPid, 45)
-        return @{ ok = ($null -ne $screen); pid = $TargetPid; cwd = $cwd; screen = $screen }
+        return @{
+            ok = ($null -ne $screen); pid = $TargetPid; cwd = $cwd; screen = $screen
+            cursorRow = [WinConsoleBridge]::LastCursorRow
+            cursorCol = [WinConsoleBridge]::LastCursorCol
+        }
     }
 
     if ($Action -eq "send-key") {

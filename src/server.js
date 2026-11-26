@@ -21,10 +21,10 @@ const {
   checkHooksStatus,
   installClaudeHooks,
   uninstallClaudeHooks,
-  checkStatuslineStatus,
-  installStatusline,
   HOOK_ENDPOINT_PATH,
 } = require('./hook-installer');
+const { UsageChecker, UsageCheckError, USAGE_COMMAND } = require('./usage-check');
+const { sessionContext } = require('./session-context');
 const { lookupClaudeSession } = require('./claude-sessions');
 const {
   TOKEN_HEADER,
@@ -99,7 +99,14 @@ function createMissionControlServer(options = {}) {
     ? null
     : new ConsoleScanner(store, { intervalMs: options.scanIntervalMs || 1800 });
   const bridge = new CommandBridge(store, scanner);
-  const usageGuard = new UsageGuard(store, bridge);
+  // Plan usage is read only when asked: `/usage` in an idle terminal (src/usage-check.js). Tests
+  // pass a stand-in terminal; otherwise it needs the Windows console bridge.
+  const usageChecker = new UsageChecker(
+    store,
+    options.usageTerminal || (scanner && process.platform === 'win32' ? scanner : null),
+    { ...(options.usageCheckOptions || {}), onChange: () => store._emitChange('usage_check', {}) }
+  );
+  const usageGuard = new UsageGuard(store, bridge, { isChecking: () => usageChecker.busy });
   store.usageGuard = usageGuard;
   const publicDir = path.resolve(__dirname, '..', 'public');
   const sseClients = new Set();
@@ -109,10 +116,9 @@ function createMissionControlServer(options = {}) {
   // background once the server listens (or on the first search) and kept current by rescans.
   const searchIndex = options.searchIndex || new SearchIndex();
 
-  if (scanner) {
-    scanner.start();
-    usageGuard.start();
-  }
+  if (scanner) scanner.start();
+  // No polling: this only re-arms the resume timer of a hold saved before a restart.
+  usageGuard.start();
 
   // Ingest any offline events spooled while server was closed
   const offlineFile =
@@ -276,10 +282,24 @@ function createMissionControlServer(options = {}) {
           minute: '2-digit',
         })
       : '-';
+    const level =
+      summary.remainingPct === null
+        ? 'usage ใกล้หมด'
+        : `usage เหลือ ${summary.remainingPct}% (ต่ำกว่า ${summary.autoPauseThresholdPct}%)`;
     return {
       resumeAt: summary.resetAt,
-      reason: `Mission Control พักงานไว้: usage เหลือ ${summary.remainingPct}% (ต่ำกว่า ${summary.autoPauseThresholdPct}%) จะทำงานต่ออัตโนมัติราว ${resumeAt} หรือกด "ทำต่อเลย" ใน dashboard`,
+      reason: `Mission Control พักงานไว้: ${level} จะทำงานต่ออัตโนมัติราว ${resumeAt} หรือกด "ทำต่อเลย" ใน dashboard`,
     };
+  }
+
+  /**
+   * `/usage` is a local command (the usage check types it, and so can the person): it is not a
+   * task for the room, so it neither becomes the room's prompt nor waits out a hold.
+   */
+  function isUsageCommand(payload) {
+    const eventName = payload.hook_event_name || payload.event;
+    const prompt = payload.prompt ?? payload.user_prompt ?? '';
+    return eventName === 'UserPromptSubmit' && String(prompt).trim() === USAGE_COMMAND;
   }
 
   // The token written into ~/.claude/settings.json for the HTTP hooks: it opens the hook
@@ -371,7 +391,6 @@ function createMissionControlServer(options = {}) {
         return sendJson(res, 200, {
           ok: true,
           hooks: ownHooksStatus(),
-          statusline: checkStatuslineStatus(),
           ...store.getSnapshot(),
         });
       }
@@ -380,7 +399,7 @@ function createMissionControlServer(options = {}) {
       // hook process is started. The answer is Claude Code's hook output: {} or a block decision.
       if (req.method === 'POST' && pathname === HOOK_ENDPOINT_PATH) {
         const payload = await readHookBody(req);
-        if (!payload) return sendJson(res, 200, {});
+        if (!payload || isUsageCommand(payload)) return sendJson(res, 200, {});
         enrichHttpHookPayload(payload, req.headers);
         const automated =
           isAutomatedEntrypoint(payload.entrypoint) ||
@@ -411,6 +430,7 @@ function createMissionControlServer(options = {}) {
       if (req.method === 'POST' && pathname === '/api/hook') {
         const payload = await readJsonBody(req);
         const eventName = payload.hook_event_name || payload.event;
+        if (isUsageCommand(payload)) return sendJson(res, 200, { ok: true, ignored: 'local-command' });
         // `claude -p` / Agent SDK runs started by scripts and tools are not the dashboard's to
         // manage: they get no room and are never held (their own tooling decides when to stop).
         const automated =
@@ -942,38 +962,37 @@ function createMissionControlServer(options = {}) {
         return sendJson(res, 200, { ok: true, usage: summary });
       }
 
-      // 18. Statusline bridge: real plan usage (rate_limits) and model from Claude Code
-      if (req.method === 'POST' && pathname === '/api/usage/observed') {
+      // 18. Check plan usage now: `/usage` in an idle Claude Code terminal, read, then Esc.
+      //     Body: { preferSessionId } (optional): the room to use when it is idle.
+      if (req.method === 'POST' && pathname === '/api/usage/check') {
         const body = await readJsonBody(req);
-        const accepted = usageGuard.observe(body.rate_limits);
-        const session = store._findMatchingSession({
-          pid: Number(body.claude_pid) || undefined,
-          claudeSessionId: typeof body.session_id === 'string' ? body.session_id : undefined,
-          cwd: body.cwd,
-          matchFolder: true,
-        });
-        if (session) {
-          const modelId =
-            body.model && typeof body.model.id === 'string' ? body.model.id : null;
-          if (modelId && modelId.length < 80) session.model = modelId;
-          const cw = body.context_window;
-          if (cw && Number.isFinite(Number(cw.used_percentage))) {
-            session.liveContext = {
-              usedPct: Math.max(0, Math.min(100, Number(cw.used_percentage))),
-              size: Number(cw.context_window_size) || null,
-              at: new Date().toISOString(),
-            };
-          }
+        const prefer = body.preferSessionId;
+        if (prefer !== undefined && prefer !== null && (typeof prefer !== 'string' || prefer.length > 200)) {
+          return sendJson(res, 400, { ok: false, error: 'Invalid preferSessionId' });
         }
-        if (accepted || session) {
-          store._emitChange('usage_observed', {});
-          usageGuard.checkAndEnforce().catch(() => {});
+        let result;
+        try {
+          result = await usageChecker.check({ preferSessionId: prefer || null });
+        } catch (err) {
+          if (!(err instanceof UsageCheckError)) throw err;
+          return sendJson(res, err.statusCode, { ok: false, code: err.code, error: err.message });
         }
-        return sendJson(res, 200, { ok: true, accepted });
+        usageGuard.recordCheck(result.reading);
+        const usage = await usageGuard.checkAndEnforce();
+        return sendJson(res, 200, { ok: true, closed: result.closed, reading: usage.lastCheck, usage });
       }
-      if (req.method === 'POST' && pathname === '/api/statusline/install') {
-        const status = installStatusline();
-        return sendJson(res, status.error ? 500 : 200, { ok: !status.error, ...status });
+
+      // 19. A room's context window use, read from its transcript when asked (never pushed live).
+      if (req.method === 'GET' && pathname === '/api/session/context') {
+        const id = parsedUrl.searchParams.get('id') || '';
+        if (!id || id.length > 200 || /[\u0000-\u001f\u007f]/.test(id)) {
+          return sendJson(res, 400, { ok: false, error: 'Invalid room id' });
+        }
+        const session = store.sessions.get(id);
+        if (!session) return sendJson(res, 404, { ok: false, error: 'Session not found' });
+        const ctx = sessionContext(session);
+        if (!ctx.ok) return sendJson(res, ctx.statusCode || 404, { ok: false, error: ctx.error });
+        return sendJson(res, 200, { id, ...ctx });
       }
 
       // ---------- Automated runs: GET /api/automated?hours=24 ----------
@@ -1038,7 +1057,7 @@ function createMissionControlServer(options = {}) {
     store.flush();
   });
 
-  return { server, store, bridge, scanner, usageGuard, token, searchIndex };
+  return { server, store, bridge, scanner, usageGuard, usageChecker, token, searchIndex };
 }
 
 module.exports = { createMissionControlServer };

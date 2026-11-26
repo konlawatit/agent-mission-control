@@ -1,41 +1,88 @@
 const fs = require('fs');
 const path = require('path');
-const { getRecentBillableTokens } = require('./transcript-parser');
 
 const HOUR_MS = 3600 * 1000;
-// A statusline reading older than this no longer describes the current window.
-const OBSERVATION_MAX_AGE_MS = 6 * HOUR_MS;
-// Estimate mode only releases a hold once usage has recovered this far past the threshold.
-const RECOVERY_MARGIN_PCT = 5;
+// When a hold starts without a known reset time, it lifts after one 5-hour window.
+const WINDOW_MS = 5 * HOUR_MS;
+const MAX_TIMER_MS = 2147483647; // setTimeout's limit (~24.8 days)
+const MIN_TIMER_MS = 1000;
 
 function clampPct(n) {
   return Math.max(0, Math.min(100, Math.round(Number(n) * 10) / 10));
 }
 
-function toIso(value) {
-  if (value === null || value === undefined || value === '') return null;
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    // Claude Code reports epoch seconds; accept milliseconds too.
-    return new Date(value < 1e12 ? value * 1000 : value).toISOString();
-  }
-  const parsed = Date.parse(String(value));
-  return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
+function isoOrNull(value) {
+  if (typeof value !== 'string') return null;
+  const t = Date.parse(value);
+  return Number.isNaN(t) ? null : new Date(t).toISOString();
 }
 
-/** Normalizes one `rate_limits` window from the Claude Code statusline payload. */
-function normalizeWindow(win) {
-  if (!win || typeof win !== 'object') return null;
-  const pct = Number(win.used_percentage ?? win.usedPercentage);
-  if (!Number.isFinite(pct)) return null;
-  return { usedPct: clampPct(pct), resetsAt: toIso(win.resets_at ?? win.resetsAt) };
+function cleanText(value, max) {
+  return typeof value === 'string' && value ? value.slice(0, max) : null;
 }
+
+/** One usage window from a /usage reading: { usedPct, resetsAt, resetsText }. */
+function cleanWindow(win) {
+  if (!win || typeof win !== 'object') return null;
+  const used = Number(win.usedPct);
+  if (win.usedPct === null || win.usedPct === undefined || !Number.isFinite(used)) return null;
+  return { usedPct: clampPct(used), resetsAt: isoOrNull(win.resetsAt), resetsText: cleanText(win.resetsText, 80) };
+}
+
+/** A stored /usage reading, or null when it is not one (an older file, a hand edit). */
+function cleanCheck(check) {
+  if (!check || typeof check !== 'object') return null;
+  const checkedAt = isoOrNull(check.checkedAt);
+  const session = cleanWindow(check.session);
+  const week = cleanWindow(check.week);
+  if (!checkedAt || (!session && !week)) return null;
+  const models = (Array.isArray(check.models) ? check.models : [])
+    .map((m) => {
+      const win = cleanWindow(m);
+      const name = m && cleanText(m.name, 40);
+      return win && name ? { name, ...win } : null;
+    })
+    .filter(Boolean)
+    .slice(0, 6);
+  return {
+    checkedAt,
+    sessionId: cleanText(check.sessionId, 200),
+    room: cleanText(check.room, 200),
+    session,
+    week,
+    models,
+    partial: Boolean(check.partial),
+  };
+}
+
+function cleanHold(hold, nowIso) {
+  if (!hold || typeof hold !== 'object') return null;
+  const sessions = {};
+  if (hold.sessions && typeof hold.sessions === 'object') {
+    for (const [id, entry] of Object.entries(hold.sessions)) {
+      if (!entry || typeof entry !== 'object') continue;
+      sessions[id] = { hadWork: Boolean(entry.hadWork), final: Boolean(entry.final), savedAt: isoOrNull(entry.savedAt) };
+    }
+  }
+  return {
+    startedAt: isoOrNull(hold.startedAt) || nowIso,
+    resumeAt: isoOrNull(hold.resumeAt),
+    reason: cleanText(hold.reason, 300) || 'Usage ต่ำกว่าเกณฑ์',
+    source: cleanText(hold.source, 20) || 'check',
+    sessions,
+  };
+}
+
+const CONFIG_KEYS = ['enabled', 'autoPauseThresholdPct', 'manualRemainingPct', 'lastCheck', 'hold', 'lastResumedAt'];
 
 /**
  * Usage quota guard.
  *
- * Reads the real 5-hour plan usage from the Claude Code statusline bridge when available and
- * falls back to an estimate (fresh tokens in the last 5 hours against a configurable budget).
- * When remaining usage drops below the threshold (8% by default) it starts a hold:
+ * Works from the latest real plan-usage reading, taken on request by running `/usage` in an idle
+ * Claude Code terminal (src/usage-check.js). Nothing polls: the guard evaluates when a reading
+ * arrives, when hooks report activity, and when its settings change; during a hold one timer
+ * waits for the reset. When remaining usage in the 5-hour window is below the threshold (8% by
+ * default) it starts a hold:
  *   1. every live room gets a progress checkpoint, written to disk;
  *   2. rooms mid-turn are allowed to finish their current step, and the checkpoint is refreshed
  *      when they stop;
@@ -49,18 +96,21 @@ class UsageGuard {
     this.bridge = commandBridge;
     this.configFile = path.join(this.store.dataDir, 'usage-guard.json');
     this.checkpointsDir = path.join(this.store.dataDir, 'checkpoints');
-    this.timer = null;
     this.now = options.now || (() => Date.now());
-    this.recentTokens = options.recentTokens || getRecentBillableTokens;
+    this.schedule = options.schedule || ((fn, ms) => setTimeout(fn, ms));
+    this.unschedule = options.unschedule || ((handle) => clearTimeout(handle));
+    // Whether a /usage check is running right now (set by the server).
+    this.isChecking = options.isChecking || (() => false);
+    this.resumeTimer = null;
+    this.stopped = false;
 
     this.config = {
       enabled: true,
       autoPauseThresholdPct: 8,
-      windowHours: 5,
-      // Fresh tokens (input + output + cache writes) per 5-hour window, estimate mode only.
-      tokenBudget: 5000000,
+      // Set only by "ทดสอบการพัก": pretends usage is at this level until the hold lifts.
       manualRemainingPct: null,
-      observed: null,
+      // The latest /usage reading (see cleanCheck).
+      lastCheck: null,
       hold: null,
       lastResumedAt: null,
     };
@@ -68,25 +118,35 @@ class UsageGuard {
     this._loadConfig();
   }
 
+  /**
+   * Loads usage-guard.json. Each value is checked; anything from older versions (the token-budget
+   * estimate, statusline readings, the flag-style hold) is dropped and the file rewritten.
+   */
   _loadConfig() {
+    let raw;
     try {
-      if (fs.existsSync(this.configFile)) {
-        const raw = JSON.parse(fs.readFileSync(this.configFile, 'utf8'));
-        for (const key of Object.keys(this.config)) {
-          if (Object.prototype.hasOwnProperty.call(raw, key)) this.config[key] = raw[key];
-        }
-        // Earlier versions kept the hold as a flag plus a whole-store baseline.
-        if (raw.isPausedByQuota && !this.config.hold) {
-          this.config.hold = {
-            startedAt: raw.pausedAt || new Date(this.now()).toISOString(),
-            resumeAt: raw.resetAt || null,
-            reason: 'Usage ต่ำกว่าเกณฑ์',
-            source: 'estimate',
-            sessions: {},
-          };
-        }
-      }
-    } catch {}
+      if (!fs.existsSync(this.configFile)) return;
+      raw = JSON.parse(fs.readFileSync(this.configFile, 'utf8'));
+    } catch {
+      return;
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    const nowIso = new Date(this.now()).toISOString();
+    const c = this.config;
+    if (typeof raw.enabled === 'boolean') c.enabled = raw.enabled;
+    const threshold = Number(raw.autoPauseThresholdPct);
+    if (Number.isFinite(threshold) && threshold >= 1 && threshold <= 50) c.autoPauseThresholdPct = threshold;
+    if (typeof raw.manualRemainingPct === 'number' && Number.isFinite(raw.manualRemainingPct)) {
+      c.manualRemainingPct = clampPct(raw.manualRemainingPct);
+    }
+    c.lastCheck = cleanCheck(raw.lastCheck);
+    c.hold = cleanHold(raw.hold, nowIso);
+    // Earlier versions kept the hold as a flag plus a whole-store baseline.
+    if (!c.hold && raw.isPausedByQuota) {
+      c.hold = cleanHold({ startedAt: raw.pausedAt, resumeAt: raw.resetAt, source: 'legacy' }, nowIso);
+    }
+    c.lastResumedAt = isoOrNull(raw.lastResumedAt);
+    if (Object.keys(raw).some((key) => !CONFIG_KEYS.includes(key))) this._saveConfig();
   }
 
   _saveConfig() {
@@ -100,89 +160,78 @@ class UsageGuard {
     } catch {}
   }
 
-  start(intervalMs = 4000) {
-    if (this.timer) return;
-    this.timer = setInterval(() => {
-      this.checkAndEnforce().catch(() => {});
-    }, intervalMs);
-    if (this.timer.unref) this.timer.unref();
+  /** Arms the resume timer for a hold restored from disk. Nothing else runs on a schedule. */
+  start() {
+    this.stopped = false;
+    this._armResumeTimer();
   }
 
   stop() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
+    this.stopped = true;
+    this._clearResumeTimer();
+  }
+
+  _clearResumeTimer() {
+    if (this.resumeTimer) {
+      this.unschedule(this.resumeTimer);
+      this.resumeTimer = null;
     }
+  }
+
+  /** One timer, for the hold's resume time; re-armed whenever the hold changes. */
+  _armResumeTimer() {
+    this._clearResumeTimer();
+    const hold = this.config.hold;
+    if (this.stopped || !hold || !hold.resumeAt) return;
+    const delay = Math.min(MAX_TIMER_MS, Math.max(MIN_TIMER_MS, Date.parse(hold.resumeAt) - this.now()));
+    this.resumeTimer = this.schedule(() => {
+      this.resumeTimer = null;
+      this.checkAndEnforce().catch(() => {});
+    }, delay);
+    if (this.resumeTimer && typeof this.resumeTimer.unref === 'function') this.resumeTimer.unref();
   }
 
   isHolding() {
     return Boolean(this.config.hold);
   }
 
-  /** Records a statusline reading (`rate_limits` from Claude Code). */
-  observe(rateLimits) {
-    if (!rateLimits || typeof rateLimits !== 'object') return false;
-    const fiveHour = normalizeWindow(rateLimits.five_hour || rateLimits.fiveHour);
-    const sevenDay = normalizeWindow(rateLimits.seven_day || rateLimits.sevenDay);
-    if (!fiveHour && !sevenDay) return false;
-    this.config.observed = {
-      fiveHour,
-      sevenDay,
-      seenAt: new Date(this.now()).toISOString(),
-    };
+  /** Stores a /usage reading as the latest one; real numbers replace a simulated level. */
+  recordCheck(reading) {
+    const check = cleanCheck(reading);
+    if (!check) return false;
+    this.config.lastCheck = check;
+    this.config.manualRemainingPct = null;
     this._saveConfig();
+    this.store._emitChange('usage_checked', {});
     return true;
   }
 
-  _liveObservation() {
-    const obs = this.config.observed;
-    if (!obs || !obs.fiveHour) return null;
-    const now = this.now();
-    if (now - Date.parse(obs.seenAt || 0) > OBSERVATION_MAX_AGE_MS) return null;
-    // Claude Code drops a window once it resets; a reading past its reset is stale.
-    if (obs.fiveHour.resetsAt && Date.parse(obs.fiveHour.resetsAt) <= now) return null;
-    return obs;
-  }
-
-  _estimate() {
-    const now = this.now();
-    const windowMs = Number(this.config.windowHours || 5) * HOUR_MS;
-    const { tokens, oldestAt } = this.recentTokens(now - windowMs);
-    const budget = Math.max(10000, Number(this.config.tokenBudget || 5000000));
-    return {
-      windowTokens: tokens,
-      usedPct: clampPct((tokens / budget) * 100),
-      // Rolling window: the oldest counted message ages out first.
-      resetsAt: new Date((oldestAt || now) + windowMs).toISOString(),
-    };
+  /** The 5-hour window of the latest reading while it still describes the current window. */
+  _currentSessionWindow() {
+    const check = this.config.lastCheck;
+    const win = check && check.session;
+    if (!win) return null;
+    if (win.resetsAt && Date.parse(win.resetsAt) <= this.now()) return null;
+    return win;
   }
 
   getUsageSummary() {
-    const threshold = Number(this.config.autoPauseThresholdPct || 8);
-    const estimate = this._estimate();
-    const observed = this._liveObservation();
+    const threshold = Number(this.config.autoPauseThresholdPct) || 8;
+    const check = this.config.lastCheck;
+    const current = this._currentSessionWindow();
 
-    let source = 'estimate';
-    let usedPct = estimate.usedPct;
-    let resetAt = estimate.resetsAt;
+    let source = 'none';
+    let usedPct = null;
     if (typeof this.config.manualRemainingPct === 'number') {
       source = 'simulated';
       usedPct = clampPct(100 - this.config.manualRemainingPct);
-    } else if (observed) {
-      source = 'claude';
-      usedPct = observed.fiveHour.usedPct;
-      resetAt = observed.fiveHour.resetsAt || resetAt;
+    } else if (current) {
+      source = 'check';
+      usedPct = current.usedPct;
     }
-    const remainingPct = clampPct(100 - usedPct);
+    const remainingPct = usedPct === null ? null : clampPct(100 - usedPct);
     const hold = this.config.hold;
-
-    let totalTokensAll = 0;
-    let totalCostAll = 0;
-    for (const s of this.store.sessions.values()) {
-      const u = s.tokenUsage || {};
-      totalTokensAll += Number(u.totalTokens || 0);
-      totalCostAll += Number(u.estimatedCostUsd || 0);
-    }
+    const withRemaining = (win) => (win ? { ...win, remainingPct: clampPct(100 - win.usedPct) } : null);
 
     return {
       enabled: Boolean(this.config.enabled),
@@ -190,7 +239,7 @@ class UsageGuard {
       autoPauseThresholdPct: threshold,
       remainingPct,
       usedPct,
-      isLowQuota: remainingPct < threshold,
+      isLowQuota: remainingPct !== null && remainingPct < threshold,
       isPausedByQuota: Boolean(hold),
       hold: hold
         ? {
@@ -199,19 +248,22 @@ class UsageGuard {
             reason: hold.reason,
             source: hold.source,
             rooms: Object.keys(hold.sessions || {}).length,
-            pendingSteps: Object.values(hold.sessions || {}).filter((h) => !h.final)
-              .length,
+            pendingSteps: Object.values(hold.sessions || {}).filter((h) => !h.final).length,
           }
         : null,
-      resetAt: hold && hold.resumeAt ? hold.resumeAt : resetAt,
-      windowHours: Number(this.config.windowHours || 5),
-      tokenBudget: Math.max(10000, Number(this.config.tokenBudget || 5000000)),
-      windowTokens: estimate.windowTokens,
-      sevenDay: observed && observed.sevenDay ? observed.sevenDay : null,
-      observedAt: this.config.observed ? this.config.observed.seenAt : null,
+      resetAt: hold && hold.resumeAt ? hold.resumeAt : current ? current.resetsAt : null,
+      lastCheck: check
+        ? {
+            ...check,
+            session: withRemaining(check.session),
+            week: withRemaining(check.week),
+            models: check.models.map(withRemaining),
+          }
+        : null,
+      // The latest reading's 5-hour window has reset since: its numbers are history.
+      stale: Boolean(check && check.session && !current),
+      checking: Boolean(this.isChecking()),
       lastResumedAt: this.config.lastResumedAt,
-      totalTokensAll,
-      totalCostAll: Math.round(totalCostAll * 10000) / 10000,
     };
   }
 
@@ -232,21 +284,18 @@ class UsageGuard {
     this._finalizeFinishedSteps();
 
     const now = this.now();
-    const resumeDue = hold.resumeAt && now >= Date.parse(hold.resumeAt);
-    // A fresh reading with a later reset means the window already rolled over.
+    const resumeDue = Boolean(hold.resumeAt) && now >= Date.parse(hold.resumeAt);
+    // A newer reading from the next window (a later reset, above the threshold) ends the hold early.
+    const current = summary.source === 'check' ? this._currentSessionWindow() : null;
     const rolledOver =
-      summary.source === 'claude' &&
-      hold.resumeAt &&
-      summary.resetAt &&
-      Date.parse(summary.resetAt) > Date.parse(hold.resumeAt) &&
+      Boolean(current && current.resetsAt && hold.resumeAt) &&
+      Date.parse(current.resetsAt) > Date.parse(hold.resumeAt) &&
       !summary.isLowQuota;
-    const recovered =
-      summary.source === 'estimate' &&
-      hold.source === 'estimate' &&
-      summary.remainingPct >= summary.autoPauseThresholdPct + RECOVERY_MARGIN_PCT;
 
-    if (resumeDue || rolledOver || recovered) {
+    if (resumeDue || rolledOver) {
       await this.resumeAll({ autoTriggered: true });
+    } else if (!this.resumeTimer) {
+      this._armResumeTimer();
     }
     return this.getUsageSummary();
   }
@@ -283,9 +332,9 @@ class UsageGuard {
 
   startHold(reason, summary = this.getUsageSummary()) {
     const nowIso = new Date(this.now()).toISOString();
+    const current = this._currentSessionWindow();
     const resumeAt =
-      summary.resetAt ||
-      new Date(this.now() + Number(this.config.windowHours || 5) * HOUR_MS).toISOString();
+      (current && current.resetsAt) || new Date(this.now() + WINDOW_MS).toISOString();
     const sessions = {};
 
     for (const session of this.store.sessions.values()) {
@@ -320,6 +369,7 @@ class UsageGuard {
       sessions,
     };
     this._saveConfig();
+    this._armResumeTimer();
     this.store._emitChange('quota_hold', { reason, rooms: Object.keys(sessions) });
     return { ok: true, pausedSessions: Object.keys(sessions), usage: this.getUsageSummary() };
   }
@@ -367,6 +417,7 @@ class UsageGuard {
     this.config.hold = null;
     this.config.manualRemainingPct = null;
     this.config.lastResumedAt = nowIso;
+    this._clearResumeTimer();
     this._saveConfig();
 
     const resumedSessions = [];
@@ -412,7 +463,7 @@ class UsageGuard {
     return { ok: true, resumedSessions, usage: this.getUsageSummary() };
   }
 
-  /** Test hook: pretends usage is at `remainingPct` and starts a hold. */
+  /** Test hook ("ทดสอบการพัก"): pretends usage is at `remainingPct` and starts a hold. */
   async simulateLowQuota(remainingPct = 6.5) {
     this.config.manualRemainingPct = remainingPct;
     this._saveConfig();
@@ -428,14 +479,8 @@ class UsageGuard {
         await this.resumeAll({ dispatchResume: false });
       }
     }
-    if (typeof patch.autoPauseThresholdPct === 'number') {
-      this.config.autoPauseThresholdPct = Math.max(
-        1,
-        Math.min(50, patch.autoPauseThresholdPct)
-      );
-    }
-    if (typeof patch.tokenBudget === 'number' && patch.tokenBudget >= 10000) {
-      this.config.tokenBudget = Math.round(patch.tokenBudget);
+    if (typeof patch.autoPauseThresholdPct === 'number' && Number.isFinite(patch.autoPauseThresholdPct)) {
+      this.config.autoPauseThresholdPct = Math.max(1, Math.min(50, patch.autoPauseThresholdPct));
     }
     if (patch.manualRemainingPct === null) {
       this.config.manualRemainingPct = null;
@@ -447,4 +492,4 @@ class UsageGuard {
   }
 }
 
-module.exports = { UsageGuard, normalizeWindow };
+module.exports = { UsageGuard, cleanCheck };

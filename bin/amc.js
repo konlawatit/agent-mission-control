@@ -8,8 +8,8 @@
  *                                                  them when it stops; this flag leaves ~/.claude/settings.json alone
  *   amc install-hooks                              Install Claude Code lifecycle hooks into ~/.claude/settings.json
  *   amc uninstall-hooks                            Remove Mission Control hooks from ~/.claude/settings.json
- *   amc install-statusline                         Forward real 5h plan usage from Claude Code's statusline (keeps an existing statusline)
- *   amc uninstall-statusline                       Restore the statusline that was configured before
+ *   amc uninstall-statusline                       Remove the statusline usage bridge of earlier versions and restore the
+ *                                                  statusline configured before it (`amc start` does this too)
  *   amc status                                     Show live & history sessions right in the terminal
  *   amc run [--room "Auth"] <cmd> [args...]        Wrap any CLI agent in a Mission Control tracked room
  */
@@ -21,7 +21,7 @@ const {
   checkHooksStatus,
   installClaudeHooks,
   uninstallClaudeHooks,
-  installStatusline,
+  checkStatuslineStatus,
   uninstallStatusline,
 } = require('../src/hook-installer');
 const { attachManagedHooks } = require('../src/hook-lifecycle');
@@ -113,24 +113,29 @@ async function runCommand() {
     return;
   }
 
+  // Removed: usage is no longer pushed from the statusline. Answer here so the old command never
+  // falls through to `start`.
   if (subcommand === 'install-statusline') {
-    const result = installStatusline();
-    if (result.error) {
-      console.log(`❌ ติดตั้ง statusline ไม่สำเร็จ: ${result.error}`);
-      process.exitCode = 1;
-      return;
-    }
-    console.log('✅ เชื่อม Claude Code statusline กับ Mission Control แล้ว (usage 5 ชม. จริง)');
-    if (result.wrapsPrevious) {
-      console.log('   statusline เดิมของคุณยังแสดงเหมือนเดิม (ถูกครอบไว้ ไม่ได้ลบ)');
-    }
-    console.log(`   ไฟล์ตั้งค่า: ${result.settingsPath}`);
+    console.log('❌ คำสั่งนี้ถูกถอดออกแล้ว: Mission Control ไม่ดึง usage ตลอดเวลาอีกต่อไป');
+    console.log('   เช็ค usage ที่เหลือได้จากปุ่ม "เช็คตอนนี้" ในแผง Usage ของ dashboard');
+    process.exitCode = 1;
     return;
   }
 
   if (subcommand === 'uninstall-statusline') {
     const result = uninstallStatusline();
-    console.log('✅ คืนค่า statusline เดิมเรียบร้อย');
+    if (result.error) {
+      console.log(`❌ ถอด statusline ไม่สำเร็จ: ${result.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(
+      result.removed
+        ? result.restored
+          ? '✅ ถอด statusline ของ Mission Control และคืน statusline เดิมแล้ว'
+          : '✅ ถอด statusline ของ Mission Control แล้ว'
+        : '✅ ไม่มี statusline ของ Mission Control ค้างอยู่'
+    );
     console.log(`   ไฟล์ตั้งค่า: ${result.settingsPath}`);
     return;
   }
@@ -258,6 +263,12 @@ async function runCommand() {
         })
       : null;
     const hooksState = managed ? managed.result : checkHooksStatus();
+    // Earlier versions installed a statusline that posted usage on every render; its script is
+    // gone, so a leftover entry would only show an error in Claude Code. Put the old one back.
+    if (manageHooks && checkStatuslineStatus().installed) {
+      const cleaned = uninstallStatusline();
+      if (cleaned.removed) console.log('🧹 ถอด statusline usage bridge รุ่นเก่าออกจาก ~/.claude/settings.json แล้ว');
+    }
     const hooksLine = hooksState.error
       ? `🔴 เชื่อมไม่สำเร็จ: ${hooksState.error}`
       : hooksState.installed

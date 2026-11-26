@@ -445,6 +445,15 @@
     .rc-foot { grid-column: 2; display: flex; align-items: center; gap: 12px; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; min-width: 0; }
     .rc-foot span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
     .rc-foot .branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11px; }
+    /* A room on a guild quest (public/guild.html): its step, in the status colours. */
+    .quest-chip { color: var(--work-ink); font-weight: 600; }
+    .quest-chip.is-done { color: var(--done-ink); }
+    .quest-chip.is-attn { color: var(--attn-ink); }
+    .quest-chip.is-off { color: var(--text-3); font-weight: 500; }
+    .rc-foot .quest-chip { overflow: hidden; }
+    .rc-foot .quest-chip .clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    a.chip.quest-chip { text-decoration: none; }
+    a.chip.quest-chip:hover { background: var(--soft-2); }
 
     .dots { display: inline-flex; gap: 3px; flex-shrink: 0; }
     .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--dot-off); }

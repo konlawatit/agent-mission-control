@@ -150,6 +150,55 @@ const tests = {
     assert.ok(Array.from(doneLong.body).length <= 'ทำเสร็จแล้ว: '.length + 80);
     assert.strictEqual(notifyMessage({ id: 'x', status: 'done' }, 'done').title, 'ห้อง Agent');
   },
+  'a quest step ending (done while the quest runs) is silent'() {
+    const running = { state: 'running' };
+    const out = play([
+      { sessions: [room('a', 'working', { quest: running })] },
+      { sessions: [room('a', 'done', { quest: running })], now: 1000 },
+      { sessions: [room('a', 'working', { quest: running })], now: 2000 },
+    ]);
+    assert.deepStrictEqual(out[1], []);
+    assert.deepStrictEqual(out[2], []);
+  },
+  'a quest that needs a permission still rings attn'() {
+    const out = play([
+      { sessions: [room('a', 'working', { quest: { state: 'running' } })] },
+      { sessions: [room('a', 'needs_input', { quest: { state: 'running' } })], now: 1000 },
+    ]);
+    assert.deepStrictEqual(out[1], ['a:attn']);
+  },
+  'where a quest lands rings once: done/failed as done, paused/stalled as attn, stopped silent'() {
+    // A stopped quest leaves an ordinary room: its running turn still rings "done" when it ends.
+    const q = (state) => ({ quest: { state } });
+    const out = play([
+      { sessions: [room('a', 'working', q('running')), room('b', 'working', q('running')), room('c', 'done', q('running')), room('d', 'working', q('running'))] },
+      // a: the last Stop and the quest's end arrive in one snapshot: one ring, not two.
+      { sessions: [room('a', 'done', q('done')), room('b', 'done', q('running')), room('c', 'done', q('paused')), room('d', 'working', q('stopped'))], now: 1000 },
+      { sessions: [room('a', 'done', q('done')), room('b', 'done', q('failed')), room('c', 'done', q('paused')), room('d', 'working', q('stopped'))], now: 2000 },
+    ]);
+    assert.deepStrictEqual(out[1], ['a:done', 'c:attn']);
+    assert.deepStrictEqual(out[2], ['b:done']);
+  },
+  'a quest seen for the first time, or after a reconnect, is silent'() {
+    const out = play([
+      { sessions: [room('a', 'idle')] },
+      { sessions: [room('a', 'idle'), room('b', 'done', { quest: { state: 'done' } })], now: 1000 },
+      { sessions: [room('a', 'idle', { quest: { state: 'failed' } })], now: 2000, baseline: true },
+    ]);
+    assert.deepStrictEqual(out[1], []);
+    assert.deepStrictEqual(out[2], []);
+  },
+  'notifyMessage: quest wording'() {
+    const paused = notifyMessage(room('a', 'done', { quest: { state: 'paused', stateReason: 'ต้องการ **ชื่อ** branch' } }), 'attn');
+    assert.strictEqual(paused.body, 'เควสต์หยุดรอคุณ: ต้องการ ชื่อ branch');
+    const failed = notifyMessage(room('a', 'done', { quest: { state: 'failed', stateReason: 'test ไม่ผ่าน 2 ตัว' } }), 'done');
+    assert.strictEqual(failed.body, 'เควสต์ไม่ผ่าน: test ไม่ผ่าน 2 ตัว');
+    const done = notifyMessage(room('a', 'done', { tldr: 'แก้แล้ว', quest: { state: 'done' } }), 'done');
+    assert.strictEqual(done.body, 'เควสต์สำเร็จ: แก้แล้ว');
+    // A permission prompt during a quest reads as the prompt, not as the quest.
+    const ask = notifyMessage(room('a', 'needs_input', { pendingAction: 'Bash(npm test)', quest: { state: 'running' } }), 'attn');
+    assert.strictEqual(ask.body, 'รอคุณยืนยัน: Bash(npm test)');
+  },
 };
 
 let failed = 0;

@@ -229,6 +229,7 @@ const ICON_PATHS = {
   search: '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>',
   sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  sword: '<path d="M19.5 4.5h-3.8L6.8 13.4l3.8 3.8 8.9-8.9z"/><path d="M5 15.2l3.8 3.8"/><path d="M6.9 17.1 4.5 19.5"/>',
   grid: '<rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/>',
   rows: '<rect x="4" y="4" width="6" height="16" rx="1.5"/><path d="M14 6.5h6M14 12h6M14 17.5h6"/>',
   refresh: '<path d="M19.5 10.5A7.5 7.5 0 0 0 6 7.2L4.5 8.7"/><path d="M4.5 4.5v4.2h4.2"/><path d="M4.5 13.5A7.5 7.5 0 0 0 18 16.8l1.5-1.5"/><path d="M19.5 19.5v-4.2h-4.2"/>',
@@ -743,7 +744,8 @@ function renderSidebar() {
       item('overview', 'grid', 'ภาพรวม', '') +
       item('history', 'clock', 'ประวัติ', `<span class="count">${hist}</span>`) +
       item('search', 'search', 'ค้นหา', '') +
-      item('automation', 'bot', 'งานอัตโนมัติ', '')
+      item('automation', 'bot', 'งานอัตโนมัติ', '') +
+      item('guild', 'sword', 'โลกกิลด์', '')
   );
 
   setHTML($('#side-usage'), usageCardHtml());
@@ -899,6 +901,32 @@ function roomSummaryHtml(s) {
   return text ? `<span class="rc-sum">${formatInline(escapeHtml(text))}</span>` : '';
 }
 
+/** A room on a guild quest, in a few words, e.g. "Artificer · ขั้น 3/3 ทดสอบ · รอบ 2/3". */
+function questChipText(q) {
+  if (q.state === 'done') return 'เควสต์สำเร็จ';
+  if (q.state === 'failed') return 'เควสต์ไม่ผ่าน';
+  if (q.state === 'paused' || q.state === 'stalled') return 'เควสต์หยุดรอคุณ';
+  if (q.state === 'stopped') return 'เควสต์หยุดแล้ว';
+  const hero = String(q.heroName || '').split(' ').pop() || 'เควสต์';
+  const phase = q.phase && q.phaseCount ? ` · ขั้น ${(q.phaseIndex || 0) + 1}/${q.phaseCount} ${q.phase.title || ''}` : '';
+  const loop = q.maxLoops > 1 ? ` · รอบ ${q.loop || 1}/${q.maxLoops}` : '';
+  return `${hero}${phase}${loop}`.trim();
+}
+
+const QUEST_TONE = { done: 'is-done', failed: 'is-attn', paused: 'is-attn', stalled: 'is-attn', stopped: 'is-off' };
+
+/** The quest chip; in the room header it links to this hero in the guild. */
+function questChipHtml(s, { link = false } = {}) {
+  const q = s.quest;
+  if (!q || typeof q !== 'object') return '';
+  const tone = QUEST_TONE[q.state] || 'is-work';
+  const title = [q.name && `เควสต์: ${q.name}`, q.goal, q.stateReason].filter(Boolean).join('\n');
+  const inner = `${icon('sword', link ? 14 : 12)}<span class="clip">${escapeHtml(questChipText(q))}</span>`;
+  return link
+    ? `<a class="chip quest-chip ${tone}" href="/guild#hero=${encodeURIComponent(s.id)}" title="${escapeHtml(`${title}\nเปิดในโลกกิลด์`)}">${inner}</a>`
+    : `<span class="quest-chip ${tone}" title="${escapeHtml(title)}">${inner}</span>`;
+}
+
 /** `group` (a status-group key) makes the card draggable within that group. */
 function rcardHtml(s, current = false, group = '') {
   const st = roomState(s);
@@ -924,6 +952,7 @@ function rcardHtml(s, current = false, group = '') {
       <span class="rc-foot">
         <span class="branch">${icon('branch', 12)}${escapeHtml(s.branch || '-')}</span>
         ${(s.subAgents || []).length ? `<span title="Sub-agents">${icon('agents', 12)}${(s.subAgents || []).length}</span>` : ''}
+        ${questChipHtml(s)}
       </span>
     </button>`;
 }
@@ -1029,6 +1058,7 @@ function focusHeadHtml(s) {
         ${icon('spark', 14)}<span>${escapeHtml(fam ? modelLabel(s.model) : 'Model')}</span>${effort ? `<span style="color:var(--text-3)">${escapeHtml(effort)}</span>` : ''}${icon('chevronDown', 14)}
       </button>
       ${ctxChipHtml(s)}
+      ${questChipHtml(s, { link: true })}
       ${
         s.lifecycle !== 'history' && !connected
           ? `<span class="chip" title="ยังไม่พบ terminal ของห้องนี้ คำสั่งจะเข้าคิวไว้ หรือเปิดโหมดพื้นหลัง">${icon('plug', 14)}ยังไม่เชื่อม terminal</span>`
@@ -2313,6 +2343,11 @@ const Actions = {
   },
   navigate(key) {
     if (key === 'search') return Actions.openSearch();
+    // The guild is its own page (public/guild.html): the same sessions, drawn as a game world.
+    if (key === 'guild') {
+      window.location.href = '/guild';
+      return;
+    }
     ui.view = key === 'overview' ? 'grid' : key === 'automation' ? 'automation' : 'focus';
     ui.lifecycle = key === 'history' ? 'history' : 'live';
     ui.filter = key === 'attn' ? 'attn' : 'all';
@@ -3379,6 +3414,10 @@ $('#search-icon').innerHTML = icon('search', 15);
 const NOTIFY_REPEAT_MS = 20000;
 // The statuses worth a system notification, and the kind each one rings as.
 const NOTIFY_KIND = { needs_input: 'attn', done: 'done' };
+// A guild quest (see public/guild.js) ends many turns on its way: only where the quest itself
+// lands rings, and a quest stopped by the person rings nothing.
+const NOTIFY_QUEST_KIND = { done: 'done', failed: 'done', paused: 'attn', stalled: 'attn' };
+const QUEST_MOVING = new Set(['launching', 'running']);
 
 /**
  * Which live rooms just changed into "needs you" or "done". Pure, so node can run it.
@@ -3388,25 +3427,42 @@ const NOTIFY_KIND = { needs_input: 'attn', done: 'done' };
  *   baseline  true for the first snapshot of a connection: remember it, ring for nothing
  * Returns { memory, events: [{ id, kind }] }. A room seen for the first time, a history room and
  * a room that did not change are silent; a repeat of the same kind within NOTIFY_REPEAT_MS too.
+ * A room on a running quest does not ring "done" between the quest's steps; the quest reaching
+ * done/failed rings "done" and paused/stalled rings "attn", once per room per snapshot.
  */
 function notifyTransitions(memory, sessions, { now = 0, viewingId = null, baseline = false } = {}) {
   const prev = memory && memory.status && !baseline ? memory.status : null;
+  const prevQuest = memory && memory.quest && !baseline ? memory.quest : null;
   const sent = new Map(memory && memory.sent ? memory.sent : []);
   const status = new Map();
+  const quest = new Map();
   const events = [];
   for (const s of sessions || []) {
     if (!s || !s.id || s.lifecycle === 'history') continue;
+    const questState = (s.quest && s.quest.state) || null;
     status.set(s.id, s.status);
-    const kind = Object.prototype.hasOwnProperty.call(NOTIFY_KIND, s.status) ? NOTIFY_KIND[s.status] : null;
-    if (!prev || !kind || !prev.has(s.id) || prev.get(s.id) === s.status) continue;
-    if (s.id === viewingId) continue;
+    quest.set(s.id, questState);
+    let kind = null;
+    if (
+      prevQuest &&
+      prevQuest.has(s.id) &&
+      questState &&
+      prevQuest.get(s.id) !== questState &&
+      Object.prototype.hasOwnProperty.call(NOTIFY_QUEST_KIND, questState)
+    ) {
+      kind = NOTIFY_QUEST_KIND[questState];
+    } else if (prev && prev.has(s.id) && prev.get(s.id) !== s.status) {
+      kind = Object.prototype.hasOwnProperty.call(NOTIFY_KIND, s.status) ? NOTIFY_KIND[s.status] : null;
+      if (kind === 'done' && QUEST_MOVING.has(questState)) kind = null;
+    }
+    if (!kind || s.id === viewingId) continue;
     const last = sent.get(s.id);
     if (last && last.kind === kind && now - last.at < NOTIFY_REPEAT_MS) continue;
     sent.set(s.id, { kind, at: now });
     events.push({ id: s.id, kind });
   }
   for (const [id, last] of sent) if (!status.has(id) || now - last.at >= NOTIFY_REPEAT_MS) sent.delete(id);
-  return { memory: { status, sent }, events };
+  return { memory: { status, quest, sent }, events };
 }
 
 /** Notification text is plain: no Markdown, emoji or line breaks, cut to `max` characters. */
@@ -3427,6 +3483,12 @@ function notifyPlain(text, max = 80) {
 /** Title and body for a room's notification, in Thai. */
 function notifyMessage(s, kind) {
   const title = notifyPlain(s.room || s.project || 'ห้อง Agent', 60);
+  const q = s.quest || null;
+  const reason = q && q.stateReason ? `: ${notifyPlain(q.stateReason)}` : '';
+  if (q && kind === 'attn' && s.status !== 'needs_input' && (q.state === 'paused' || q.state === 'stalled')) {
+    return { title, body: `เควสต์หยุดรอคุณ${reason}` };
+  }
+  if (q && kind === 'done' && q.state === 'failed') return { title, body: `เควสต์ไม่ผ่าน${reason}` };
   if (kind === 'attn') {
     const p = s.interactivePrompt;
     const n = p && Array.isArray(p.questions) ? p.questions.length : 0;
@@ -3437,7 +3499,8 @@ function notifyMessage(s, kind) {
   // The TL;DR can still be the waiting notice ("⚠️ ...") or the server's default greeting.
   const tldr = String(s.tldr || '');
   const usable = tldr && !/^\s*⚠/.test(tldr) && !tldr.includes('พร้อมรับคำสั่งผ่าน Terminal');
-  return { title, body: usable ? `ทำเสร็จแล้ว: ${notifyPlain(tldr)}` : 'ทำเสร็จแล้ว' };
+  const lead = q && q.state === 'done' ? 'เควสต์สำเร็จ' : 'ทำเสร็จแล้ว';
+  return { title, body: usable ? `${lead}: ${notifyPlain(tldr)}` : lead };
 }
 /* ---------- Notifications: browser wiring ---------- */
 
@@ -3867,7 +3930,24 @@ function applySnapshot(snap) {
   appState.sessions = snap.sessions || [];
   if (snap.hooks) appState.hooks = snap.hooks;
   notifyOnSnapshot();
+  if (window.location.hash) setTimeout(openRoomFromHash, 0);
 }
+
+/** "#room=<id>" (the guild's "เปิดในหน้าแชท") selects that room once it is in the snapshot. */
+function openRoomFromHash() {
+  const m = /^#room=(.+)$/.exec(window.location.hash || '');
+  if (!m) return;
+  let id = '';
+  try {
+    id = decodeURIComponent(m[1]);
+  } catch {
+    return;
+  }
+  if (!appState.sessions.some((x) => x.id === id)) return; // not loaded yet: the next snapshot retries
+  history.replaceState(null, '', window.location.pathname + window.location.search);
+  Actions.selectRoom(id);
+}
+window.addEventListener('hashchange', openRoomFromHash);
 
 async function fetchInitialState() {
   try {

@@ -14,6 +14,7 @@ const { parseConsoleScreen } = require('../src/console-scanner');
 const { sanitizeQuestions, matchQuestionIndex, mergeScreenPrompt } = require('../src/ask-prompt');
 const { parseTranscriptTailUncached } = require('../src/transcript-parser');
 const { StateStore } = require('../src/state-store');
+const { CommandBridge } = require('../src/command-bridge');
 
 const QUESTIONS = [
   {
@@ -565,10 +566,12 @@ const SCREEN_FAV_Q2 = [
   assert.deepStrictEqual(m1.options.map((o) => o.label), ['แดง', 'เขียว', 'Type something.', 'Chat about this']);
 
   const p2 = parseConsoleScreen(SCREEN_FAV_Q2).interactivePrompt;
+  assert.strictEqual(p2.tabBar, true, 'the tab bar is on screen');
   assert.strictEqual(p2.nextIndex, undefined, 'no Next row in 2.1.332');
   const m2 = mergeScreenPrompt(p2, ask);
   assert.strictEqual(m2.activeQuestion, 1);
   assert.strictEqual(m2.multiSelect, true);
+  assert.strictEqual(m2.tabBar, true, 'kept through the merge (the tab names are not)');
   assert.deepStrictEqual(m2.options.map((o) => o.label), ['มะม่วง', 'มังคุด', 'ทุเรียน', 'Type something', 'Chat about this']);
   assert.deepStrictEqual(m2.options.map((o) => Boolean(o.claude)), [true, true, true, false, false]);
 
@@ -595,4 +598,106 @@ const SCREEN_FAV_Q2 = [
   assert.strictEqual(mo.options[0].claude, true);
 }
 
-console.log('✅ Multi-question prompt checks passed!');
+// 11. "ยืนยัน N ข้อ" on a multi-select: the ticks, then on to the next question. Older Claude Code
+//     has a "Next" row (Enter on it); 2.1.332 has none and its tab bar moves on with →. With
+//     neither on screen only the ticks are sent. Driven through a fake console bridge.
+async function testMultiSelectAdvance() {
+  const store = new StateStore({ dataDir: fs.mkdtempSync(path.join(isolatedHome, 'store-')) });
+  const calls = [];
+  const fakeScanner = {
+    failKey: null,
+    async selectOption(pid, cur, target) {
+      calls.push(['select', cur, target]);
+      return { ok: true };
+    },
+    async sendKey(pid, key) {
+      calls.push(['key', key]);
+      return { ok: key !== this.failKey };
+    },
+  };
+  const bridge = new CommandBridge(store, fakeScanner);
+
+  const roomFor = (pid, questions, screen) => {
+    const cwd = fs.mkdtempSync(path.join(isolatedHome, 'room-'));
+    const transcript = path.join(cwd, 'ask.jsonl');
+    const entry = {
+      type: 'assistant',
+      timestamp: new Date().toISOString(),
+      message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: `toolu_${pid}`, name: 'AskUserQuestion', input: { questions } }] },
+    };
+    fs.writeFileSync(transcript, [{ type: 'user', message: { role: 'user', content: 'ask' } }, entry].map((e) => JSON.stringify(e)).join('\n') + '\n');
+    const room = store.getOrCreateSession(`claude-pid-${pid}`, { cwd, pid });
+    room.transcriptPath = transcript;
+    store.ingestConsoleScan([{ pid, cwd, screen }]);
+    return room;
+  };
+
+  // 2.1.332, the last question: ticks top-down, then → to the submit tab.
+  const room = roomFor(881, FAV, SCREEN_FAV_Q2);
+  assert.strictEqual(room.interactivePrompt.activeQuestion, 1, 'question 2 is on screen');
+  let res = await bridge.applyMultiSelect(room.id, { toggles: [3, 1], currentIndex: 1, nextIndex: null });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.delivered, true);
+  assert.deepStrictEqual(calls, [['select', 1, 1], ['select', 1, 3], ['key', 'right']], 'ticks, then the next tab');
+  assert.ok(/ไป/.test(res.message) && res.message !== 'อัปเดตตัวเลือกแล้ว', `says it moved on: ${res.message}`);
+  assert.ok(res.message.includes('ตรวจคำตอบ'), `the last question moves to the submit step: ${res.message}`);
+
+  // The terminal then shows the submit step: the room offers its own options, not question 1's.
+  store.ingestConsoleScan([{ pid: 881, cwd: room.cwd, screen: SCREEN_FAV_REVIEW }]);
+  assert.strictEqual(room.status, 'needs_input');
+  assert.strictEqual(room.interactivePrompt.reviewStep, true);
+  assert.strictEqual(room.interactivePrompt.activeQuestion, -1);
+  assert.deepStrictEqual(room.interactivePrompt.options.map((o) => o.label), ['Submit answers', 'Cancel']);
+  store.ingestConsoleScan([{ pid: 881, cwd: room.cwd, screen: SCREEN_FAV_Q2 }]); // back on question 2
+  assert.strictEqual(room.interactivePrompt.activeQuestion, 1);
+
+  // Nothing to change, cursor left on "Type something": back onto Claude's last option first,
+  // so the arrow is not taken by that row's text box.
+  calls.length = 0;
+  res = await bridge.applyMultiSelect(room.id, { toggles: [], currentIndex: 4, nextIndex: null });
+  assert.strictEqual(res.ok, true);
+  assert.deepStrictEqual(calls, [['key', 'up'], ['key', 'right']]);
+
+  // The move fails: reported, not claimed.
+  calls.length = 0;
+  fakeScanner.failKey = 'right';
+  res = await bridge.applyMultiSelect(room.id, { toggles: [2], currentIndex: 1, nextIndex: null });
+  assert.strictEqual(res.ok, false, 'a failed move is reported');
+  assert.deepStrictEqual(calls, [['select', 1, 2], ['key', 'right']]);
+  fakeScanner.failKey = null;
+
+  // A multi-select that is not the last question: "next question".
+  const firstMulti = [FAV[1], FAV[0]];
+  const screenFirst = SCREEN_FAV_Q2.replace('←  ☒ �  ☐ ผลไ�  ✔ Submit  →', '←  ☐ ผลไ�  ☐ �  ✔ Submit  →');
+  const room2 = roomFor(882, firstMulti, screenFirst);
+  assert.strictEqual(room2.interactivePrompt.activeQuestion, 0);
+  calls.length = 0;
+  res = await bridge.applyMultiSelect(room2.id, { toggles: [2], currentIndex: 1, nextIndex: null });
+  assert.deepStrictEqual(calls, [['select', 1, 2], ['key', 'right']]);
+  assert.ok(res.message.includes('ข้อถัดไป'), `moves to the next question: ${res.message}`);
+
+  // Older Claude Code: the Next row moves on; → is not pressed as well (it would skip a question).
+  const room3 = roomFor(883, QUESTIONS, SCREEN_MULTI);
+  assert.strictEqual(room3.interactivePrompt.nextIndex, 6);
+  calls.length = 0;
+  res = await bridge.applyMultiSelect(room3.id, { toggles: [1], currentIndex: 3, nextIndex: 6 });
+  assert.deepStrictEqual(calls, [['select', 3, 1], ['select', 1, 6]], 'Enter on Next, no arrow');
+  assert.ok(res.message.includes('ข้อถัดไป'));
+
+  // Neither a Next row nor a tab bar on screen: only the ticks, as before.
+  const screenBare = SCREEN_FAV_Q2.replace('←  ☒ �  ☐ ผลไ�  ✔ Submit  →\n', '');
+  const room4 = roomFor(884, [FAV[1]], screenBare);
+  assert.ok(!room4.interactivePrompt.tabBar, 'no tab bar');
+  calls.length = 0;
+  res = await bridge.applyMultiSelect(room4.id, { toggles: [1, 2], currentIndex: 1, nextIndex: null });
+  assert.deepStrictEqual(calls, [['select', 1, 1], ['select', 1, 2]], 'no key after the ticks');
+  assert.strictEqual(res.message, 'อัปเดตตัวเลือกแล้ว');
+  store.flush();
+}
+
+testMultiSelectAdvance()
+  .then(() => console.log('✅ Multi-question prompt checks passed!'))
+  .catch((err) => {
+    console.error('❌ Multi-question prompt checks failed:', err);
+    process.exit(1);
+  });

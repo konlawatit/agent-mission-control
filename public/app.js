@@ -948,7 +948,8 @@ function multiSubmitHtml(s, p) {
   const draft = askDrafts.get(askDraftKey(s, p));
   const ticked = p.options.filter((o) => isDraftable(p, o) && draftTicked(s, p, o)).length;
   const pending = Boolean(draft) && p.options.some((o) => isDraftable(p, o) && draft.has(o.index) !== Boolean(o.checked));
-  const label = p.nextIndex ? `ยืนยัน ${ticked} ข้อ แล้วไปต่อ` : `ยืนยัน ${ticked} ข้อ`;
+  // It moves on by the terminal's "Next" row (older Claude Code) or its tab bar (→).
+  const label = p.nextIndex || p.tabBar ? `ยืนยัน ${ticked} ข้อ แล้วไปต่อ` : `ยืนยัน ${ticked} ข้อ`;
   return `
     <div class="ask-submit">
       <button class="btn btn-attn btn-sm" ${act('submitMulti', s.id)}>${icon('check', 14)}${escapeHtml(label)}</button>
@@ -2155,7 +2156,7 @@ const Actions = {
     else draft.add(index);
     renderFocus();
   },
-  /** Send the ticked set: Enter on every option whose tick differs from the terminal, then Next. */
+  /** Send the ticked set: Enter on every option whose tick differs from the terminal, then on to the next question. */
   async submitMulti(id) {
     const s = appState.sessions.find((x) => x.id === id);
     const p = s && s.interactivePrompt;

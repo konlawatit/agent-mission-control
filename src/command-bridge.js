@@ -174,7 +174,10 @@ class CommandBridge {
 
   /**
    * Applies a multi-select answer in one go: Enter on each option whose tick should flip
-   * (positions are arrow-key positions, top = 1), then, when given, Enter on the "Next" row.
+   * (positions are arrow-key positions, top = 1), then moves on to the next question. Older
+   * Claude Code ends the checkboxes with a "Next" row (Enter on it); newer versions have none,
+   * and the tab bar on top ("←  ☒ สี  ☐ ผลไม้  ✔ Submit  →") moves on with →. With neither on
+   * screen only the ticks are sent.
    * The dashboard collects the ticks first, so the terminal is driven once instead of per click.
    */
   async applyMultiSelect(sessionId, { toggles, currentIndex, nextIndex }) {
@@ -189,24 +192,44 @@ class CommandBridge {
         message: `ไม่พบ terminal ของห้อง ${session.room} ที่เปิดอยู่ จึงส่งคำตอบไม่ได้`,
       };
     }
+    const incomplete = { ok: false, delivered: false, message: 'ส่งคำตอบเข้า terminal ไม่ครบ ลองตรวจในหน้าต่าง terminal' };
+    const prompt = session.interactivePrompt || {};
     let cursor = currentIndex;
     const steps = [...toggles].sort((a, b) => a - b);
     if (nextIndex) steps.push(nextIndex);
     for (const target of steps) {
       const res = await this.consoleScanner.selectOption(session.pid, cursor, target, String(target));
-      if (!res || !res.ok) {
-        return { ok: false, delivered: false, message: 'ส่งคำตอบเข้า terminal ไม่ครบ ลองตรวจในหน้าต่าง terminal' };
-      }
+      if (!res || !res.ok) return incomplete;
       cursor = target;
+    }
+    // No "Next" row: → to the next tab (the next question, or the submit step after the last).
+    const byTab = !nextIndex && Boolean(prompt.tabBar);
+    if (byTab) {
+      // From one of Claude's options: on the terminal's own rows ("Type something" is a text box)
+      // the arrow may not reach the tabs. They sit below Claude's options, so go up to the last one.
+      const own = (prompt.options || []).filter((o) => o.claude).map((o) => o.index);
+      const lastOwn = own.length ? Math.max(...own) : cursor;
+      for (; cursor > lastOwn; cursor--) {
+        const res = await this.consoleScanner.sendKey(session.pid, 'up');
+        if (!res || !res.ok) return incomplete;
+      }
+      const res = await this.consoleScanner.sendKey(session.pid, 'right');
+      if (!res || !res.ok) return incomplete;
     }
     this.store.updateSession(session.id, {
       tldr: `✓ ส่งคำตอบแบบเลือกหลายข้อเข้า Terminal (PID ${session.pid}) แล้ว`,
     });
+    const questions = Array.isArray(prompt.questions) ? prompt.questions : [];
+    const toSubmitStep = questions.length > 0 && prompt.activeQuestion === questions.length - 1;
     return {
       ok: true,
       delivered: true,
       transport: 'win32-console-key',
-      message: nextIndex ? 'ส่งคำตอบแล้ว ไปข้อถัดไป' : 'อัปเดตตัวเลือกแล้ว',
+      message: !(nextIndex || byTab)
+        ? 'อัปเดตตัวเลือกแล้ว'
+        : toSubmitStep
+          ? 'ส่งคำตอบแล้ว ไปหน้าตรวจคำตอบก่อนส่ง'
+          : 'ส่งคำตอบแล้ว ไปข้อถัดไป',
     };
   }
 

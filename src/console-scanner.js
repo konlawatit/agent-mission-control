@@ -260,7 +260,11 @@ function parseConsoleScreen(rawScreen, cursor = {}) {
       options,
       footer: footerLines.join(' · ') || 'Enter to confirm · Esc to cancel',
     };
-    if (tabLine) interactivePrompt.tabs = parseQuestionTabs(tabLine);
+    if (tabLine) {
+      interactivePrompt.tabs = parseQuestionTabs(tabLine);
+      // ←/→ move between its tabs; a multi-select with no "Next" row moves on that way.
+      interactivePrompt.tabBar = true;
+    }
     if (nextItem) interactivePrompt.nextIndex = nextItem.index;
   }
 

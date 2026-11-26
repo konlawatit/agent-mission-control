@@ -253,7 +253,7 @@ Deep indigo glass, same structure: `ground` 0.175/0.035/285, `glass` 0.245 at 62
 
 **The One Violet Rule.** Violet is the only colour that says "you can act here" or "this is selected". It never stands in for a status, and a status never borrows it.
 
-**The Rising Meter Rule.** Meters fill violet at rest (white inside the violet sidebar) and shift to amber, then rose, as they near a limit. The 5-hour usage meter turns amber below 25% remaining and rose below the hold threshold (8% by default), with a tick at the threshold; the context meter turns amber above 60% and rose above 85%. A 0% meter draws no fill.
+**The Rising Meter Rule.** Meters fill violet at rest (white inside the violet sidebar) and shift to amber, then rose, as they near a limit. The 5-hour usage meter turns amber below 25% remaining and rose below the hold threshold (8% by default), with a tick at the threshold; the weekly meters in the Usage panel follow the same colours without the tick; the context meter turns amber above 60% and rose above 85%. A 0% meter draws no fill, and so does a meter with no reading ("ยังไม่ได้เช็ค", or a reading whose window has reset).
 
 **The Neutral Modification Rule.** A modified file's M badge is neutral (`text-2` on `soft-2`). Only additions (A, U) take green and deletions (D) take rose, so the file list is not a field of colour.
 
@@ -273,8 +273,8 @@ Deep indigo glass, same structure: `ground` 0.175/0.035/285, `glass` 0.245 at 62
 - **Body** (400, 14px, 1.5): TL;DR and the composer. Output prose runs at 13.5px, 1.6, capped at 80ch; card summaries at 13px, clamped to three lines.
 - **Body Small** (500–550, 13px): popover items, file rows, form fields, toasts, options in the prompt card (13.5px/550).
 - **Label** (650–700, 12.5px): group heads, stage steps, chips, segment buttons, panel section heads.
-- **Meta** (500, 11.5px, tabular): timestamps, token counts, card footers, paths under file names. Pills are 11.5px/650.
-- **Figure** (750, 30px, tabular, −0.03em): remaining usage in the Usage panel; the sidebar shows the same number at 22px.
+- **Meta** (500, 11.5px, tabular): timestamps, token counts (automated runs), card footers, paths under file names. Pills are 11.5px/650.
+- **Figure** (750, 30px, tabular, −0.03em): remaining 5-hour usage in the Usage panel (weekly rows use 15px/750); the sidebar shows the same number at 22px.
 - **Mono** (400, 12.5px, 1.6): raw output, code and diff views, code blocks, inline code (0.86em), tool lines, branches, paths, keycaps, file badges.
 
 ### Named Rules
@@ -290,7 +290,7 @@ A full-height application on desktop with no page scroll. The shell pads 18px ar
 
 The work card is a grid: an optional hold banner across the top row, then three columns: the room list (372px), the open room (fluid), and a 64px icon strip on the card's right edge. Inspector panels (380px) float inside the card to the left of the strip, inset 14px from top and bottom.
 
-The open room stacks: title row (name, edit, VS Code, pin, more), a chip row (branch, model/effort, tokens and cost, context meter, terminal connection), the four-step stepper, notices (closed, hold), the prompt card, a TL;DR line, the output well filling the rest, then the composer pinned at the bottom. Gaps are 14px; padding is 24px top, 24px right, 18px left.
+The open room stacks: title row (name, edit, VS Code, pin, more), a chip row (branch, model/effort, the context check, terminal connection), the four-step stepper, notices (closed, hold), the prompt card, a TL;DR line, the output well filling the rest, then the composer pinned at the bottom. Gaps are 14px; padding is 24px top, 24px right, 18px left.
 
 The overview replaces list, room and strip with a status summary (counts per status as pills) and project lanes: a grid of `minmax(310px, 1fr)` columns, each a soft well holding that project's room cards, lanes holding a waiting room first.
 
@@ -335,7 +335,7 @@ Rounded throughout and rounder as things get bigger: 8px for small controls (sma
 - **Focus:** a 2px `ring` outline offset 2px that follows the element's own radius. Disabled: 45% opacity.
 
 ### Chips and Pills
-- **Chip:** 28px pill on `soft`, `text-2` at 12.5px, 14px leading icon. Branch, model/effort, tokens/cost and context in the room header; quick actions under the composer. Toggle chips turn violet ink on `primary-soft` when pressed; the held note takes the hold treatment.
+- **Chip:** 28px pill on `soft`, `text-2` at 12.5px, 14px leading icon. Branch, model/effort and the context check in the room header; quick actions under the composer. The context chip is a button: "เช็ค context" until clicked, then "ctx 34%" with a mini meter and the check time in `text-3`; it never updates on its own, a click reads it again (a spinner and "กำลังเช็ค context…" meanwhile). No room shows its own token count or cost. Toggle chips turn violet ink on `primary-soft` when pressed; the held note takes the hold treatment.
 - **Status pill:** 22px, 11.5px/650, the status ink on its soft fill (neutral for idle and closed).
 
 ### Room Card (signature)
@@ -361,7 +361,8 @@ Attachments: files come from the paperclip, a paste (a screenshot or copied imag
 
 ### Navigation
 - **Sidebar:** brand mark (40px, white 18% glass) and name with the connection dot; a white "ห้องใหม่" button with violet text; nav items Live, รอคุณ (white badge with amber count), ภาพรวม, ประวัติ, ค้นหา, งานอัตโนมัติ, 42px high, white 12% on hover and 22% when current; then the usage card and four tool buttons (hooks, scan terminals, notifications, theme).
-- **Usage card:** white 14% glass, "Usage 5 ชม.", the remaining percentage at 22px/750, a white meter with the threshold tick, and a footer with the reset time and the reading's source. During a hold it gains a rose inner ring.
+- **Usage card:** white 14% glass, "Usage 5 ชม.", the remaining percentage of the latest check at 22px/750, a white meter with the threshold tick, and a footer with the reset time and how long ago it was checked ("เช็คเมื่อสักครู่", "เช็ค 5m ที่แล้ว"; "ค่าจำลอง" during ทดสอบการพัก). Before any check, or once the checked window has reset, it shows "—" with "ยังไม่ได้เช็ค" / "reset แล้ว" and an empty meter. It opens the Usage panel. During a hold it gains a rose inner ring.
+- **Usage panel:** plan usage as a whole, never per room. Nothing is fetched on its own: "เช็คตอนนี้" (default button; spinner and "กำลังเช็ค…" while it runs, a toast with the result or the reason it could not run) types `/usage` into one idle Claude Code terminal and closes it again. It shows the 5-hour window as the figure with its meter, reset time and countdown, then one 6px meter row per weekly limit (all models, then each model Claude Code lists), then when and through which room it was checked. ทดสอบการพัก puts a `hold-soft` note above the numbers saying the level is simulated. The auto-pause section follows: switch, threshold field, and ทดสอบการพัก or ทำต่อเลย.
 - **Icon strip:** 52px stacked icon-over-label buttons (10.5px/650) for ไฟล์, Agents, ประวัติ, Usage, with violet count badges; pressed violet ink on `primary-soft`.
 
 ### Notifications

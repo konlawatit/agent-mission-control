@@ -176,6 +176,9 @@ class StateStore extends EventEmitter {
             if (s.screenPreview && s.screenPreview.includes('\uFFFD')) {
               s.screenPreview = null;
             }
+            // Per-room usage is no longer kept (plan usage is checked on request, context too).
+            delete s.tokenUsage;
+            delete s.liveContext;
             // Rooms an automated `claude -p` / SDK run made for itself are not rooms anyone opened.
             if (isAutomatedRoom(s)) continue;
             this.sessions.set(s.id, s);
@@ -390,9 +393,6 @@ class StateStore extends EventEmitter {
       session.transcriptPath = parsed.transcriptPath;
     }
     this._setModel(session, parsed.currentModel || parsed.detectedModel, Date.parse(parsed.currentModelAt || '') || 0);
-    if (parsed.tokenUsage) {
-      session.tokenUsage = parsed.tokenUsage;
-    }
     if (
       parsed.lastAssistantText &&
       (isDefaultTldr(session.tldr) || session.status === 'done' || session.status === 'idle')
@@ -643,18 +643,6 @@ class StateStore extends EventEmitter {
       // Unknown until the banner, a /model switch or the transcript says (see _setModel).
       model: defaults.model || null,
       effort: defaults.effort || 'high',
-      tokenUsage: defaults.tokenUsage || {
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheCreateTokens: 0,
-        cacheReadTokens: 0,
-        thinkingTokens: 0,
-        totalTokens: 0,
-        contextTokens: 0,
-        contextWindowPct: 0,
-        estimatedCostUsd: 0,
-        messageCount: 0,
-      },
       savedCheckpoint: defaults.savedCheckpoint || null,
       transcriptPath: defaults.transcriptPath || null,
       openCount: 1,
@@ -1664,18 +1652,6 @@ class StateStore extends EventEmitter {
         (sum, s) => sum + (Array.isArray(s.subAgents) ? s.subAgents.length : 0),
         0
       ),
-      totalTokens: list.reduce(
-        (sum, s) => sum + Number((s.tokenUsage && s.tokenUsage.totalTokens) || 0),
-        0
-      ),
-      totalCostUsd:
-        Math.round(
-          list.reduce(
-            (sum, s) =>
-              sum + Number((s.tokenUsage && s.tokenUsage.estimatedCostUsd) || 0),
-            0
-          ) * 10000
-        ) / 10000,
     };
 
     return {

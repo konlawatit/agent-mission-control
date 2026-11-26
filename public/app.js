@@ -20,7 +20,6 @@ let appState = {
   categories: [],
   sessions: [],
   hooks: null, // unknown until the first snapshot; avoids flashing the "install hooks" notice
-  statusline: { installed: false },
 };
 
 const ui = {
@@ -43,6 +42,10 @@ const ui = {
 
 const files = { sessionId: null, list: [], signature: '', loading: false, error: null };
 const ide = { open: false, sessionId: null, path: null, mode: 'diff', detail: null, loading: false };
+// Usage and context are read on request, never pushed live: a plan usage check in flight, and
+// each room's last context reading ({ loading, data }) until the page reloads.
+const usageCheck = { loading: false };
+const ctxChecks = new Map();
 const drafts = new Map();
 const scrollState = new Map();
 let mountedFocusId = null;
@@ -139,11 +142,6 @@ function formatTokens(n) {
   return String(Math.round(num));
 }
 
-function formatUsd(n) {
-  const v = Number(n || 0);
-  return v >= 100 ? `$${v.toFixed(0)}` : `$${v.toFixed(2)}`;
-}
-
 function relTime(iso) {
   if (!iso) return '';
   const sec = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
@@ -159,6 +157,27 @@ function relTime(iso) {
 function clock(iso) {
   if (!iso) return '-';
   return new Date(iso).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+}
+
+/** How long ago, as Thai copy after `lead`: "เช็คเมื่อสักครู่", "เช็ค 5m ที่แล้ว". */
+function agoText(iso, lead = '') {
+  const rel = relTime(iso);
+  return rel === 'now' ? `${lead}เมื่อสักครู่` : `${lead ? `${lead} ` : ''}${rel} ที่แล้ว`;
+}
+
+/** A reset time: the clock today, "พรุ่งนี้ 03:29" tomorrow, else the date as well. */
+function resetLabel(iso) {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  const time = d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+  const day = (offset) => {
+    const x = new Date();
+    x.setDate(x.getDate() + offset);
+    return x.toDateString();
+  };
+  if (d.toDateString() === day(0)) return time;
+  if (d.toDateString() === day(1)) return `พรุ่งนี้ ${time}`;
+  return `${d.toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' })} ${time}`;
 }
 
 function until(iso) {
@@ -203,17 +222,6 @@ function modelLabel(model) {
 function knownEffort(s) {
   const e = String((s && s.effort) || '').toLowerCase();
   return EFFORTS.includes(e) ? e : '';
-}
-
-function freshTokens(s) {
-  const t = s.tokenUsage || {};
-  if (typeof t.freshTokens === 'number') return t.freshTokens;
-  return Number(t.inputTokens || 0) + Number(t.outputTokens || 0) + Number(t.cacheCreateTokens || 0);
-}
-
-function contextPct(s) {
-  if (s.liveContext && typeof s.liveContext.usedPct === 'number') return s.liveContext.usedPct;
-  return Number((s.tokenUsage || {}).contextWindowPct || 0);
 }
 
 /* ---------- Icons (authored, 24 grid, 1.75 stroke) ---------- */
@@ -738,22 +746,7 @@ function renderSidebar() {
       item('automation', 'bot', 'งานอัตโนมัติ', '')
   );
 
-  const u = appState.usageGuard;
-  let usage = '';
-  if (u) {
-    const remaining = Number(u.remainingPct ?? 100);
-    const threshold = Number(u.autoPauseThresholdPct || 8);
-    const cls = remaining < threshold ? 'is-low' : remaining < 25 ? 'is-mid' : '';
-    const source = u.source === 'claude' ? 'จาก Claude Code' : u.source === 'simulated' ? 'ค่าจำลอง' : 'ค่าประมาณ';
-    usage = `
-      <button class="usage-card ${u.hold ? 'is-hold' : ''}" ${act('openPanel', 'usage')} aria-label="Usage รอบ 5 ชม. คงเหลือ ${remaining}%" title="Usage รอบ 5 ชม. คงเหลือ ${remaining}% (${escapeHtml(source)}) · พักงานเมื่อต่ำกว่า ${threshold}%">
-        <span class="usage-top">Usage 5 ชม.</span>
-        <span class="usage-value">${remaining}%<small>คงเหลือ</small></span>
-        <span class="bar ${cls}" aria-hidden="true"><i style="width:${Math.max(2, remaining)}%"></i><span class="bar-mark" style="left:${threshold}%"></span></span>
-        <span class="usage-foot"><span>${u.hold ? 'พักงานอยู่ · ' : ''}reset ${escapeHtml(clock(u.resetAt))}</span><span>${escapeHtml(source)}</span></span>
-      </button>`;
-  }
-  setHTML($('#side-usage'), usage);
+  setHTML($('#side-usage'), usageCardHtml());
 
   const hooksOk = appState.hooks && appState.hooks.installed;
   const themeIcon = ui.theme === 'dark' ? 'moon' : ui.theme === 'light' ? 'sun' : 'contrast';
@@ -767,6 +760,48 @@ function renderSidebar() {
   );
 }
 
+/** Meter colour by what is left (the Rising Meter Rule): amber below 25%, rose below the threshold. */
+function remainingCls(remaining, threshold) {
+  if (remaining === null || remaining === undefined) return '';
+  return remaining < threshold ? 'is-low' : remaining < 25 ? 'is-mid' : '';
+}
+
+/**
+ * The sidebar's usage card: the latest plan usage check (never fetched on its own), or
+ * "ยังไม่ได้เช็ค". It opens the Usage panel, where the check runs.
+ */
+function usageCardHtml() {
+  const u = appState.usageGuard;
+  if (!u) return '';
+  const threshold = Number(u.autoPauseThresholdPct || 8);
+  const c = u.lastCheck;
+  const busy = usageCheck.loading || u.checking;
+  // Server-side: the latest check while its 5-hour window is current, or the simulated level.
+  const remaining = typeof u.remainingPct === 'number' ? u.remainingPct : null;
+  const cls = remainingCls(remaining, threshold);
+  let value;
+  let foot;
+  let label;
+  if (remaining !== null) {
+    value = `${escapeHtml(remaining)}%<small>คงเหลือ</small>`;
+    foot = `<span>${u.hold ? 'พักงานอยู่ · ' : ''}reset ${escapeHtml(resetLabel(u.resetAt))}</span><span>${
+      busy ? 'กำลังเช็ค…' : u.source === 'simulated' ? 'ค่าจำลอง' : escapeHtml(agoText(c && c.checkedAt, 'เช็ค'))
+    }</span>`;
+    label = `Usage รอบ 5 ชม. คงเหลือ ${remaining}%`;
+  } else {
+    value = `—<small>${c ? (u.stale ? 'reset แล้ว' : 'อ่านไม่ได้') : 'ยังไม่ได้เช็ค'}</small>`;
+    foot = `<span>${u.hold ? 'พักงานอยู่ · ' : ''}${busy ? 'กำลังเช็ค…' : c && u.stale ? 'เช็คใหม่เพื่อดูรอบปัจจุบัน' : 'กดเพื่อเช็ค'}</span>`;
+    label = c && u.stale ? 'Usage: รอบที่เช็คไว้ reset แล้ว' : 'Usage: ยังไม่ได้เช็ค';
+  }
+  return `
+    <button class="usage-card ${u.hold ? 'is-hold' : ''}" ${act('openPanel', 'usage')} aria-label="${escapeHtml(label)} เปิดแผง Usage" title="${escapeHtml(label)} · คลิกเพื่อเปิดแผง Usage และเช็คใหม่">
+      <span class="usage-top">Usage 5 ชม.</span>
+      <span class="usage-value">${value}</span>
+      <span class="bar ${cls}" aria-hidden="true"><i style="width:${remaining ? Math.max(2, remaining) : 0}%"></i><span class="bar-mark" style="left:${threshold}%"></span></span>
+      <span class="usage-foot">${foot}</span>
+    </button>`;
+}
+
 function renderHoldBanner() {
   const el = $('#hold-banner');
   const u = appState.usageGuard;
@@ -777,10 +812,11 @@ function renderHoldBanner() {
   }
   el.hidden = false;
   const pending = u.hold.pendingSteps ? ` · รอ ${u.hold.pendingSteps} ห้องทำ step ปัจจุบันให้จบ` : '';
+  const level = typeof u.remainingPct === 'number' ? `usage เหลือ ${escapeHtml(u.remainingPct)}%` : 'usage ใกล้หมด';
   setHTML(
     el,
     `${icon('pauseCircle', 20)}
-     <div><b>พักงานไว้ก่อน</b> usage เหลือ ${escapeHtml(u.remainingPct)}% บันทึก checkpoint แล้ว
+     <div><b>พักงานไว้ก่อน</b> ${level} บันทึก checkpoint แล้ว
        <div class="sub">ทำงานต่ออัตโนมัติ ${escapeHtml(clock(u.resetAt))} (${escapeHtml(until(u.resetAt))})${escapeHtml(pending)}</div>
      </div>
      <button class="btn btn-hold btn-sm" ${act('resumeNow')}>${icon('play', 14)}ทำต่อเลย</button>`
@@ -887,7 +923,6 @@ function rcardHtml(s, current = false, group = '') {
       ${roomSummaryHtml(s)}
       <span class="rc-foot">
         <span class="branch">${icon('branch', 12)}${escapeHtml(s.branch || '-')}</span>
-        <span title="Tokens ใหม่ (ไม่รวม cache read)">${icon('tokens', 12)}${formatTokens(freshTokens(s))}</span>
         ${(s.subAgents || []).length ? `<span title="Sub-agents">${icon('agents', 12)}${(s.subAgents || []).length}</span>` : ''}
       </span>
     </button>`;
@@ -950,9 +985,31 @@ function renderFocus() {
   updateComposerState(s);
 }
 
+/**
+ * Context window use, on request: a "เช็ค context" button until the room has been checked, then
+ * the reading and when it was taken. It does not update on its own; a click reads it again.
+ */
+function ctxChipHtml(s) {
+  const st = ctxChecks.get(s.id);
+  if (st && st.loading) {
+    return `<button class="chip" disabled aria-busy="true">${icon('spinner', 14)}<span>กำลังเช็ค context…</span></button>`;
+  }
+  const d = st && st.data;
+  if (!d) {
+    return `<button class="chip" ${act('checkContext', s.id)} title="อ่าน context ที่ห้องนี้ใช้ ณ ข้อความล่าสุดของ Claude (ไม่อัปเดตเอง)">${icon('layers', 14)}<span>เช็ค context</span></button>`;
+  }
+  const at = escapeHtml(clock(d.checkedAt));
+  if (typeof d.usedPct !== 'number') {
+    return `<button class="chip" ${act('checkContext', s.id)} title="ยังไม่มีข้อความจาก Claude ในห้องนี้ · เช็คเมื่อ ${at} · คลิกเพื่อเช็คใหม่">${icon('layers', 14)}<span>ctx —</span><span class="dim">${at}</span></button>`;
+  }
+  const pct = d.usedPct;
+  const cls = pct > 85 ? 'is-low' : pct > 60 ? 'is-mid' : '';
+  const size = d.windowTokens % 1e6 === 0 ? `${d.windowTokens / 1e6}M` : formatTokens(d.windowTokens);
+  const title = `Context ใช้ไป ${formatTokens(d.contextTokens)} จาก ${size} tokens (${pct}%) ณ ข้อความล่าสุดของ Claude · เช็คเมื่อ ${clock(d.checkedAt)} · คลิกเพื่อเช็คใหม่`;
+  return `<button class="chip num" ${act('checkContext', s.id)} title="${escapeHtml(title)}">${icon('layers', 14)}<span>ctx ${escapeHtml(Math.round(pct))}%</span><span class="bar ctx-mini ${cls}" aria-hidden="true"><i style="width:${pct > 0 ? Math.max(2, pct) : 0}%"></i></span><span class="dim">${at}</span></button>`;
+}
+
 function focusHeadHtml(s) {
-  const t = s.tokenUsage || {};
-  const ctx = contextPct(s);
   const fam = modelFamily(s.model);
   const effort = knownEffort(s);
   const connected = s.pid || s.paneId || s.wrapperConnected;
@@ -971,10 +1028,7 @@ function focusHeadHtml(s) {
       <button class="chip" ${act('openModel', s.id)} title="เปลี่ยน model และ effort (ส่ง /model และ /effort เข้า terminal)" ${s.lifecycle === 'history' ? 'disabled' : ''}>
         ${icon('spark', 14)}<span>${escapeHtml(fam ? modelLabel(s.model) : 'Model')}</span>${effort ? `<span style="color:var(--text-3)">${escapeHtml(effort)}</span>` : ''}${icon('chevronDown', 14)}
       </button>
-      <button class="chip num" ${act('openPanel', 'usage')} title="Tokens ใหม่ ${formatTokens(freshTokens(s))} · cache read ${formatTokens(t.cacheReadTokens)} · ค่าใช้จ่ายเทียบราคา API ${formatUsd(t.estimatedCostUsd)}">
-        ${icon('tokens', 14)}<span>${formatTokens(freshTokens(s))}</span><span style="color:var(--text-3)">${formatUsd(t.estimatedCostUsd)}</span>
-      </button>
-      <span class="chip num" title="Context window ใช้ไป ${ctx}%">${icon('layers', 14)}<span>ctx ${Math.round(ctx)}%</span><span class="bar ctx-mini ${ctx > 85 ? 'is-low' : ctx > 60 ? 'is-mid' : ''}"><i style="width:${ctx > 0 ? Math.max(2, ctx) : 0}%"></i></span></span>
+      ${ctxChipHtml(s)}
       ${
         s.lifecycle !== 'history' && !connected
           ? `<span class="chip" title="ยังไม่พบ terminal ของห้องนี้ คำสั่งจะเข้าคิวไว้ หรือเปิดโหมดพื้นหลัง">${icon('plug', 14)}ยังไม่เชื่อม terminal</span>`
@@ -1674,7 +1728,7 @@ function renderStrip() {
   const agents = s ? (s.subAgents || []).length : 0;
   const turns = s ? (s.taskHistory || []).length : 0;
   const btn = (key, ic, label, badge) => `
-    <button class="strip-btn" ${act('togglePanel', key)} aria-pressed="${ui.panel === key}" title="${escapeHtml(label)}" ${s ? '' : 'disabled'}>
+    <button class="strip-btn" ${act('togglePanel', key)} aria-pressed="${ui.panel === key}" title="${escapeHtml(label)}" ${s || key === 'usage' ? '' : 'disabled'}>
       ${icon(ic, 19)}<span>${escapeHtml(label)}</span>${badge ? `<span class="badge">${escapeHtml(badge)}</span>` : ''}
     </button>`;
   setHTML(
@@ -1689,7 +1743,8 @@ function renderStrip() {
 function renderPanel() {
   const panel = $('#panel');
   const s = selected();
-  if (!ui.panel || !s || ui.view !== 'focus') {
+  // Usage is plan-wide, so its panel opens with or without a room.
+  if (!ui.panel || ui.view !== 'focus' || (!s && ui.panel !== 'usage')) {
     panel.hidden = true;
     return;
   }
@@ -1703,7 +1758,7 @@ function renderPanel() {
     tools = `<button class="icon-btn icon-btn-sm" ${act('reloadFiles')} aria-label="โหลดใหม่" title="โหลดรายการไฟล์ใหม่">${icon('refresh', 15)}</button>`;
   } else if (ui.panel === 'agents') body = agentsPanelHtml(s);
   else if (ui.panel === 'history') body = historyPanelHtml(s);
-  else if (ui.panel === 'usage') body = usagePanelHtml(s);
+  else if (ui.panel === 'usage') body = usagePanelHtml();
 
   setHTML(
     panel,
@@ -1784,54 +1839,76 @@ function historyPanelHtml(s) {
     .join('');
 }
 
-function usagePanelHtml(s) {
-  const t = s.tokenUsage || {};
-  const ctx = contextPct(s);
-  const ctxSize = (s.liveContext && s.liveContext.size) || t.contextWindowTokens || 1000000;
-  const u = appState.usageGuard || {};
-  const remaining = Number(u.remainingPct ?? 100);
-  const threshold = Number(u.autoPauseThresholdPct || 8);
-  const barCls = remaining < threshold ? 'is-low' : remaining < 25 ? 'is-mid' : '';
-  const sourceText =
-    u.source === 'claude'
-      ? `จาก Claude Code statusline · อัปเดต ${relTime(u.observedAt)}`
-      : u.source === 'simulated'
-      ? 'ค่าจำลองสำหรับทดสอบ'
-      : `ประมาณจาก token ใหม่ ${formatTokens(u.windowTokens)} / ${formatTokens(u.tokenBudget)} ใน 5 ชม.`;
-  const statusline = appState.statusline || {};
+/** One usage window of the latest check as a labelled meter row (week and per-model limits). */
+function quotaRowHtml(label, win, threshold) {
+  if (!win) return '';
+  const past = win.resetsAt && new Date(win.resetsAt).getTime() <= Date.now();
+  const remaining = past ? null : Number(win.remainingPct);
+  return `
+    <div class="quota-row">
+      <div class="quota-row-head"><span>${escapeHtml(label)}</span><b>${remaining === null ? '—' : `${escapeHtml(remaining)}%`}<small>${remaining === null ? 'reset แล้ว' : 'คงเหลือ'}</small></b></div>
+      <span class="bar wide-bar ${remainingCls(remaining, threshold)}" aria-hidden="true"><i style="width:${remaining ? Math.max(1, remaining) : 0}%"></i></span>
+      <div class="quota-foot"><span>ใช้ไป ${escapeHtml(win.usedPct)}%</span><span title="${escapeHtml(win.resetsText || '')}">reset ${escapeHtml(resetLabel(win.resetsAt))}</span></div>
+    </div>`;
+}
 
-  // The connect prompt is only for the estimate path; a simulated test or a live reading never shows it.
-  const connect =
-    u.source === 'estimate'
-      ? statusline.installed || u.observedAt
-        ? `<div class="connect">${icon('info', 16)}<div class="help">${u.observedAt ? `ค่าจริงล่าสุดหมดอายุแล้ว (${escapeHtml(relTime(u.observedAt))} ที่แล้ว)` : 'เชื่อม statusline แล้ว'} ตัวเลขจริงจะขึ้นหลัง Claude ตอบครั้งถัดไป (เฉพาะแพลน Pro/Max)</div></div>`
-        : `<div class="connect">${icon('link', 16)}<div>
-             <div class="help" style="color:var(--text-2); margin-bottom:8px">ตัวเลขนี้เป็นค่าประมาณ เชื่อม statusline ของ Claude Code เพื่อใช้ % จริงของรอบ 5 ชม.${statusline.wrapsPrevious ? '' : ' (ถ้ามี statusline เดิม จะยังแสดงเหมือนเดิม)'}</div>
-             <button class="btn btn-sm" ${act('installStatusline')}>${icon('link', 14)}เชื่อม usage จริง</button></div></div>`
+/**
+ * The Usage panel: plan usage as a whole (no per-room numbers). It shows the latest check, which
+ * runs only when "เช็คตอนนี้" is pressed, and the auto-pause settings that act on it.
+ */
+function usagePanelHtml() {
+  const u = appState.usageGuard || {};
+  const c = u.lastCheck;
+  const threshold = Number(u.autoPauseThresholdPct || 8);
+  const busy = usageCheck.loading || u.checking;
+  const checkBtn = `<button class="btn btn-sm" ${act('checkUsage')} ${busy ? 'disabled aria-busy="true"' : ''}>${icon(busy ? 'spinner' : 'refresh', 14)}${busy ? 'กำลังเช็ค…' : 'เช็คตอนนี้'}</button>`;
+
+  let plan;
+  if (!c) {
+    plan = `
+      <div class="quota-empty">
+        <b>ยังไม่ได้เช็ค</b>
+        <p class="help">กด "เช็คตอนนี้" เพื่อดู usage ที่เหลือของแพลน ทั้งรอบ 5 ชม. และรอบสัปดาห์</p>
+      </div>`;
+  } else {
+    const sw = c.session;
+    const remaining = u.stale || !sw ? null : Number(sw.remainingPct);
+    const session = sw
+      ? `
+      <div class="quota-label">รอบ 5 ชม.</div>
+      <div class="quota-line"><span class="big">${remaining === null ? '—' : `${escapeHtml(remaining)}%`}</span><span class="of">${
+        remaining === null ? 'รอบที่เช็คไว้ reset แล้ว เช็คใหม่เพื่อดูรอบปัจจุบัน' : `คงเหลือ · ใช้ไป ${escapeHtml(sw.usedPct)}%`
+      }</span></div>
+      <span class="bar wide-bar ${remainingCls(remaining, threshold)}" aria-hidden="true"><i style="width:${remaining ? Math.max(1, remaining) : 0}%"></i><span class="bar-mark" style="left:${threshold}%"></span></span>
+      <div class="quota-foot"><span title="${escapeHtml(sw.resetsText || '')}">reset ${escapeHtml(resetLabel(sw.resetsAt))}</span><span>${remaining === null ? '' : escapeHtml(until(sw.resetsAt))}</span></div>`
+      : `<div class="quota-empty"><p class="help">อ่านรอบ 5 ชม. จากหน้าจอไม่ได้ในครั้งนี้</p></div>`;
+    plan = `
+      ${session}
+      ${quotaRowHtml('รอบสัปดาห์ · ทุก model', c.week, threshold)}
+      ${(c.models || []).map((m) => quotaRowHtml(`รอบสัปดาห์ · ${m.name}`, m, threshold)).join('')}
+      <p class="quota-meta">เช็คเมื่อ ${escapeHtml(clock(c.checkedAt))} (${escapeHtml(agoText(c.checkedAt))}) ผ่านห้อง <b>${escapeHtml(c.room || '-')}</b>${c.partial ? ' · บางส่วนอยู่นอกหน้าจอ terminal จึงอ่านไม่ครบ' : ''}</p>`;
+  }
+
+  const simulated =
+    u.source === 'simulated'
+      ? `<p class="quota-sim">${icon('info', 14)}<span>กำลังทดสอบการพักด้วยค่าจำลอง: คงเหลือ ${escapeHtml(u.remainingPct)}% จนกว่าจะกด "ทำต่อเลย"${c ? ' ตัวเลขด้านล่างคือผลเช็คจริงล่าสุด' : ''}</span></p>`
       : '';
 
   return `
     <section class="panel-section">
-      <h3>${icon('gauge', 15)}Plan usage รอบ 5 ชม.</h3>
-      <div class="quota-line"><span class="big">${remaining}%</span><span class="of">คงเหลือ · ใช้ไป ${escapeHtml(u.usedPct ?? 0)}%</span></div>
-      <span class="bar wide-bar ${barCls}" aria-hidden="true"><i style="width:${Math.max(1, remaining)}%"></i><span class="bar-mark" style="left:${threshold}%"></span></span>
-      <div class="quota-foot"><span>${escapeHtml(sourceText)}</span><span>reset ${escapeHtml(clock(u.resetAt))}</span></div>
-      ${u.sevenDay ? `<div class="quota-foot"><span>รอบ 7 วัน ใช้ไป ${escapeHtml(u.sevenDay.usedPct)}%</span><span>${u.sevenDay.resetsAt ? `reset ${escapeHtml(new Date(u.sevenDay.resetsAt).toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' }))}` : ''}</span></div>` : ''}
-      ${connect}
+      <h3>${icon('gauge', 15)}Plan usage<span class="aside">${u.source === 'simulated' ? 'ค่าจำลอง' : c ? escapeHtml(agoText(c.checkedAt, 'เช็ค')) : ''}</span></h3>
+      ${simulated}
+      ${plan}
+      <div class="actions-row">${checkBtn}</div>
+      <p class="help" style="margin-top:8px">พิมพ์ /usage ใน Claude Code ที่ว่างอยู่หนึ่งห้อง อ่านตัวเลข แล้วกด Esc ปิดให้เอง ไม่ใช้ token และไม่ดึงซ้ำเองอัตโนมัติ</p>
     </section>
 
     <section class="panel-section">
       <h3>${icon('pauseCircle', 15)}พักงานอัตโนมัติ
         <span class="aside"><button class="switch" role="switch" aria-checked="${u.enabled !== false}" aria-label="เปิดใช้การพักงานอัตโนมัติ" ${act('toggleGuard', u.enabled === false)}></button></span></h3>
-      <p class="help">เมื่อ usage เหลือน้อยกว่า ${threshold}% ระบบจะบันทึก checkpoint ทุกห้อง ปล่อยให้ step ที่กำลังทำจบก่อน แล้วพักคำสั่งใหม่ไว้จนกว่า usage จะ reset จากนั้นสั่งให้ห้องที่งานค้างทำต่อเอง</p>
+      <p class="help">ใช้ผลเช็คล่าสุด: ถ้ารอบ 5 ชม. เหลือน้อยกว่า ${threshold}% ระบบจะบันทึก checkpoint ทุกห้อง ปล่อยให้ step ที่กำลังทำจบก่อน แล้วพักคำสั่งใหม่ไว้จนถึงเวลา reset จากนั้นสั่งให้ห้องที่งานค้างทำต่อเอง ระบบไม่เช็คให้เอง จึงควรกดเช็คเมื่อใช้งานหนัก</p>
       <label class="field">พักเมื่อเหลือน้อยกว่า (%)
         <input type="number" min="1" max="50" step="1" value="${threshold}" data-change-act="setThreshold" /></label>
-      ${
-        u.source === 'estimate'
-          ? `<label class="field">งบ token ใหม่ต่อ 5 ชม. (ค่าประมาณ)
-              <input type="number" min="10000" step="100000" value="${escapeHtml(u.tokenBudget || 5000000)}" data-change-act="setBudget" /></label>`
-          : ''
-      }
       <div class="actions-row">
         ${
           u.hold
@@ -1839,19 +1916,6 @@ function usagePanelHtml(s) {
             : `<button class="btn btn-ghost btn-sm" ${act('simulateHold')} title="จำลองว่า usage เหลือ 6.5% เพื่อดูการพักงาน">ทดสอบการพัก</button>`
         }
       </div>
-    </section>
-
-    <section class="panel-section">
-      <h3>${icon('tokens', 15)}ห้องนี้ <span class="aside">${escapeHtml(modelLabel(s.model))}</span></h3>
-      <dl class="stat-list">
-        <dt title="input + output + cache write">Tokens ใหม่</dt><dd>${formatTokens(freshTokens(s))}</dd>
-        <dt>Output</dt><dd>${formatTokens(t.outputTokens)}</dd>
-        <dt>Cache read</dt><dd>${formatTokens(t.cacheReadTokens)}</dd>
-        <dt>ใน 5 ชม. ล่าสุด</dt><dd>${formatTokens(t.window5hTokens)}</dd>
-        <dt title="คิดตามราคา API ต่อ model ไม่ใช่ค่าใช้จ่ายจริงของแพลน subscription">เทียบราคา API</dt><dd>${formatUsd(t.estimatedCostUsd)}</dd>
-        <dt>Context</dt><dd>${Math.round(ctx)}%<small>ของ ${formatTokens(ctxSize)}</small></dd>
-      </dl>
-      <span class="bar wide-bar ${ctx > 85 ? 'is-low' : ctx > 60 ? 'is-mid' : ''}" aria-hidden="true" style="margin-top:8px"><i style="width:${Math.max(1, ctx)}%"></i></span>
     </section>`;
 }
 
@@ -2667,18 +2731,55 @@ const Actions = {
     renderList();
     toast('เชื่อม Claude Code hooks แล้ว ห้องที่เปิดไว้ก่อนหน้านี้ต้องเปิดใหม่ถึงจะส่งสถานะ');
   },
-  async installStatusline() {
-    const r = await postJson('/api/statusline/install', {});
-    if (!r.ok) return toast(`เชื่อม statusline ไม่สำเร็จ: ${r.data.error || r.status}`, 'err');
-    appState.statusline = r.data;
-    renderPanel();
-    toast(r.data.wrapsPrevious ? 'เชื่อมแล้ว statusline เดิมยังแสดงเหมือนเดิม' : 'เชื่อม statusline แล้ว');
-  },
   async scanTerminals() {
     const r = await postJson('/api/console/scan', {});
     toast(r.ok ? 'สแกน terminal แล้ว' : 'สแกนไม่สำเร็จ', r.ok ? 'ok' : 'err');
   },
 
+  /** Plan usage, on request: the server runs /usage in an idle terminal (the open room first). */
+  async checkUsage() {
+    if (usageCheck.loading) return;
+    const wasHolding = Boolean(appState.usageGuard && appState.usageGuard.hold);
+    const s = selected();
+    usageCheck.loading = true;
+    renderSidebar();
+    renderPanel();
+    const r = await postJson('/api/usage/check', s && s.lifecycle !== 'history' ? { preferSessionId: s.id } : {});
+    usageCheck.loading = false;
+    if (r.ok && r.data.usage) appState.usageGuard = r.data.usage;
+    renderSidebar();
+    renderPanel();
+    renderHoldBanner();
+    if (!r.ok) return toast(r.data.error || `เช็ค usage ไม่สำเร็จ (${r.status})`, 'err');
+    const c = r.data.reading || {};
+    const left = c.session
+      ? `รอบ 5 ชม. เหลือ ${c.session.remainingPct}%`
+      : c.week
+      ? `รอบสัปดาห์เหลือ ${c.week.remainingPct}%`
+      : 'อ่านได้บางส่วน';
+    if (r.data.closed === false) {
+      toast(`${left} แต่ปิดหน้าต่าง /usage ไม่สำเร็จ กด Esc ใน terminal ของห้อง ${c.room || ''} เอง`, 'warn');
+    } else if (!wasHolding && r.data.usage && r.data.usage.hold) {
+      toast(`${left} ต่ำกว่าเกณฑ์ เริ่มพักงานแล้ว`, 'warn');
+    } else {
+      toast(`เช็ค usage แล้ว: ${left}`);
+    }
+  },
+  /** A room's context window use, read from its transcript when clicked (not live). */
+  async checkContext(id) {
+    const prev = ctxChecks.get(id);
+    if (prev && prev.loading) return;
+    ctxChecks.set(id, { data: prev && prev.data, loading: true });
+    renderFocus();
+    const data = await getJson(`/api/session/context?id=${encodeURIComponent(id)}`);
+    if (!data || !data.ok) {
+      ctxChecks.set(id, { data: prev && prev.data, loading: false });
+      renderFocus();
+      return toast(`เช็ค context ไม่สำเร็จ: ${(data && data.error) || 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้'}`, 'err');
+    }
+    ctxChecks.set(id, { data, loading: false });
+    renderFocus();
+  },
   async resumeNow() {
     const r = await postJson('/api/usage/config', { action: 'reset-and-resume' });
     if (!r.ok) return toast('ทำต่อไม่สำเร็จ', 'err');
@@ -2704,12 +2805,6 @@ const Actions = {
     if (!Number.isFinite(n) || n < 1 || n > 50) return toast('ใส่ได้ 1 ถึง 50', 'warn');
     const r = await postJson('/api/usage/config', { autoPauseThresholdPct: n });
     if (r.ok) toast(`จะพักเมื่อเหลือน้อยกว่า ${n}%`);
-  },
-  async setBudget(v) {
-    const n = Number(v);
-    if (!Number.isFinite(n) || n < 10000) return toast('งบต้องไม่น้อยกว่า 10,000 tokens', 'warn');
-    const r = await postJson('/api/usage/config', { tokenBudget: n });
-    if (r.ok) toast(`ตั้งงบ ${formatTokens(n)} tokens ต่อ 5 ชม.`);
   },
 
   openSpawn() {
@@ -3771,7 +3866,6 @@ function applySnapshot(snap) {
   appState.categories = snap.categories || [];
   appState.sessions = snap.sessions || [];
   if (snap.hooks) appState.hooks = snap.hooks;
-  if (snap.statusline) appState.statusline = snap.statusline;
   notifyOnSnapshot();
 }
 
@@ -3827,10 +3921,12 @@ function connectSSE() {
   };
 }
 
-// Relative times and the hold countdown drift without new events.
+// Relative times (including "เช็ค 5m" on the usage card) and the hold countdown drift without
+// new events. Only the page re-renders here; nothing is fetched.
 setInterval(() => {
   renderList();
   renderHoldBanner();
+  renderSidebar();
 }, 30000);
 
 renderAll();

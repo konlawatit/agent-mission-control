@@ -191,67 +191,6 @@ function getWorkspaceFileDetail(cwd, relativeFilePath) {
 }
 
 /**
- * Estimates API cost in USD from Claude token counts and model family.
- */
-// First-party API rates in USD per 1M tokens: [input, output, cache read].
-// Cache writes are billed at 1.25x input (5-minute TTL). Most specific prefix wins.
-const MODEL_RATES = [
-  ['claude-fable-5-2', [8, 40, 0.2]],
-  ['claude-mythos-5-2', [8, 40, 0.2]],
-  ['claude-fable-5', [10, 50, 1.0]],
-  ['claude-mythos-5', [10, 50, 1.0]],
-  ['claude-opus-5-5', [4, 20, 0.2]],
-  ['claude-opus-5', [5, 25, 0.5]],
-  ['claude-opus-4-8', [5, 25, 0.5]],
-  ['claude-opus-4-7', [5, 25, 0.5]],
-  ['claude-opus-4-6', [5, 25, 0.5]],
-  ['claude-opus-4-5', [5, 25, 0.5]],
-  ['claude-sonnet-5-5', [2, 10, 0.1]],
-  ['claude-sonnet-5', [2, 10, 0.2]],
-  ['claude-haiku-5-5', [0.1, 0.5, 0.01]],
-  ['claude-haiku-4-5', [1, 5, 0.1]],
-];
-const FAMILY_RATES = {
-  fable: [8, 40, 0.2],
-  mythos: [8, 40, 0.2],
-  opus: [4, 20, 0.2],
-  sonnet: [3, 15, 0.3],
-  haiku: [1, 5, 0.1],
-};
-
-function getModelRates(modelName) {
-  const m = String(modelName || '').toLowerCase();
-  for (const [prefix, rates] of MODEL_RATES) {
-    if (m.startsWith(prefix)) return rates;
-  }
-  // Claude 3.x / Opus 4.0-4.1 era IDs carried the older, higher Opus price.
-  if (/claude-(3|opus-4-[01]|opus-4-\d{8})/.test(m) && m.includes('opus')) {
-    return [15, 75, 1.5];
-  }
-  for (const family of Object.keys(FAMILY_RATES)) {
-    if (m.includes(family)) return FAMILY_RATES[family];
-  }
-  return FAMILY_RATES.sonnet;
-}
-
-/**
- * Estimates API-equivalent cost in USD from Claude token counts and the model that produced them.
- * Subscription plans are not billed per token; this is a relative-cost signal only.
- */
-function estimateClaudeCostUsd(modelName, usage) {
-  const [inRate, outRate, cacheReadRate] = getModelRates(modelName);
-  const cacheWriteRate = inRate * 1.25;
-
-  const cost =
-    ((usage.inputTokens || 0) / 1e6) * inRate +
-    ((usage.outputTokens || 0) / 1e6) * outRate +
-    ((usage.cacheReadTokens || 0) / 1e6) * cacheReadRate +
-    ((usage.cacheCreateTokens || 0) / 1e6) * cacheWriteRate;
-
-  return Math.round(cost * 10000) / 10000;
-}
-
-/**
  * The folder name Claude Code keeps a working directory's transcripts under: every character
  * that is not a letter or digit becomes "-" (C:\repo\app\.wt\x -> C--repo-app--wt-x).
  */
@@ -420,134 +359,11 @@ function clearCaches() {
   clearGitCache();
   transcriptListCache.clear();
   parseCache.clear();
-  usageCache.clear();
 }
 
 function findLatestTranscriptForCwd(cwd) {
   const list = findTranscriptsForCwd(cwd);
   return list.length > 0 ? list[0].path : null;
-}
-
-/**
- * Incremental, whole-file token accounting per transcript.
- * The tail parser only reads the last 256 KB, which undercounts long sessions, so usage is
- * accumulated here by reading only the bytes appended since the previous call.
- */
-const usageCache = new Map();
-const USAGE_RECENT_MS = 6 * 3600 * 1000;
-const USAGE_CHUNK_BYTES = 4 * 1024 * 1024;
-
-function freshUsageEntry() {
-  return {
-    offset: 0,
-    carry: '',
-    seen: new Set(),
-    totals: {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreateTokens: 0,
-      cacheReadTokens: 0,
-      thinkingTokens: 0,
-      messageCount: 0,
-    },
-    // { t: epoch ms, b: billable tokens } for messages inside the recent window
-    recent: [],
-    lastAt: 0,
-  };
-}
-
-function ingestUsageLine(entry, line) {
-  if (!line.includes('"usage"')) return;
-  let obj;
-  try {
-    obj = JSON.parse(line);
-  } catch {
-    return;
-  }
-  const msg = obj.message || obj;
-  const usage = msg && msg.usage;
-  if (!usage || typeof usage !== 'object') return;
-  const key = msg.id || obj.uuid || `${obj.timestamp}-${usage.output_tokens || 0}`;
-  if (entry.seen.has(key)) return;
-  entry.seen.add(key);
-
-  const inTok = Number(usage.input_tokens || 0);
-  const outTok = Number(usage.output_tokens || 0);
-  const cacheCreate = Number(usage.cache_creation_input_tokens || 0);
-  const cacheRead = Number(usage.cache_read_input_tokens || 0);
-  const t = entry.totals;
-  t.inputTokens += inTok;
-  t.outputTokens += outTok;
-  t.cacheCreateTokens += cacheCreate;
-  t.cacheReadTokens += cacheRead;
-  t.thinkingTokens += Number(
-    (usage.output_tokens_details && usage.output_tokens_details.thinking_tokens) || 0
-  );
-  t.messageCount += 1;
-
-  const at = Date.parse(obj.timestamp || '') || 0;
-  if (at > entry.lastAt) entry.lastAt = at;
-  if (at && Date.now() - at < USAGE_RECENT_MS) {
-    // Cache reads are cheap against plan limits, so the estimate counts fresh tokens only.
-    entry.recent.push({ t: at, b: inTok + outTok + cacheCreate });
-  }
-}
-
-function readUsageIncremental(filePath) {
-  let st;
-  try {
-    st = fs.statSync(filePath);
-  } catch {
-    usageCache.delete(filePath);
-    return null;
-  }
-  let entry = usageCache.get(filePath);
-  if (!entry || st.size < entry.offset) {
-    entry = freshUsageEntry();
-    usageCache.set(filePath, entry);
-  }
-  if (st.size > entry.offset) {
-    let fd;
-    try {
-      fd = fs.openSync(filePath, 'r');
-      while (entry.offset < st.size) {
-        const len = Math.min(USAGE_CHUNK_BYTES, st.size - entry.offset);
-        const buf = Buffer.alloc(len);
-        fs.readSync(fd, buf, 0, len, entry.offset);
-        entry.offset += len;
-        const text = entry.carry + buf.toString('utf8');
-        const lines = text.split('\n');
-        entry.carry = lines.pop() || '';
-        for (const line of lines) ingestUsageLine(entry, line);
-      }
-    } catch {
-      // Leave what was read; the next call retries from the stored offset.
-    } finally {
-      if (fd !== undefined) fs.closeSync(fd);
-    }
-  }
-  const cutoff = Date.now() - USAGE_RECENT_MS;
-  if (entry.recent.length && entry.recent[0].t < cutoff) {
-    entry.recent = entry.recent.filter((r) => r.t >= cutoff);
-  }
-  return entry;
-}
-
-/**
- * Fresh (non-cache-read) tokens across every transcript read so far, since `sinceMs`.
- * Each transcript file is counted once, even when several rooms share it.
- */
-function getRecentBillableTokens(sinceMs) {
-  let tokens = 0;
-  let oldestAt = null;
-  for (const entry of usageCache.values()) {
-    for (const r of entry.recent) {
-      if (r.t < sinceMs) continue;
-      tokens += r.b;
-      if (oldestAt === null || r.t < oldestAt) oldestAt = r.t;
-    }
-  }
-  return { tokens, oldestAt };
 }
 
 function getContextWindowTokens(modelName) {
@@ -1046,20 +862,6 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
     const turns = [];
     let currentTurn = null;
 
-    const tokenUsage = {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreateTokens: 0,
-      cacheReadTokens: 0,
-      thinkingTokens: 0,
-      totalTokens: 0,
-      contextTokens: 0,
-      contextWindowPct: 0,
-      estimatedCostUsd: 0,
-      messageCount: 0,
-    };
-
-    const seenMessageIds = new Set();
     let turnState = null;
     let turnStateAt = null;
     let pendingAsk = null;
@@ -1099,39 +901,6 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
             if (switched) {
               currentModel = switched;
               currentModelAt = ts;
-            }
-          }
-        }
-
-        // Accumulate real Claude token usage per unique message/entry
-        if (msg.usage && typeof msg.usage === 'object') {
-          const msgKey = msg.id || entry.uuid || `${ts}-${msg.usage.output_tokens || 0}`;
-          if (!seenMessageIds.has(msgKey)) {
-            seenMessageIds.add(msgKey);
-            const inTok = Number(msg.usage.input_tokens || 0);
-            const outTok = Number(msg.usage.output_tokens || 0);
-            const cacheCreate = Number(msg.usage.cache_creation_input_tokens || 0);
-            const cacheRead = Number(msg.usage.cache_read_input_tokens || 0);
-            const thinkTok = Number(
-              (msg.usage.output_tokens_details &&
-                msg.usage.output_tokens_details.thinking_tokens) ||
-                0
-            );
-
-            tokenUsage.inputTokens += inTok;
-            tokenUsage.outputTokens += outTok;
-            tokenUsage.cacheCreateTokens += cacheCreate;
-            tokenUsage.cacheReadTokens += cacheRead;
-            tokenUsage.thinkingTokens += thinkTok;
-            tokenUsage.messageCount += 1;
-
-            const turnContext = inTok + cacheCreate + cacheRead;
-            if (turnContext > 0) {
-              tokenUsage.contextTokens = turnContext;
-              tokenUsage.contextWindowPct = Math.min(
-                100,
-                Math.round((turnContext / 200000) * 1000) / 10
-              );
             }
           }
         }
@@ -1262,47 +1031,6 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
       turns.push(currentTurn);
     }
 
-    // Replace the tail-only counts with whole-file totals for the same transcripts.
-    const fullTotals = {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreateTokens: 0,
-      cacheReadTokens: 0,
-      thinkingTokens: 0,
-      messageCount: 0,
-    };
-    let recentBillable = 0;
-    const windowStart = Date.now() - 5 * 3600 * 1000;
-    let accumulated = false;
-    for (const filePath of filesToRead) {
-      const acc = readUsageIncremental(filePath);
-      if (!acc) continue;
-      accumulated = true;
-      for (const k of Object.keys(fullTotals)) fullTotals[k] += acc.totals[k];
-      for (const r of acc.recent) if (r.t >= windowStart) recentBillable += r.b;
-    }
-    if (accumulated) Object.assign(tokenUsage, fullTotals);
-    tokenUsage.window5hTokens = recentBillable;
-    tokenUsage.freshTokens =
-      tokenUsage.inputTokens + tokenUsage.outputTokens + tokenUsage.cacheCreateTokens;
-    tokenUsage.contextWindowTokens = getContextWindowTokens(detectedModel);
-    tokenUsage.contextWindowPct = tokenUsage.contextTokens
-      ? Math.min(
-          100,
-          Math.round((tokenUsage.contextTokens / tokenUsage.contextWindowTokens) * 1000) / 10
-        )
-      : 0;
-
-    tokenUsage.totalTokens =
-      tokenUsage.inputTokens +
-      tokenUsage.outputTokens +
-      tokenUsage.cacheCreateTokens +
-      tokenUsage.cacheReadTokens;
-    tokenUsage.estimatedCostUsd = estimateClaudeCostUsd(
-      detectedModel,
-      tokenUsage
-    );
-
     // The live preview: the last 30 lines, widened to start on a whole entry so that paging back
     // from `previewFrom` (the byte offset of its first entry) neither repeats nor skips a line.
     let first = Math.max(0, conversationLines.length - 30);
@@ -1325,7 +1053,6 @@ function parseTranscriptTailUncached(transcriptPath, cwd = null) {
       detectedModel,
       currentModel,
       currentModelAt,
-      tokenUsage,
       lastAssistantFullText,
       lastAssistantText: lastAssistantText
         ? summarizeText(lastAssistantText, 260)
@@ -1446,9 +1173,6 @@ module.exports = {
   getGitMetadata,
   getWorkspaceChangedFiles,
   getWorkspaceFileDetail,
-  estimateClaudeCostUsd,
-  getModelRates,
-  getRecentBillableTokens,
   getContextWindowTokens,
   findTranscriptsForCwd,
   findLatestTranscriptForCwd,

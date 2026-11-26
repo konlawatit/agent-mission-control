@@ -1,6 +1,7 @@
 /**
  * The `amc` command line, run as a real process against a temporary home directory:
- * hook and statusline install/uninstall, and hooks being removed when the process exits.
+ * hook install/uninstall, removing the old statusline usage bridge, and hooks being removed when
+ * the process exits.
  */
 const assert = require('assert');
 const fs = require('fs');
@@ -43,18 +44,45 @@ function resetHome() {
   fs.rmSync(path.join(home, '.claude'), { recursive: true, force: true });
 }
 
-function testStatuslineCommandsRun() {
+/**
+ * The statusline usage bridge is gone (usage is checked on request now). Installing it is
+ * refused without starting a server; an install left by an earlier version is removed cleanly,
+ * putting back the statusline that was there before.
+ */
+function testLegacyStatuslineCleanup() {
   resetHome();
-  let res = amc(['install-statusline']);
-  assert.strictEqual(res.code, 0, res.stderr);
-  assert.ok(
-    readSettings().statusLine.command.includes('hooks/statusline.js'),
-    'the statusline bridge is configured'
-  );
+  const previousFile = path.join(home, '.agent-mission-control', 'statusline-previous.json');
+  const ours = { type: 'command', command: 'node "C:/old/agent-mission-control/hooks/statusline.js"' };
+  const theirs = { type: 'command', command: 'echo my-own-line', padding: 1 };
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.mkdirSync(path.dirname(previousFile), { recursive: true });
+  fs.writeFileSync(settingsPath, JSON.stringify({ statusLine: ours, model: 'opus' }), 'utf8');
+  fs.writeFileSync(previousFile, JSON.stringify(theirs), 'utf8');
+
+  // A port of its own, so that even a fall-through to `start` could never meet a running dashboard.
+  let res = amc(['install-statusline'], { AMC_PORT: '4998' });
+  assert.strictEqual(res.code, 1, 'the removed command reports failure');
+  assert.ok(res.stdout.includes('เช็คตอนนี้'), `it points at the usage check: ${res.stdout}`);
+  assert.deepStrictEqual(readSettings().statusLine, ours, 'and changes nothing');
 
   res = amc(['uninstall-statusline']);
   assert.strictEqual(res.code, 0, res.stderr);
-  assert.strictEqual('statusLine' in readSettings(), false, 'and removed again');
+  assert.deepStrictEqual(readSettings().statusLine, theirs, 'the earlier statusline is back');
+  assert.strictEqual(readSettings().model, 'opus', 'other settings are kept');
+  assert.strictEqual(fs.existsSync(previousFile), false);
+
+  // Without a saved earlier statusline, ours is simply removed; a second run is a no-op.
+  fs.writeFileSync(settingsPath, JSON.stringify({ statusLine: ours }), 'utf8');
+  res = amc(['uninstall-statusline']);
+  assert.strictEqual(res.code, 0, res.stderr);
+  assert.strictEqual('statusLine' in readSettings(), false);
+  res = amc(['uninstall-statusline']);
+  assert.strictEqual(res.code, 0, res.stderr);
+
+  // A statusline that is not ours is never touched.
+  fs.writeFileSync(settingsPath, JSON.stringify({ statusLine: theirs }), 'utf8');
+  res = amc(['uninstall-statusline']);
+  assert.deepStrictEqual(readSettings().statusLine, theirs);
 }
 
 function testInstallHooksUsesConfiguredPort() {
@@ -108,7 +136,7 @@ function testProcessExitRemovesHooks() {
 }
 
 try {
-  testStatuslineCommandsRun();
+  testLegacyStatuslineCleanup();
   testInstallHooksUsesConfiguredPort();
   testBrokenSettingsAreRefused();
   testProcessExitRemovesHooks();

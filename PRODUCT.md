@@ -31,7 +31,7 @@ The dashboard doesn't just monitor; it also sends commands back. It reads real C
 - The dashboard is open beside the terminals, often on a second screen. It is used **equally as a glanceable monitor and as a command center**: monitoring is the resting state, and acting on a room (approve, send a command, ask for a summary, launch a room) has to take only a click or two.
 - Rooms are discovered on their own once `amc install-hooks` has run. They can be named with `$env:AMC_ROOM`, or launched from the dashboard (new Windows Terminal tab or a headless background run).
 - CLI companions: `amc start`, `amc status` (summary table in the terminal), `amc install-hooks` / `uninstall-hooks`, `amc run --room "<name>" claude`.
-- The usage quota guard watches combined token and cost use across sessions in a rolling 5-hour window. Below a threshold (8% remaining by default) it saves a checkpoint for each session, interrupts them safely, and resumes them all when the window resets.
+- Plan usage is checked on request, never polled: a button runs Claude Code's local `/usage` command in one idle terminal, reads the 5-hour and weekly limits off the screen and closes it again (no tokens spent). Usage is shown for the plan as a whole, not per session; a session's context window is read from its transcript when its button is clicked. The usage quota guard acts on the latest check: below a threshold (8% remaining by default) it saves a checkpoint for each session, lets the current step finish, holds new prompts, and resumes them all when the window resets.
 - Moving to a new machine is a supported workflow (one-command `setup.ps1` / `setup.sh`).
 
 ## Capabilities and Constraints

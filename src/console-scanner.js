@@ -72,6 +72,21 @@ const PROMPT_KEY_HINT_RE = /Esc to cancel|Enter to (?:select|confirm)/i;
 // listed as "● question?" / "→ answer", and those lines must not be taken for the question.
 const REVIEW_HEADING_RE = /^(?:review your answers|ready to submit your answers)\b/i;
 
+// The /usage dialog (a tab of Claude Code's settings dialog): "Current session / Current week"
+// blocks over a footer like "←/→ to switch · … · w to show week · Esc to close". It is not a
+// question, so its numbered tips must never be read as a prompt waiting on the person.
+const USAGE_SECTION_RE = /^\s*Current (?:session|week)\b/i;
+const USAGE_FOOTER_RE = /Esc to close/i;
+const USAGE_FOOTER_HINT_RE = /to switch|to show (?:day|week)|to fix/i;
+
+/** Whether the screen shows the /usage dialog (its footer, with a usage block or its key hints). */
+function isUsageDialogScreen(lines) {
+  const tail = lines.slice(-8);
+  const footer = tail.find((l) => USAGE_FOOTER_RE.test(l) && !PROMPT_KEY_HINT_RE.test(l));
+  if (!footer) return false;
+  return USAGE_FOOTER_HINT_RE.test(footer) || lines.some((l) => USAGE_SECTION_RE.test(l));
+}
+
 /** An option line can carry a preview box to its right; keep only the option text. */
 function stripSidePanel(text) {
   const m = text.match(/\s{3,}[─-╿]/);
@@ -253,6 +268,7 @@ function parseConsoleScreen(rawScreen, cursor = {}) {
   }
 
   let interactivePrompt = null;
+  const usageDialog = isUsageDialogScreen(lines);
 
   // The key-hint line under a prompt ("Enter to select · … · Esc to cancel"). A question with
   // previews puts the preview box, notes and extra options between it and the last option.
@@ -267,7 +283,7 @@ function parseConsoleScreen(rawScreen, cursor = {}) {
     tailLines.length - lastOptionLineIdx <= 6 ||
     (keyHintIdx > lastOptionLineIdx && keyHintIdx - lastOptionLineIdx <= 24);
 
-  if (options.length >= 2 && promptEndsNearby) {
+  if (options.length >= 2 && promptEndsNearby && !usageDialog) {
     if (!options.some((o) => o.active) && !(nextItem && nextItem.active)) {
       options[0].active = true;
       currentIndex = 1;
@@ -330,8 +346,9 @@ function parseConsoleScreen(rawScreen, cursor = {}) {
     model: detectedModel,
     interactivePrompt,
     // Only meaningful when no prompt dialog is up.
-    inputText: interactivePrompt ? null : parseInputBox(lines, cursor),
+    inputText: interactivePrompt || usageDialog ? null : parseInputBox(lines, cursor),
     busy: isBusyScreen(lines),
+    usageDialog,
     screenPreview: previewLines,
   };
 }
@@ -529,6 +546,17 @@ class ConsoleScanner {
     this.timer = null;
     this.scanning = false;
     this.bridge = options.bridge || new PersistentBridge();
+    // Terminals the dashboard is driving itself (the /usage check): the scan still sees their
+    // process alive, but leaves their screen alone, so the dialog changes nothing in the room.
+    this.heldPids = new Set();
+  }
+
+  holdPid(pid) {
+    this.heldPids.add(Number(pid));
+  }
+
+  releasePid(pid) {
+    this.heldPids.delete(Number(pid));
   }
 
   /** Sends a request through the persistent bridge, falling back to a one-shot process. */
@@ -569,7 +597,10 @@ class ConsoleScanner {
     try {
       const result = await this._call({ action: 'scan' });
       if (result && result.ok && Array.isArray(result.items)) {
-        this.store.ingestConsoleScan(result.items);
+        const items = this.heldPids.size
+          ? result.items.map((i) => (i && this.heldPids.has(Number(i.pid)) ? { ...i, screen: null } : i))
+          : result.items;
+        this.store.ingestConsoleScan(items);
       }
     } catch {
       // Ignore scan errors
@@ -613,11 +644,17 @@ class ConsoleScanner {
     this._rescanSoon(300);
     return res;
   }
+
+  /** One terminal's screen (last ~45 rows) and cursor, read now: { ok, screen, cursorRow, cursorCol }. */
+  readScreen(pid) {
+    return this._call({ action: 'read', targetPid: Number(pid) });
+  }
 }
 
 module.exports = {
   extractValidDirectory,
   parseConsoleScreen,
+  isUsageDialogScreen,
   invokeWinConsoleBridge,
   PersistentBridge,
   ConsoleScanner,

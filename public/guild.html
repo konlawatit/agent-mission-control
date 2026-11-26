@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>โลกกิลด์ · Mission Control</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230c101d'/%3E%3Crect x='1.5' y='1.5' width='29' height='29' rx='5' fill='none' stroke='%23cfa049' stroke-width='2'/%3E%3Cpath d='M9 23 22 10M10 10l13 13M8 21l3 3M21 24l3-3' stroke='%23fae29c' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/guild.css" />
+</head>
+<body class="is-title">
+  <canvas id="world-canvas" role="img" aria-label="ฉากโลกกิลด์ คลิกที่ตัวละครเพื่อดูรายละเอียด"></canvas>
+  <div class="dof dof-top" aria-hidden="true"></div>
+  <div class="dof dof-bottom" aria-hidden="true"></div>
+  <div class="vignette" aria-hidden="true"></div>
+  <div id="scene-veil" aria-hidden="true"></div>
+
+  <!-- 1. Top bar: way back, connection, scene switcher, tools -->
+  <header class="topbar" id="topbar">
+    <div class="hud brand">
+      <a class="btn btn-back" href="/" title="กลับไปหน้าแชท Mission Control" aria-label="กลับ Mission Control"><span data-icon="arrowLeft"></span><span class="brand-back-label">กลับ Mission Control</span></a>
+      <div class="brand-text">
+        <div class="pixel brand-title">GUILD MODE</div>
+        <div class="conn" role="status" aria-live="polite"><span id="conn-dot" class="gem gem-off"></span><span id="conn-label">กำลังเชื่อมต่อ…</span></div>
+      </div>
+    </div>
+
+    <nav id="scene-switcher" class="hud scene-switcher" aria-label="เลือกฉาก"></nav>
+
+    <div class="tools">
+      <button id="waiting-btn" type="button" class="btn btn-alert" data-act="next-waiting" hidden></button>
+      <button type="button" class="btn" data-act="toggle-navmask" aria-pressed="false" aria-label="แสดงเลเยอร์ 2.5D" title="แสดง/ซ่อนพื้นที่เดินได้ (เขียว) สิ่งกีดขวาง (แดง) และเลเยอร์บังหน้า (ทอง)"><span class="icon-emerald" data-icon="layers"></span><span class="lbl-lg">2.5D Layers</span></button>
+      <button type="button" class="btn" data-act="toggle-bloom" aria-pressed="true" aria-label="แสงและเบลอ HD-2D" title="เปิด/ปิดแสงและเบลอ HD-2D"><span class="icon-gold" data-icon="sun"></span></button>
+      <button type="button" class="btn" data-act="toggle-sfx" aria-pressed="true" aria-label="เสียงประกอบ" title="เปิด/ปิดเสียง RPG"><span class="icon-gold ico-on" data-icon="volume"></span><span class="ico-off" data-icon="volumeOff"></span></button>
+      <button type="button" class="btn btn-gold" data-act="open-quest-board" aria-label="เปิด Quest Board"><span data-icon="scroll"></span><span class="lbl-sm-hide">Quest Board</span></button>
+    </div>
+
+    <div id="scene-subtitle" class="scene-subtitle" aria-live="polite"></div>
+  </header>
+
+  <button id="portal-left" type="button" class="portal portal-left" data-act="portal" hidden></button>
+  <button id="portal-right" type="button" class="portal portal-right" data-act="portal" hidden></button>
+
+  <!-- 2. Party strip: heroes in the scene on screen -->
+  <section class="party-dock" aria-label="ฮีโร่ในฉากนี้">
+    <div id="party-strip" class="party-strip"></div>
+  </section>
+
+  <!-- 3. Inspector drawer for the selected hero -->
+  <aside id="drawer" class="drawer hud" aria-label="รายละเอียดฮีโร่" aria-hidden="true"></aside>
+
+  <!-- 4. Quest Board -->
+  <div id="qb-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-act="close-quest-board"></div>
+    <div class="hud modal-card" role="dialog" aria-modal="true" aria-labelledby="qb-title">
+      <div class="modal-head">
+        <div class="modal-head-id">
+          <div class="modal-badge" data-icon="scroll"></div>
+          <div>
+            <h2 id="qb-title" class="pixel modal-title">GUILD QUEST BOARD · กระดานประกาศภารกิจ</h2>
+            <p class="modal-sub">เขียนเป้าหมาย เลือกตัวละครที่เหมาะกับงาน แล้วปล่อยให้ตัวละครเดินตามขั้นของคลาสเอง</p>
+          </div>
+        </div>
+        <button type="button" class="icon-btn" data-act="close-quest-board" aria-label="ปิด Quest Board"><span data-icon="x"></span></button>
+      </div>
+
+      <form id="qb-form" class="modal-body" novalidate>
+        <div id="qb-status" class="qb-status" role="status" hidden></div>
+
+        <fieldset class="qb-step">
+          <legend class="qb-legend pixel">1. เลือกตัวละครตามลักษณะงาน</legend>
+          <div id="qb-grid" class="qb-grid"></div>
+        </fieldset>
+
+        <div id="qb-config" class="qb-config"></div>
+
+        <div class="qb-field">
+          <label class="qb-label" for="qb-goal">2. เป้าหมายของเควสต์ *</label>
+          <textarea id="qb-goal" class="input" rows="3" maxlength="4000" required placeholder="อธิบายบั๊กที่เจอ สิ่งที่อยากให้ค้นคว้า หรือฟีเจอร์ที่ต้องแก้…"></textarea>
+        </div>
+
+        <div class="qb-row">
+          <div class="qb-field">
+            <label class="qb-label" for="qb-name">ชื่อเควสต์</label>
+            <input id="qb-name" class="input" type="text" maxlength="80" placeholder="เว้นว่างได้ ระบบตั้งจากเป้าหมาย" autocomplete="off" />
+          </div>
+          <div class="qb-field">
+            <label class="qb-label" for="qb-cwd">โฟลเดอร์งาน (cwd)</label>
+            <input id="qb-cwd" class="input mono" type="text" list="qb-cwd-list" maxlength="1024" placeholder="C:\path\to\project" autocomplete="off" spellcheck="false" />
+            <datalist id="qb-cwd-list"></datalist>
+          </div>
+        </div>
+
+        <div class="qb-field">
+          <div class="qb-field-head">
+            <label class="qb-label qb-label-cyan" for="qb-preset">3. Preset Prompt ประจำตัวละคร (แก้เพิ่มได้)</label>
+            <button type="button" class="link-btn" data-act="qb-reset-preset">รีเซ็ตเป็นค่าเริ่มต้นของคลาสนี้</button>
+          </div>
+          <textarea id="qb-preset" class="input mono" rows="4" maxlength="4000"></textarea>
+        </div>
+
+        <fieldset class="qb-step">
+          <legend class="qb-legend">4. ให้ใครออกลุย</legend>
+          <div class="qb-who">
+            <label class="who-opt">
+              <input type="radio" name="qb-launch" value="terminal" checked />
+              <span class="who-title">ฮีโร่ใหม่ ใน Windows Terminal</span>
+              <span class="who-desc">เปิดแท็บ terminal ใหม่ ตอบคำขออนุญาตได้ทั้งในเกมและในแชท</span>
+            </label>
+            <label class="who-opt">
+              <input type="radio" name="qb-launch" value="headless" />
+              <span class="who-title">ฮีโร่ใหม่ ทำงานเบื้องหลัง</span>
+              <span class="who-desc">ไม่เปิดหน้าต่าง terminal (headless)</span>
+            </label>
+            <label class="who-opt">
+              <input type="radio" name="qb-launch" value="existing" />
+              <span class="who-title">ฮีโร่ที่ว่างอยู่</span>
+              <select id="qb-existing" class="input" aria-label="เลือกฮีโร่ที่ว่างอยู่"></select>
+            </label>
+          </div>
+          <p id="qb-headless-note" class="qb-note" hidden>งานเบื้องหลังแก้ไฟล์ได้เองโดยไม่ถาม แต่คำสั่ง Bash ที่ยังไม่ได้อนุญาตไว้จะถูกปฏิเสธ ถ้าเควสต์ต้องรันคำสั่งใหม่ ให้เลือก Windows Terminal</p>
+        </fieldset>
+      </form>
+
+      <div class="modal-foot">
+        <div id="qb-hint" class="qb-hint"></div>
+        <div class="modal-foot-actions">
+          <button type="button" class="btn" data-act="close-quest-board">ยกเลิก</button>
+          <button id="qb-submit" type="submit" form="qb-form" class="btn btn-gold"><span data-icon="send"></span><span>ปักหมุด Quest &amp; ส่งตัวละครออกลุย</span></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. Toast -->
+  <div id="toast" class="toast hud" role="status" aria-live="polite"><span id="toast-icon"></span><span id="toast-msg"></span></div>
+
+  <!-- 6. Title screen: its click unlocks audio and starts the world -->
+  <section id="title-screen" class="title-screen" data-act="enter-world" aria-label="หน้าเริ่มโลกกิลด์">
+    <a class="btn btn-back title-back" href="/"><span data-icon="arrowLeft"></span><span>กลับ Mission Control</span></a>
+    <div class="hud title-inner">
+      <div class="pixel title-kicker">AGENT MISSION CONTROL</div>
+      <h1 class="pixel title-main">GUILD MODE</h1>
+      <p class="title-sub">โลกกิลด์ — ทุกห้องที่เปิดอยู่คือฮีโร่หนึ่งตัว ส่งเควสต์แล้วดูตัวละครเดินไปตามขั้นของงานเอง</p>
+      <button type="button" class="btn btn-gold title-enter" data-act="enter-world">กดเพื่อเข้าสู่โลกกิลด์</button>
+      <p class="title-meta" role="status" aria-live="polite"><span id="title-dot" class="gem gem-off"></span><span id="title-meta">กำลังเชื่อมต่อ Mission Control…</span></p>
+    </div>
+  </section>
+
+  <script src="/guild.js" defer></script>
+</body>
+</html>

@@ -839,6 +839,109 @@ function readConversationPage(filePath, { before, since = null, limit = 40 }) {
   return { lines, from, done: since === null && reachedStart && !restHasLines };
 }
 
+/**
+ * The next page after byte `after`: display lines of whole entries starting at or after it, at
+ * least `limit` of them (or up to the end of the file). `to` is where the following page starts;
+ * `done` when the end of the file was reached.
+ */
+function readConversationForward(filePath, { after = 0, limit = 40 }) {
+  const size = fs.statSync(filePath).size;
+  const lines = [];
+  let pos = Math.max(0, Math.min(after, size));
+  let to = pos;
+  let carry = Buffer.alloc(0);
+  let carryStart = pos;
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    while (lines.length < limit && to - after < PAGE_MAX_BYTES) {
+      const len = Math.min(TAIL_CHUNK_BYTES, size - pos);
+      const atEnd = len <= 0;
+      let buf = carry;
+      let bufStart = carryStart;
+      if (!atEnd) {
+        const chunk = Buffer.alloc(len);
+        fs.readSync(fd, chunk, 0, len, pos);
+        buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+        pos += len;
+      }
+      let p = 0;
+      for (;;) {
+        let nl = buf.indexOf(NEWLINE, p);
+        if (nl === -1) {
+          if (!atEnd || p >= buf.length) break;
+          nl = buf.length; // the last line may have no newline
+        }
+        const entry = parseConversationLine(buf.toString('utf8', p, nl));
+        p = Math.min(buf.length, nl + 1);
+        to = bufStart + p;
+        if (entry) lines.push(...displayLinesFor(entry));
+        if (lines.length >= limit) break;
+      }
+      carry = buf.subarray(p);
+      carryStart = bufStart + p;
+      if (atEnd) break;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return { lines, to, done: to >= size };
+}
+
+/** Where the transcript entry starting at byte `at` ends (just past its newline). */
+function entryEndOffset(filePath, at) {
+  const size = fs.statSync(filePath).size;
+  const start = Math.max(0, Math.min(at, size));
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    for (let pos = start; pos < size; pos += TAIL_CHUNK_BYTES) {
+      const len = Math.min(TAIL_CHUNK_BYTES, size - pos);
+      const chunk = Buffer.alloc(len);
+      fs.readSync(fd, chunk, 0, len, pos);
+      const nl = chunk.indexOf(NEWLINE);
+      if (nl !== -1) return pos + nl + 1;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return size;
+}
+
+const metaCache = new Map();
+
+/** Who/where/when of a transcript, from its first entries: entrypoint, working folder, start time. */
+function transcriptMeta(filePath) {
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return null;
+  }
+  const hit = metaCache.get(filePath);
+  if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit.meta;
+  const meta = { entrypoint: null, cwd: null, startedAt: null, size: stat.size, modifiedAt: new Date(stat.mtimeMs).toISOString() };
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(Math.min(128 * 1024, stat.size));
+    fs.readSync(fd, buf, 0, buf.length, 0);
+    fs.closeSync(fd);
+    for (const line of buf.toString('utf8').split('\n')) {
+      let e;
+      try {
+        e = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!meta.entrypoint && typeof e.entrypoint === 'string') meta.entrypoint = e.entrypoint;
+      if (!meta.cwd && typeof e.cwd === 'string') meta.cwd = e.cwd;
+      if (!meta.startedAt && typeof e.timestamp === 'string') meta.startedAt = e.timestamp;
+      if (meta.entrypoint && meta.cwd && meta.startedAt) break;
+    }
+  } catch {}
+  metaCache.set(filePath, { size: stat.size, mtimeMs: stat.mtimeMs, meta });
+  boundCache(metaCache);
+  return meta;
+}
+
 function parseTranscriptTailUncached(transcriptPath, cwd = null) {
   const allTranscripts = findTranscriptsForCwd(cwd);
   const targetPath =
@@ -1263,6 +1366,11 @@ module.exports = {
   findLatestTranscriptForCwd,
   findTranscriptById,
   readConversationPage,
+  readConversationForward,
+  entryEndOffset,
+  transcriptMeta,
+  displayLinesFor,
+  parseConversationLine,
   encodeProjectDir,
   launchCwdFor,
   transcriptEntrypoint,

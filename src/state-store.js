@@ -13,6 +13,7 @@ const {
   findTranscriptById,
   findTranscriptsForCwd,
 } = require('./transcript-parser');
+const { lookupClaudeSessionByPid } = require('./claude-sessions');
 const { parseConsoleScreen } = require('./console-scanner');
 const { sanitizeQuestions, promptFromQuestions, mergeScreenPrompt, sameText } = require('./ask-prompt');
 
@@ -108,6 +109,9 @@ class StateStore extends EventEmitter {
     super();
     this.dataDir =
       options.dataDir || path.join(os.homedir(), '.agent-mission-control');
+    // Claude Code's per-process session registry (~/.claude/sessions); overridable for tests.
+    this.claudeSessionsDir = options.claudeSessionsDir || undefined;
+    this._transcriptMisses = new Map(); // session id -> when its transcript was last not found
     this.stateFile = path.join(this.dataDir, 'sessions-state.json');
     this.sessions = new Map();
     this.commandQueues = new Map();
@@ -326,8 +330,28 @@ class StateStore extends EventEmitter {
    * newest one in its folder that no other room is showing. Never several sessions merged.
    */
   _transcriptFor(session) {
-    if (session.transcriptPath && fs.existsSync(session.transcriptPath)) return session.transcriptPath;
+    const sid = session.claudeSessionId;
+    const own = session.transcriptPath && fs.existsSync(session.transcriptPath) ? session.transcriptPath : null;
+    if (sid) {
+      // The session is known: only its own transcript, never a neighbour's. A session that has
+      // not written one yet (no message so far) shows nothing until it does.
+      if (own && path.basename(own, '.jsonl') === sid) return own;
+      const missedAt = this._transcriptMisses.get(sid);
+      if (missedAt && Date.now() - missedAt < 5000) return null; // not written yet; look again soon
+      const found = findTranscriptById(sid);
+      if (found) {
+        session.transcriptPath = found;
+        this._transcriptMisses.delete(sid);
+      } else {
+        this._transcriptMisses.set(sid, Date.now());
+        if (this._transcriptMisses.size > 500) this._transcriptMisses.delete(this._transcriptMisses.keys().next().value);
+      }
+      return found;
+    }
+    if (own) return own;
     if (!session.cwd) return null;
+    // Last resort (no hook and no session registry): the newest transcript in the folder that no
+    // other room shows.
     const key = (p) => path.resolve(String(p)).toLowerCase();
     const taken = new Set();
     for (const s of this.sessions.values()) {
@@ -691,6 +715,13 @@ class StateStore extends EventEmitter {
       // Always bind the exact console PID discovered for this specific `cwd`!
       session.pid = numericPid;
       session.cli = cliLabel;
+      // Claude Code's session registry says which session this process is on, so the room gets
+      // its own transcript at once (and the new one after /clear), with no guessing by folder.
+      const registered = lookupClaudeSessionByPid(numericPid, { sessionsDir: this.claudeSessionsDir });
+      if (registered && registered.sessionId && registered.sessionId !== session.claudeSessionId) {
+        session.claudeSessionId = registered.sessionId;
+        session.transcriptPath = null; // found by id in _transcriptFor
+      }
 
       if (cwd && (!session.cwd || session.room.startsWith('Claude Tab'))) {
         session.cwd = cwd;

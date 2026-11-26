@@ -815,6 +815,20 @@
       animation: ide-in 200ms var(--ease-out);
     }
     .ide[hidden] { display: none; }
+    /* Transcript viewer: any session by id (search results, automated runs). Same sheet as the IDE. */
+    .viewer {
+      position: fixed; inset: 16px; z-index: 52; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden;
+      border-radius: var(--r-xl); background: var(--glass-strong);
+      -webkit-backdrop-filter: blur(34px) saturate(1.4); backdrop-filter: blur(34px) saturate(1.4);
+      box-shadow: var(--shadow-shell), inset 0 0 0 1px var(--glass-edge); animation: ide-in 200ms var(--ease-out);
+    }
+    .viewer[hidden] { display: none; }
+    .viewer-bar { display: flex; align-items: center; gap: 12px; padding: 12px 14px 12px 22px; border-bottom: 1px solid var(--line); min-width: 0; }
+    .viewer-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+    .viewer-head b { font-size: 15px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .viewer-head span { font-size: 12.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .viewer-body { padding: 18px max(22px, calc((100% - 1040px) / 2)) 24px; overflow-y: auto; }
+    .viewer-body mark { background: var(--attn-soft); color: inherit; box-shadow: 0 0 0 2px var(--attn-soft); border-radius: 3px; }
     @keyframes ide-in { from { opacity: 0; transform: scale(0.985); } }
     .ide-bar { display: flex; align-items: center; gap: 10px; padding: 0 14px 0 20px; min-width: 0; border-bottom: 1px solid var(--line); }
     .ide-crumb { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13.5px; color: var(--text-3); }

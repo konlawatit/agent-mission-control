@@ -119,6 +119,48 @@ function newStore() {
   store.flush();
 }
 
+// 5b. Two sessions started together in one folder, before any hook: each terminal gets its own
+//     transcript from Claude Code's session registry, not the newest one in the folder.
+{
+  const sessionsDir = path.join(isolatedHome, '.claude', 'sessions');
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const SID_OLDER = '22222222-1111-4111-8111-000000000001';
+  const SID_NEWER = '22222222-1111-4111-8111-000000000002';
+  const SID_FRESH = '22222222-1111-4111-8111-000000000003';
+  const older = transcript(repo, SID_OLDER, 'cli');
+  const newer = transcript(repo, SID_NEWER, 'cli');
+  const later = new Date(Date.now() + 60000);
+  fs.utimesSync(newer, later, later); // the newest file in the folder
+  const reg = (pid, sessionId) =>
+    fs.writeFileSync(path.join(sessionsDir, `${pid}.json`), JSON.stringify({ pid, sessionId, cwd: repo, startedAt: Date.now(), kind: 'interactive', entrypoint: 'cli' }));
+  reg(701, SID_OLDER);
+  reg(702, SID_NEWER);
+  reg(703, SID_FRESH); // just opened: no transcript yet
+  clearCaches();
+  const store = new StateStore({ dataDir: fs.mkdtempSync(path.join(isolatedHome, 'data-')), claudeSessionsDir: sessionsDir });
+  const screen = 'Claude Code\n> ';
+  store.ingestConsoleScan([
+    { pid: 701, cwd: repo, screen },
+    { pid: 702, cwd: repo, screen },
+    { pid: 703, cwd: repo, screen },
+  ]);
+  const byPid = (pid) => Array.from(store.sessions.values()).find((s) => Number(s.pid) === pid);
+  assert.strictEqual(byPid(701).claudeSessionId, SID_OLDER);
+  assert.strictEqual(byPid(701).transcriptPath, older, 'the older session keeps its own transcript');
+  assert.strictEqual(byPid(702).transcriptPath, newer);
+  assert.ok(!byPid(703).transcriptPath, 'a session with no transcript yet borrows nobody else\'s');
+
+  // /clear: the same terminal moves to a new session.
+  const SID_CLEARED = '22222222-1111-4111-8111-000000000004';
+  const cleared = transcript(repo, SID_CLEARED, 'cli');
+  reg(701, SID_CLEARED);
+  clearCaches();
+  require('../src/claude-sessions').clearSessionRegistryCache();
+  store.ingestConsoleScan([{ pid: 701, cwd: repo, screen }, { pid: 702, cwd: repo, screen }, { pid: 703, cwd: repo, screen }]);
+  assert.strictEqual(byPid(701).transcriptPath, cleared, 'after /clear the room follows the new session');
+  store.flush();
+}
+
 // 6. Over HTTP: automated events are acknowledged but ignored, and never held.
 (async () => {
   const dataDir = fs.mkdtempSync(path.join(isolatedHome, 'srv-'));
@@ -177,6 +219,24 @@ function newStore() {
     assert.deepStrictEqual(page.json.lines, [], 'files outside ~/.claude/projects are never read');
     page = await get(`/api/session/conversation?sessionId=nope`);
     assert.strictEqual(page.status, 404);
+
+    // Any session by id: the shared viewer for search results and automated runs.
+    page = await get(`/api/transcript?sessionId=${SID_MAIN}`);
+    assert.strictEqual(page.status, 200);
+    assert.deepStrictEqual(page.json.lines, ['🧑 คุณ: hi']);
+    assert.strictEqual(page.json.meta.entrypoint, 'cli');
+    assert.strictEqual(page.json.meta.cwd, repo);
+    page = await get(`/api/transcript?sessionId=${SID_MAIN}&after=0`);
+    assert.deepStrictEqual(page.json.lines, ['🧑 คุณ: hi'], 'forward from the start');
+    assert.strictEqual(page.json.done, true);
+    page = await get(`/api/transcript?sessionId=${SID_MAIN}&at=0`);
+    assert.deepStrictEqual(page.json.lines, ['🧑 คุณ: hi'], 'ending at one entry');
+    page = await get(`/api/transcript?sessionId=..%2F..%2Fetc`);
+    assert.strictEqual(page.status, 400, 'only a session id');
+    page = await get(`/api/transcript?sessionId=99999999-9999-4999-8999-999999999999`);
+    assert.strictEqual(page.status, 404);
+    page = await get(`/api/transcript?sessionId=${SID_MAIN}&limit=0`);
+    assert.strictEqual(page.status, 400);
   } finally {
     server.close();
     store.flush();

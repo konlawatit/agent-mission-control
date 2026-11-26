@@ -1064,6 +1064,84 @@ function onOutputScroll(e) {
   });
 }
 
+/* ---------- Transcript viewer ---------- */
+// Reads any Claude session by id (a search result, an automated run), not only a room's own.
+// Pages back from the end, or opens at one entry (`at`, a byte offset) and pages both ways.
+// Shared by the search and the automated-runs views: openTranscriptViewer(sessionId, opts).
+const viewer = { open: false, sessionId: null, title: '', meta: null, lines: [], from: 0, to: 0, olderDone: true, newerDone: true, loading: false, mark: '' };
+
+async function openTranscriptViewer(sessionId, { title = '', at = null, mark = '' } = {}) {
+  Object.assign(viewer, { open: true, sessionId, title, meta: null, lines: [], from: 0, to: 0, olderDone: true, newerDone: true, loading: true, mark });
+  renderViewer();
+  const q = at !== null && at !== undefined ? `&at=${encodeURIComponent(at)}` : '';
+  const r = await getJson(`/api/transcript?sessionId=${encodeURIComponent(sessionId)}&limit=60${q}`);
+  if (viewer.sessionId !== sessionId) return; // another one was opened meanwhile
+  viewer.loading = false;
+  if (!r || !r.ok) {
+    renderViewer();
+    return toast('เปิดบทสนทนาไม่ได้', 'err');
+  }
+  Object.assign(viewer, { meta: r.meta, lines: r.lines, from: r.from, to: r.to, olderDone: r.done, newerDone: !(r.to < (r.meta && r.meta.size)) });
+  renderViewer({ scroll: at !== null && at !== undefined ? 'bottom-mark' : 'bottom' });
+}
+
+function viewerMetaText(m) {
+  if (!m) return '';
+  const when = m.startedAt ? new Date(m.startedAt).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+  const kind = /^sdk-/.test(m.entrypoint || '') ? 'งานอัตโนมัติ' : m.entrypoint === 'cli' ? 'terminal' : m.entrypoint || '';
+  return [m.cwd, when, kind].filter(Boolean).join(' · ');
+}
+
+/** Wraps occurrences of `mark` (already escaped HTML text) in <mark>, outside tags. */
+function markText(html, mark) {
+  if (!mark) return html;
+  const needle = escapeHtml(mark).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return html.replace(/(>|^)([^<]*)/g, (m0, gt, text) => gt + text.replace(new RegExp(needle, 'gi'), (x) => `<mark>${x}</mark>`));
+}
+
+function renderViewer({ scroll = null } = {}) {
+  let el = $('#viewer');
+  if (!viewer.open) {
+    if (el) el.hidden = true;
+    return;
+  }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'viewer';
+    el.className = 'viewer';
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-modal', 'true');
+    document.body.appendChild(el);
+  }
+  el.hidden = false;
+  const body = $('#viewer-body', el);
+  const prevTop = body ? body.scrollTop : 0;
+  const prevHeight = body ? body.scrollHeight : 0;
+  const older = viewer.loading
+    ? '<div class="output-older">กำลังโหลด…</div>'
+    : viewer.olderDone
+    ? '<div class="output-start">เริ่มต้น session</div>'
+    : `<div class="output-older"><button class="btn btn-ghost btn-sm" ${act('viewerOlder')}>${icon('arrowUp', 14)}โหลดข้อความก่อนหน้า</button></div>`;
+  const newer = viewer.newerDone || viewer.loading
+    ? ''
+    : `<div class="output-older"><button class="btn btn-ghost btn-sm" ${act('viewerNewer')}>${icon('arrowDown', 14)}อ่านต่อ</button></div>`;
+  el.setAttribute('aria-label', `บทสนทนา ${viewer.title || ''}`);
+  el.innerHTML = `
+    <div class="viewer-bar">
+      <div class="viewer-head"><b>${escapeHtml(viewer.title || 'บทสนทนา')}</b><span>${escapeHtml(viewerMetaText(viewer.meta))}</span></div>
+      <button class="icon-btn" ${act('closeViewer')} aria-label="ปิด" title="ปิด (Esc)">${icon('x', 18)}</button>
+    </div>
+    <div class="viewer-body output-body" id="viewer-body" tabindex="0">${older}${markText(renderMarkdown(viewer.lines.join('\n\n')), viewer.mark)}${newer}</div>`;
+  const nb = $('#viewer-body', el);
+  if (scroll === 'bottom' || scroll === 'bottom-mark') nb.scrollTop = nb.scrollHeight;
+  else if (scroll === 'keep-older') nb.scrollTop = prevTop + (nb.scrollHeight - prevHeight);
+  else nb.scrollTop = prevTop;
+  if (scroll === 'bottom-mark') {
+    const marks = nb.querySelectorAll('mark');
+    if (marks.length) marks[marks.length - 1].scrollIntoView({ block: 'center' });
+  }
+}
+
 /* ---------- Reading back ---------- */
 // The live preview carries only a room's latest ~30 lines. Older messages of its session are
 // fetched a page at a time from where that preview starts (`previewFrom`, a byte offset in the
@@ -2195,6 +2273,31 @@ const Actions = {
     const body = $('#f-out');
     if (body) body.style.fontSize = `${ui.fontSize}px`;
   },
+  closeViewer() {
+    viewer.open = false;
+    viewer.sessionId = null;
+    renderViewer();
+  },
+  async viewerOlder() {
+    if (viewer.loading || viewer.olderDone) return;
+    viewer.loading = true;
+    const id = viewer.sessionId;
+    const r = await getJson(`/api/transcript?sessionId=${encodeURIComponent(id)}&before=${viewer.from}&limit=40`);
+    if (viewer.sessionId !== id) return;
+    viewer.loading = false;
+    if (r && r.ok) Object.assign(viewer, { lines: [...r.lines, ...viewer.lines], from: r.from, olderDone: r.done });
+    renderViewer({ scroll: 'keep-older' });
+  },
+  async viewerNewer() {
+    if (viewer.loading || viewer.newerDone) return;
+    viewer.loading = true;
+    const id = viewer.sessionId;
+    const r = await getJson(`/api/transcript?sessionId=${encodeURIComponent(id)}&after=${viewer.to}&limit=40`);
+    if (viewer.sessionId !== id) return;
+    viewer.loading = false;
+    if (r && r.ok) Object.assign(viewer, { lines: [...viewer.lines, ...r.lines], to: r.to, newerDone: r.done });
+    renderViewer();
+  },
   /** Load the page of messages just before what the output already shows. */
   async loadOlder(id) {
     const s = appState.sessions.find((x) => x.id === id);
@@ -2428,6 +2531,7 @@ function isTyping(target) {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (drag.active) return endDrag(false);
+    if (viewer.open) return Actions.closeViewer();
     if (popoverKind) return closePopover();
     if (ide.open) return Actions.closeIde();
     if (ui.expanded) return Actions.toggleExpand();

@@ -47,6 +47,7 @@ function scanRegistry(sessionsDir) {
 
       bySessionId.set(sessionId, {
         startedAt,
+        sessionId,
         info: {
           pid,
           entrypoint: textOrNull(raw.entrypoint),
@@ -96,4 +97,32 @@ function lookupClaudeSession(sessionId, options = {}) {
   return hit ? { ...hit.info } : null;
 }
 
-module.exports = { lookupClaudeSession, SESSION_REGISTRY_TTL_MS };
+/**
+ * The session a running claude process is on now (its newest registry entry), or null. This is
+ * how a terminal found by the console scanner is tied to its own transcript right away, instead
+ * of guessing the newest transcript in its folder (two sessions started together in one folder
+ * could swap until their first hook arrived). After /clear the same pid moves to a new session.
+ */
+function lookupClaudeSessionByPid(pid, options = {}) {
+  const wanted = Number(pid);
+  if (!Number.isInteger(wanted) || wanted <= 0) return null;
+  const sessionsDir = options.sessionsDir || path.join(os.homedir(), '.claude', 'sessions');
+  const now = (options.now || Date.now)();
+  let scan = scans.get(sessionsDir);
+  if (!scan || now - scan.at > SESSION_REGISTRY_TTL_MS) {
+    scan = { at: now, bySessionId: scanRegistry(sessionsDir), misses: scan ? scan.misses : new Map() };
+    scans.set(sessionsDir, scan);
+  }
+  let best = null;
+  for (const entry of scan.bySessionId.values()) {
+    if (entry.info.pid === wanted && (!best || entry.startedAt > best.startedAt)) best = entry;
+  }
+  return best ? { ...best.info, sessionId: best.sessionId } : null;
+}
+
+/** Forget cached registry scans (tests, or after a known change). */
+function clearSessionRegistryCache() {
+  scans.clear();
+}
+
+module.exports = { lookupClaudeSession, lookupClaudeSessionByPid, clearSessionRegistryCache, SESSION_REGISTRY_TTL_MS };

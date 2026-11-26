@@ -12,6 +12,10 @@ const {
   isAutomatedEntrypoint,
   transcriptEntrypoint,
   readConversationPage,
+  readConversationForward,
+  entryEndOffset,
+  transcriptMeta,
+  findTranscriptById,
 } = require('./transcript-parser');
 const {
   checkHooksStatus,
@@ -460,6 +464,42 @@ function createMissionControlServer(options = {}) {
           limit: limit || 40,
         });
         return sendJson(res, 200, { ok: true, ...page });
+      }
+
+      // 3c. Any Claude session's conversation by its id (search results, automated runs), paged
+      //     back (`before`), forward (`after`) or ending at an entry (`at`).
+      if (req.method === 'GET' && pathname === '/api/transcript') {
+        const sessionId = parsedUrl.searchParams.get('sessionId') || '';
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+          return sendJson(res, 400, { ok: false, error: 'Invalid session id' });
+        }
+        const num = (name) => {
+          const raw = parsedUrl.searchParams.get(name);
+          if (raw === null || raw === '') return null;
+          const n = Number(raw);
+          return Number.isSafeInteger(n) && n >= 0 ? n : NaN;
+        };
+        const before = num('before');
+        const after = num('after');
+        const at = num('at');
+        const since = num('since');
+        const limit = num('limit');
+        if ([before, after, at, since, limit].some(Number.isNaN) || (limit !== null && (limit < 1 || limit > 200))) {
+          return sendJson(res, 400, { ok: false, error: 'Invalid paging parameters' });
+        }
+        const projectsDir = path.resolve(os.homedir(), '.claude', 'projects') + path.sep;
+        const found = findTranscriptById(sessionId);
+        const file = found ? path.resolve(found) : null;
+        if (!file || !file.toLowerCase().startsWith(projectsDir.toLowerCase()) || !file.endsWith('.jsonl')) {
+          return sendJson(res, 404, { ok: false, error: 'Transcript not found' });
+        }
+        const meta = { sessionId, projectDir: path.basename(path.dirname(file)), ...transcriptMeta(file) };
+        if (after !== null) {
+          return sendJson(res, 200, { ok: true, meta, ...readConversationForward(file, { after, limit: limit || 40 }) });
+        }
+        const end = at !== null ? entryEndOffset(file, at) : before;
+        const page = readConversationPage(file, { before: end === null ? undefined : end, since, limit: limit || 40 });
+        return sendJson(res, 200, { ok: true, meta, ...page, to: end === null ? meta.size : end });
       }
 
       // 4a. Attach a file or image to the next message (raw body, one file per request)

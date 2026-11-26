@@ -344,6 +344,10 @@
     .side-tools .icon-btn:hover { background: var(--side-hover); color: var(--on-side); }
     .side-tools .icon-btn.is-warn { color: oklch(0.92 0.12 85); }
 
+    /* ---------- Notifications toggle (sidebar bell) ---------- */
+    /* Pressed on the violet shell reads like the current nav item: white 22% glass, white glyph. */
+    .side-tools .notify-btn[aria-pressed="true"] { background: var(--side-active); color: var(--on-side); }
+
     /* The glass work surface */
     .work {
       position: relative; display: grid; min-height: 0; min-width: 0;

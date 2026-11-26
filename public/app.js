@@ -638,6 +638,7 @@ function renderSidebar() {
     $('#side-tools'),
     `<button class="icon-btn ${hooksOk ? '' : 'is-warn'}" ${act('installHooks')} aria-label="${hooksOk ? 'Claude hooks เชื่อมแล้ว' : 'ติดตั้ง Claude hooks'}" title="${hooksOk ? `Claude hooks เชื่อมแล้ว (${(appState.hooks.installedEvents || []).length} events)` : 'ยังไม่ได้ติดตั้ง Claude Code hooks คลิกเพื่อติดตั้ง'}">${icon('plug', 18)}</button>
      <button class="icon-btn" ${act('scanTerminals')} aria-label="สแกน terminal ทุก tab" title="สแกน terminal ทุก tab">${icon('refresh', 18)}</button>
+     ${notifyToolHtml()}
      <button class="icon-btn" ${act('cycleTheme')} aria-label="${themeLabel}" title="${themeLabel} (คลิกเพื่อสลับ)">${icon(themeIcon, 18)}</button>`
   );
 }
@@ -2786,6 +2787,237 @@ $('#search-input').addEventListener('input', (e) => {
 });
 $('#search-icon').innerHTML = icon('search', 15);
 
+/* ---------- Notifications: transitions (pure; test/notify.test.js runs this block in node) ---------- */
+// A room that flips back and forth must not ring again: one ring per room and kind in this window.
+const NOTIFY_REPEAT_MS = 20000;
+// The statuses worth a system notification, and the kind each one rings as.
+const NOTIFY_KIND = { needs_input: 'attn', done: 'done' };
+
+/**
+ * Which live rooms just changed into "needs you" or "done". Pure, so node can run it.
+ *   memory    what the previous call returned (null on a fresh load)
+ *   sessions  the snapshot's rooms
+ *   now       ms clock; viewingId: the room on screen right now (never rings)
+ *   baseline  true for the first snapshot of a connection: remember it, ring for nothing
+ * Returns { memory, events: [{ id, kind }] }. A room seen for the first time, a history room and
+ * a room that did not change are silent; a repeat of the same kind within NOTIFY_REPEAT_MS too.
+ */
+function notifyTransitions(memory, sessions, { now = 0, viewingId = null, baseline = false } = {}) {
+  const prev = memory && memory.status && !baseline ? memory.status : null;
+  const sent = new Map(memory && memory.sent ? memory.sent : []);
+  const status = new Map();
+  const events = [];
+  for (const s of sessions || []) {
+    if (!s || !s.id || s.lifecycle === 'history') continue;
+    status.set(s.id, s.status);
+    const kind = Object.prototype.hasOwnProperty.call(NOTIFY_KIND, s.status) ? NOTIFY_KIND[s.status] : null;
+    if (!prev || !kind || !prev.has(s.id) || prev.get(s.id) === s.status) continue;
+    if (s.id === viewingId) continue;
+    const last = sent.get(s.id);
+    if (last && last.kind === kind && now - last.at < NOTIFY_REPEAT_MS) continue;
+    sent.set(s.id, { kind, at: now });
+    events.push({ id: s.id, kind });
+  }
+  for (const [id, last] of sent) if (!status.has(id) || now - last.at >= NOTIFY_REPEAT_MS) sent.delete(id);
+  return { memory: { status, sent }, events };
+}
+
+/** Notification text is plain: no Markdown, emoji or line breaks, cut to `max` characters. */
+function notifyPlain(text, max = 80) {
+  const flat = String(text || '')
+    .replace(/```[^\n]*\n?/g, ' ')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^\s{0,3}(?:#{1,6}|>|[-*+]|\d+[.)])\s+/gm, '')
+    .replace(/`+|\*\*|__|~~/g, '')
+    .replace(/(^|[^\w])[*_]([^*_\n]+)[*_](?=[^\w]|$)/g, '$1$2')
+    .replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const chars = Array.from(flat);
+  return chars.length > max ? `${chars.slice(0, max - 1).join('').trimEnd()}…` : flat;
+}
+
+/** Title and body for a room's notification, in Thai. */
+function notifyMessage(s, kind) {
+  const title = notifyPlain(s.room || s.project || 'ห้อง Agent', 60);
+  if (kind === 'attn') {
+    const p = s.interactivePrompt;
+    const n = p && Array.isArray(p.questions) ? p.questions.length : 0;
+    if (p && p.question) return { title, body: `รอคุณตอบ${n > 1 ? ` ${n} ข้อ` : ''}: ${notifyPlain(p.question)}` };
+    if (s.pendingAction) return { title, body: `รอคุณยืนยัน: ${notifyPlain(s.pendingAction)}` };
+    return { title, body: 'ห้องนี้รอคุณอยู่' };
+  }
+  // The TL;DR can still be the waiting notice ("⚠️ ...") or the server's default greeting.
+  const tldr = String(s.tldr || '');
+  const usable = tldr && !/^\s*⚠/.test(tldr) && !tldr.includes('พร้อมรับคำสั่งผ่าน Terminal');
+  return { title, body: usable ? `ทำเสร็จแล้ว: ${notifyPlain(tldr)}` : 'ทำเสร็จแล้ว' };
+}
+/* ---------- Notifications: browser wiring ---------- */
+
+// The toggle persists with the other prefs; it is read here so this feature stays in one place.
+PREF_KEYS.push('notify');
+ui.notify = false;
+try {
+  ui.notify = JSON.parse(localStorage.getItem(PREF_KEY) || '{}').notify === true;
+} catch {}
+
+ICON_PATHS.bell = '<path d="M12 3.5v1.7"/><path d="M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 1.8h-14z"/><path d="M10 20.8a2 2 0 0 0 4 0"/>';
+ICON_PATHS.bellOff = `${ICON_PATHS.bell}<path d="M4.5 4.5l15 15"/>`;
+
+const NOTIFY_BASE_TITLE = document.title || 'Mission Control';
+const notifyState = { memory: null, baseline: true, open: new Map() };
+
+/** 'granted' | 'denied' | 'default', or 'unsupported' where the page cannot notify at all. */
+function notifyPermission() {
+  return typeof window.Notification === 'function' ? window.Notification.permission : 'unsupported';
+}
+
+function notifyActive() {
+  return Boolean(ui.notify) && notifyPermission() === 'granted';
+}
+
+/** The room the person is looking at: open in focus view, in a visible and focused window. */
+function viewingRoomId() {
+  if (ui.view !== 'focus' || document.visibilityState !== 'visible' || !document.hasFocus()) return null;
+  return ui.selectedId;
+}
+
+/** The sidebar's bell: pressed while notifications will ring, amber ink when the browser blocks them. */
+function notifyToolHtml() {
+  const perm = notifyPermission();
+  const on = Boolean(ui.notify) && perm === 'granted';
+  const blocked = Boolean(ui.notify) && !on;
+  const title = on
+    ? 'แจ้งเตือนเปิดอยู่ เตือนเมื่อห้องรอคุณหรือทำเสร็จ (คลิกเพื่อปิด)'
+    : perm === 'unsupported'
+    ? 'เบราว์เซอร์นี้แจ้งเตือนไม่ได้'
+    : blocked
+    ? 'เบราว์เซอร์บล็อกการแจ้งเตือนอยู่ คลิกเพื่อดูวิธีเปิด'
+    : 'แจ้งเตือนปิดอยู่ คลิกเพื่อเปิด จะเตือนเมื่อห้องรอคุณหรือทำเสร็จ';
+  return `<button class="icon-btn notify-btn ${blocked ? 'is-warn' : ''}" ${act('toggleNotify')} aria-pressed="${on}" aria-label="แจ้งเตือนเมื่อห้องรอคุณหรือทำเสร็จ" title="${escapeHtml(title)}">${icon(on ? 'bell' : 'bellOff', 18)}</button>`;
+}
+
+/** "(2) Mission Control" while rooms wait on you. */
+function updateTabTitle() {
+  const n = appState.sessions.filter((s) => s.lifecycle !== 'history' && s.status === 'needs_input').length;
+  const title = n ? `(${n}) ${NOTIFY_BASE_TITLE}` : NOTIFY_BASE_TITLE;
+  if (document.title !== title) document.title = title;
+}
+
+/** The next snapshot is a new baseline (the SSE stream reconnected): remember it, ring for nothing. */
+function notifyRebase() {
+  notifyState.baseline = true;
+}
+
+/** Runs after every snapshot: remembers each room's status and rings for the ones that changed. */
+function notifyOnSnapshot() {
+  const { memory, events } = notifyTransitions(notifyState.memory, appState.sessions, {
+    now: Date.now(),
+    viewingId: viewingRoomId(),
+    baseline: notifyState.baseline,
+  });
+  notifyState.memory = memory;
+  notifyState.baseline = false;
+  updateTabTitle();
+  closeViewedNotification();
+  if (!notifyActive()) return;
+  for (const e of events) showRoomNotification(e.id, e.kind);
+}
+
+function showRoomNotification(id, kind) {
+  const s = appState.sessions.find((x) => x.id === id);
+  if (!s) return;
+  const { title, body } = notifyMessage(s, kind);
+  let n;
+  try {
+    // One tag per room: a newer notification replaces the older one instead of stacking.
+    // The OS draws title and body as plain text, so they are not HTML-escaped.
+    n = new window.Notification(title, { body, tag: `amc-room-${id}`, renotify: true, lang: 'th' });
+  } catch {
+    return; // e.g. mobile Chrome only notifies through a service worker
+  }
+  n.onclick = () => {
+    window.focus();
+    n.close();
+    openNotifiedRoom(id);
+  };
+  n.onclose = () => {
+    if (notifyState.open.get(id) === n) notifyState.open.delete(id);
+  };
+  notifyState.open.set(id, n);
+}
+
+/** A notification for the room now on screen has done its job. */
+function closeViewedNotification() {
+  const id = viewingRoomId();
+  const n = id && notifyState.open.get(id);
+  if (!n) return;
+  notifyState.open.delete(id);
+  n.close();
+}
+
+/** Opens a notified room even when the list's search or filters would hide it. */
+function openNotifiedRoom(id) {
+  const s = appState.sessions.find((x) => x.id === id);
+  if (!s) return toast('ห้องนี้ไม่อยู่ในรายการแล้ว', 'warn');
+  if (!matchesFilters(s)) {
+    ui.search = '';
+    ui.project = 'ALL';
+    ui.category = 'ALL';
+    ui.pinnedOnly = false;
+    const box = $('#search-input');
+    if (box) box.value = '';
+  }
+  Actions.selectRoom(id);
+}
+
+/** Notification.requestPermission, promise or (older Safari) callback style. */
+function requestNotifyPermission() {
+  return new Promise((resolve) => {
+    const r = window.Notification.requestPermission(resolve);
+    if (r && typeof r.then === 'function') r.then(resolve, () => resolve(notifyPermission()));
+  });
+}
+
+Object.assign(Actions, {
+  /** Turning it on is the only place the browser is asked for permission (a click, a user gesture). */
+  async toggleNotify() {
+    if (notifyActive()) {
+      ui.notify = false;
+      savePrefs();
+      renderSidebar();
+      return toast('ปิดแจ้งเตือนแล้ว');
+    }
+    let perm = notifyPermission();
+    if (perm === 'unsupported') return toast('เบราว์เซอร์นี้แจ้งเตือนไม่ได้ ลองเปิด dashboard ใน Chrome หรือ Edge', 'err');
+    if (perm === 'default') {
+      try {
+        perm = await requestNotifyPermission();
+      } catch {
+        perm = notifyPermission();
+      }
+    }
+    ui.notify = perm === 'granted';
+    savePrefs();
+    renderSidebar();
+    if (perm === 'granted') return toast('เปิดแจ้งเตือนแล้ว จะเตือนเมื่อห้องรอคุณหรือทำเสร็จ');
+    if (perm === 'denied') {
+      return toast('เบราว์เซอร์บล็อกการแจ้งเตือนของหน้านี้ไว้ กดไอคอนหน้าช่อง URL เพื่ออนุญาต แล้วกดเปิดอีกครั้ง', 'warn');
+    }
+    toast('ยังไม่ได้อนุญาตการแจ้งเตือน กดเปิดอีกครั้งเมื่อพร้อม', 'warn');
+  },
+});
+
+// Coming back to the window on a notified room closes its notification.
+window.addEventListener('focus', closeViewedNotification);
+document.addEventListener('visibilitychange', closeViewedNotification);
+// Permission changed in the browser's site settings: redraw the bell.
+try {
+  navigator.permissions.query({ name: 'notifications' }).then((st) => {
+    st.onchange = () => renderSidebar();
+  }, () => {});
+} catch {}
+
 /* ---------- Dialogs ---------- */
 $('#spawn-dialog').addEventListener('close', async () => {
   const dlg = $('#spawn-dialog');
@@ -2835,6 +3067,7 @@ function applySnapshot(snap) {
   appState.sessions = snap.sessions || [];
   if (snap.hooks) appState.hooks = snap.hooks;
   if (snap.statusline) appState.statusline = snap.statusline;
+  notifyOnSnapshot();
 }
 
 async function fetchInitialState() {
@@ -2875,6 +3108,7 @@ function connectSSE() {
     try {
       const payload = JSON.parse(e.data);
       if (payload.snapshot) {
+        if (payload.type === 'init') notifyRebase();
         applySnapshot(payload.snapshot);
         scheduleRender();
       }

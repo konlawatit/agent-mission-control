@@ -3,7 +3,7 @@ const fs = require('fs');
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NAMED_KEYS = new Set(['enter', 'esc', 'escape', 'up', 'down', 'tab', 'space']);
+const NAMED_KEYS = new Set(['enter', 'esc', 'escape', 'up', 'down', 'left', 'right', 'tab', 'space', 'ctrl-u']);
 const APPROVAL_RE = /^(y|yes|approve)$/i;
 
 /**
@@ -88,6 +88,7 @@ class CommandBridge {
     const labelStr = optionPayload.label || `ตัวเลือกที่ ${numberStr}`;
     const selectedPatch = {
       status: 'working',
+      workingSignalAt: new Date().toISOString(),
       statusLabel: `เลือก [${numberStr}. ${labelStr}] แล้ว`,
       pendingAction: null,
       interactivePrompt: null,
@@ -138,6 +139,74 @@ class CommandBridge {
       delivered: false,
       transport: 'mission-control-queue',
       message: `⏳ ยังส่งเข้า Terminal ของ ${session.room} ไม่ได้ — เก็บตัวเลือก "${numberStr}" ไว้ในคิวแล้ว`,
+    };
+  }
+
+  /**
+   * Empties the terminal's input box with Ctrl+U, which deletes to the start of the line and,
+   * repeated, across lines; it does nothing on an empty box. (Ctrl+C would exit Claude on a
+   * second press when the box is empty, and Esc Esc opens the rewind menu, so neither is used.)
+   * The screen is read again to confirm the box is empty.
+   */
+  async clearTerminalInput(sessionId) {
+    const session = this.store.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    if (!session.pid || !this.consoleScanner) {
+      return { ok: false, delivered: false, message: `ไม่พบ terminal ของห้อง ${session.room}` };
+    }
+    const before = (session.terminalInput && session.terminalInput.text) || '';
+    const presses = Math.min(40, before.split('\n').length + 2);
+    for (let i = 0; i < presses; i++) {
+      const res = await this.consoleScanner.sendKey(session.pid, 'ctrl-u');
+      if (!res || !res.ok) return { ok: false, delivered: false, message: 'ล้างช่องพิมพ์ใน terminal ไม่สำเร็จ' };
+    }
+    await new Promise((r) => setTimeout(r, 350)); // let Claude redraw the box
+    await this.consoleScanner.scanOnce();
+    if (session.terminalInput && session.terminalInput.text) {
+      return {
+        ok: false,
+        delivered: false,
+        message: 'ยังมีข้อความเหลือในช่องพิมพ์ของ terminal ลองลบใน terminal เอง',
+      };
+    }
+    return { ok: true, delivered: true, message: 'ล้างช่องพิมพ์ใน terminal แล้ว' };
+  }
+
+  /**
+   * Applies a multi-select answer in one go: Enter on each option whose tick should flip
+   * (positions are arrow-key positions, top = 1), then, when given, Enter on the "Next" row.
+   * The dashboard collects the ticks first, so the terminal is driven once instead of per click.
+   */
+  async applyMultiSelect(sessionId, { toggles, currentIndex, nextIndex }) {
+    const session = this.store.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+    if (!session.pid || !this.consoleScanner) {
+      return {
+        ok: false,
+        delivered: false,
+        message: `ไม่พบ terminal ของห้อง ${session.room} ที่เปิดอยู่ จึงส่งคำตอบไม่ได้`,
+      };
+    }
+    let cursor = currentIndex;
+    const steps = [...toggles].sort((a, b) => a - b);
+    if (nextIndex) steps.push(nextIndex);
+    for (const target of steps) {
+      const res = await this.consoleScanner.selectOption(session.pid, cursor, target, String(target));
+      if (!res || !res.ok) {
+        return { ok: false, delivered: false, message: 'ส่งคำตอบเข้า terminal ไม่ครบ ลองตรวจในหน้าต่าง terminal' };
+      }
+      cursor = target;
+    }
+    this.store.updateSession(session.id, {
+      tldr: `✓ ส่งคำตอบแบบเลือกหลายข้อเข้า Terminal (PID ${session.pid}) แล้ว`,
+    });
+    return {
+      ok: true,
+      delivered: true,
+      transport: 'win32-console-key',
+      message: nextIndex ? 'ส่งคำตอบแล้ว ไปข้อถัดไป' : 'อัปเดตตัวเลือกแล้ว',
     };
   }
 
@@ -212,8 +281,14 @@ class CommandBridge {
     }
 
     if (!options.runHeadless && session.pid && this.consoleScanner) {
+      // The person chose to replace what was left unsent in the terminal's input box.
+      if (options.clearFirst) {
+        const cleared = await this.clearTerminalInput(session.id);
+        if (!cleared.ok) return cleared;
+      }
       const sent = await this.consoleScanner.sendText(session.pid, trimmed);
       if (sent && sent.ok) {
+        session.lastTypedText = trimmed; // to recognise it if it ends up unsent in the input box
         this.store.processHookEvent({
           session_id: session.id,
           cwd: session.cwd,

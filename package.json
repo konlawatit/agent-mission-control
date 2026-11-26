@@ -14,7 +14,8 @@
     "start": "node bin/amc.js start",
     "install-hooks": "node bin/amc.js install-hooks",
     "status": "node bin/amc.js status",
-    "test": "node test/verify.js && node test/security.test.js"
+    "test": "node test/verify.js && node test/security.test.js && node test/usage-guard.test.js && node test/transcript.test.js && node test/ask-prompt.test.js && node test/attachments.test.js && node test/rooms.test.js && node test/hook-installer.test.js && node test/claude-sessions.test.js && node test/git-meta.test.js && node test/hook-endpoint.test.js && node test/hook-lifecycle.test.js && node test/cli.test.js",
+    "install-statusline": "node bin/amc.js install-statusline"
   },
   "keywords": [
     "claude-code",

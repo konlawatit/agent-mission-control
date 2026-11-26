@@ -34,6 +34,20 @@ function readToken(tokenFile = DEFAULT_TOKEN_FILE) {
   }
 }
 
+/**
+ * The token written into ~/.claude/settings.json for Claude Code's HTTP hooks. It is derived
+ * from the API token and opens the hook endpoint only: settings.json is not a private file the
+ * way the token file is (it is synced in dotfiles and pasted into bug reports), and the API
+ * token itself can send text into terminals.
+ */
+function deriveHookToken(apiToken) {
+  return crypto
+    .createHmac('sha256', String(apiToken || ''))
+    .update('amc-hook-endpoint-v1')
+    .digest('hex')
+    .slice(0, 48);
+}
+
 function hostnameOf(hostHeader) {
   if (!hostHeader) return '';
   const value = String(hostHeader).trim().toLowerCase();
@@ -80,6 +94,7 @@ module.exports = {
   TOKEN_HEADER,
   loadOrCreateToken,
   readToken,
+  deriveHookToken,
   isAllowedHost,
   isAllowedOrigin,
   tokensEqual,

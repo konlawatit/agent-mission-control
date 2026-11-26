@@ -4,8 +4,12 @@
  *
  * Commands:
  *   amc start [--port 4310] [--no-open]            Start Mission Control server & open Web UI (Real sessions only)
+ *             [--no-manage-hooks]                  The server connects the Claude Code hooks while it runs and removes
+ *                                                  them when it stops; this flag leaves ~/.claude/settings.json alone
  *   amc install-hooks                              Install Claude Code lifecycle hooks into ~/.claude/settings.json
  *   amc uninstall-hooks                            Remove Mission Control hooks from ~/.claude/settings.json
+ *   amc install-statusline                         Forward real 5h plan usage from Claude Code's statusline (keeps an existing statusline)
+ *   amc uninstall-statusline                       Restore the statusline that was configured before
  *   amc status                                     Show live & history sessions right in the terminal
  *   amc run [--room "Auth"] <cmd> [args...]        Wrap any CLI agent in a Mission Control tracked room
  */
@@ -17,7 +21,10 @@ const {
   checkHooksStatus,
   installClaudeHooks,
   uninstallClaudeHooks,
+  installStatusline,
+  uninstallStatusline,
 } = require('../src/hook-installer');
+const { attachManagedHooks } = require('../src/hook-lifecycle');
 const { readToken } = require('../src/security');
 
 const args = process.argv.slice(2);
@@ -76,16 +83,54 @@ function postHookPayload(payload) {
 
 async function runCommand() {
   if (subcommand === 'install-hooks' || subcommand === 'setup') {
-    const result = installClaudeHooks();
+    const result = installClaudeHooks({ port: PORT });
+    if (result.error) {
+      console.log(`❌ ติดตั้ง Claude Code Hooks ไม่สำเร็จ: ${result.error}`);
+      process.exitCode = 1;
+      return;
+    }
     console.log('✅ ติดตั้ง Claude Code Lifecycle Hooks สำเร็จ!');
     console.log(`   ไฟล์ตั้งค่า: ${result.settingsPath}`);
     console.log(`   Events ที่เชื่อมต่อ: ${result.installedEvents.join(', ')}`);
+    console.log(
+      '   ⚠️ Hooks ที่ติดตั้งด้วยคำสั่งนี้จะค้างอยู่แม้ปิดเซิร์ฟเวอร์ และ Claude Code จะขึ้นคำเตือนทุก tool call ระหว่างที่เซิร์ฟเวอร์ไม่ได้เปิด'
+    );
+    console.log(
+      '      ปกติไม่ต้องใช้คำสั่งนี้: "amc start" เชื่อมและถอด hooks ให้เอง (ใช้คู่กับ "amc start --no-manage-hooks" เท่านั้น)'
+    );
     return;
   }
 
   if (subcommand === 'uninstall-hooks') {
     const result = uninstallClaudeHooks();
+    if (result.error) {
+      console.log(`❌ ถอนการติดตั้ง Claude Code Hooks ไม่สำเร็จ: ${result.error}`);
+      process.exitCode = 1;
+      return;
+    }
     console.log('✅ ถอนการติดตั้ง Claude Code Hooks เรียบร้อย');
+    console.log(`   ไฟล์ตั้งค่า: ${result.settingsPath}`);
+    return;
+  }
+
+  if (subcommand === 'install-statusline') {
+    const result = installStatusline();
+    if (result.error) {
+      console.log(`❌ ติดตั้ง statusline ไม่สำเร็จ: ${result.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log('✅ เชื่อม Claude Code statusline กับ Mission Control แล้ว (usage 5 ชม. จริง)');
+    if (result.wrapsPrevious) {
+      console.log('   statusline เดิมของคุณยังแสดงเหมือนเดิม (ถูกครอบไว้ ไม่ได้ลบ)');
+    }
+    console.log(`   ไฟล์ตั้งค่า: ${result.settingsPath}`);
+    return;
+  }
+
+  if (subcommand === 'uninstall-statusline') {
+    const result = uninstallStatusline();
+    console.log('✅ คืนค่า statusline เดิมเรียบร้อย');
     console.log(`   ไฟล์ตั้งค่า: ${result.settingsPath}`);
     return;
   }
@@ -180,7 +225,11 @@ async function runCommand() {
 
   // Default: `start` (Real sessions only — no demo rooms seeded!)
   const noOpen = args.includes('--no-open');
-  const { server, store } = createMissionControlServer();
+  // The server owns its hooks unless told otherwise: connected once it is listening, removed
+  // when it stops, so a Claude Code session never posts to a server that is not there.
+  const manageHooks =
+    !args.includes('--no-manage-hooks') && process.env.AMC_MANAGE_HOOKS !== '0';
+  const { server, store, token } = createMissionControlServer();
 
   // Persist debounced state before exiting on Ctrl+C / service stop.
   const shutdown = () => {
@@ -189,21 +238,39 @@ async function runCommand() {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
-  const hooksState = checkHooksStatus();
 
   server.listen(PORT, '127.0.0.1', () => {
+    // Only after the port is ours: a second instance that fails to bind must not touch the
+    // hooks of the one that is running.
+    const managed = manageHooks
+      ? attachManagedHooks({
+          proc: process,
+          install: () => installClaudeHooks({ port: PORT, token }),
+          // Only this instance's hooks: another server on another port keeps its own.
+          uninstall: () => uninstallClaudeHooks({ port: PORT }),
+          onSignal: shutdown,
+          onUninstallFailed: (message) => {
+            console.log(`⚠️  ถอด Claude Code Hooks ไม่สำเร็จ: ${message}`);
+            console.log(
+              '   Hooks ยังค้างอยู่ใน ~/.claude/settings.json และ Claude Code จะขึ้นคำเตือนทุก tool call จนกว่าจะรัน "amc uninstall-hooks" หรือเปิดเซิร์ฟเวอร์อีกครั้ง'
+            );
+          },
+        })
+      : null;
+    const hooksState = managed ? managed.result : checkHooksStatus();
+    const hooksLine = hooksState.error
+      ? `🔴 เชื่อมไม่สำเร็จ: ${hooksState.error}`
+      : hooksState.installed
+      ? `🟢 ติดตั้งแล้ว (${hooksState.installedEvents.length} events)` +
+        (managed ? ' • ถอดอัตโนมัติเมื่อปิดเซิร์ฟเวอร์' : '')
+      : '🟡 ยังไม่ได้ผูกอัตโนมัติ (กดปุ่มติดตั้งบนหน้าเว็บ หรือรัน npm run install-hooks)';
+
     const url = `http://127.0.0.1:${PORT}`;
     console.log('\n============================================================');
     console.log('🎛️  AGENT MISSION CONTROL — READY (REAL SESSIONS MODE)');
     console.log('============================================================');
     console.log(`🌐 Web Dashboard : ${url}`);
-    console.log(
-      `🔗 Claude Hooks  : ${
-        hooksState.installed
-          ? '🟢 ติดตั้งแล้ว (' + hooksState.installedEvents.length + ' events)'
-          : '🟡 ยังไม่ได้ผูกอัตโนมัติ (กดปุ่มติดตั้งบนหน้าเว็บ หรือรัน npm run install-hooks)'
-      }`
-    );
+    console.log(`🔗 Claude Hooks  : ${hooksLine}`);
     console.log('------------------------------------------------------------');
     console.log('💡 ระบบกำลังสแกนและจดจำทุก Session ของ Claude ที่คุณเปิดใช้งานจริง');
     console.log('   หากเผลอปิด Tab ระบบจะย้ายไปเก็บในแท็บ "🕘 ประวัติที่ปิดแล้ว"');

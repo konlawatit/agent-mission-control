@@ -2,6 +2,12 @@ const assert = require('assert');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+
+// Isolate from the developer's real ~/.claude transcripts: rooms here use this repo as their cwd,
+// and real sessions in it (sub-agents, turns) would otherwise leak into the assertions.
+const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'amc-home-'));
+process.env.HOME = isolatedHome;
+process.env.USERPROFILE = isolatedHome;
 const { StateStore } = require('../src/state-store');
 const { inferWorkflowFromTool } = require('../src/transcript-parser');
 const { parseConsoleScreen } = require('../src/console-scanner');
@@ -74,7 +80,7 @@ async function runTests() {
   assert.strictEqual(snap.metrics.liveRooms, 0);
   assert.strictEqual(snap.metrics.historyRooms, 1);
 
-  // 4. Test Reopening / Reviving Session in the same folder
+  // 4. A new terminal in the same folder is a new room; the closed session stays readable in history.
   store.ingestConsoleScan([
     {
       pid: 88888,
@@ -84,62 +90,56 @@ async function runTests() {
     },
   ]);
   snap = store.getSnapshot();
-  assert.strictEqual(snap.sessions.length, 1, 'Should revive existing session instead of duplicating');
-  assert.strictEqual(snap.sessions[0].lifecycle, 'live');
-  assert.strictEqual(snap.sessions[0].pid, 88888);
-  assert.strictEqual(snap.sessions[0].openCount, 2);
+  assert.strictEqual(snap.sessions.length, 2, 'one room per session, not per folder');
+  const reopened = snap.sessions.find((s) => s.lifecycle === 'live');
+  assert.ok(reopened, 'the new terminal is live');
+  assert.strictEqual(reopened.pid, 88888);
+  assert.strictEqual(snap.metrics.historyRooms, 1, 'the closed session stays in history');
 
-  // 5. Test Hook Event + ConsoleScanner Deduplication (including dirty PowerShell prompt `> claude` and new UUID turns!)
+  // 5. Hooks join the terminal they come from; a second session in the same folder gets its own
+  //    room (including a dirty PowerShell `> claude` path), and the scanner's next terminal claims it.
+  const SID_A = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+  const SID_B = '99999999-e5f6-7890-abcd-ef1234567890';
   store.processHookEvent({
-    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    session_id: SID_A,
     cwd: sampleCwd,
     hook_event_name: 'UserPromptSubmit',
     prompt: 'สรุปโปรเจกต์นี้ให้หน่อย',
   });
-
   store.processHookEvent({
-    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    session_id: SID_A,
     cwd: sampleCwd,
     hook_event_name: 'Stop',
     summary: 'สรุปโครงสร้างระบบเรียบร้อย',
   });
+  const roomA = store.sessions.get(reopened.id);
+  assert.strictEqual(roomA.claudeSessionId, SID_A, 'the session claimed the open terminal\'s room');
+  assert.ok(roomA.taskHistory.length >= 1, 'completed turns are kept in the room history');
 
-  // Now simulate a SECOND conversation / new UUID in the same folder + dirty `> claude` path from console!
   store.processHookEvent({
-    session_id: '99999999-e5f6-7890-abcd-ef1234567890',
+    session_id: SID_B,
     cwd: `${sampleCwd}> claude`,
     hook_event_name: 'UserPromptSubmit',
     prompt: 'ดูโปรเจกต์นี้หน่อย และคิดว่ามีจุดไหนที่ทำให้ดีกว่านี้ได้ไหม',
   });
-
   store.ingestConsoleScan([
-    {
-      pid: 27120,
-      cwd: sampleCwd,
-      title: 'Claude Code',
-      screen: sampleScreen,
-    },
+    { pid: 88888, cwd: sampleCwd, title: 'Claude Code', screen: sampleScreen },
+    { pid: 27120, cwd: sampleCwd, title: 'Claude Code', screen: sampleScreen },
   ]);
 
   snap = store.getSnapshot();
-  assert.strictEqual(
-    snap.sessions.length,
-    1,
-    'Multiple turns, new UUIDs, or dirty "> claude" paths for the same folder MUST stay in 1 single room!'
-  );
-  assert.strictEqual(
-    snap.sessions[0].goal,
-    'ดูโปรเจกต์นี้หน่อย และคิดว่ามีจุดไหนที่ทำให้ดีกว่านี้ได้ไหม',
-    'Main room card must display the latest active interaction!'
-  );
-  assert.ok(
-    snap.sessions[0].taskHistory.length >= 1,
-    'Previous completed turns must be stored inside the room taskHistory!'
-  );
+  const live = snap.sessions.filter((s) => s.lifecycle === 'live');
+  assert.strictEqual(live.length, 2, 'two sessions in one folder are two rooms');
+  const roomB = live.find((s) => s.claudeSessionId === SID_B);
+  assert.ok(roomB, 'session B has its own room');
+  assert.strictEqual(roomB.pid, 27120, 'the new terminal claimed session B\'s room instead of making a third');
+  assert.strictEqual(roomB.cwd, sampleCwd, 'the "> claude" suffix is cleaned off');
+  assert.strictEqual(roomB.goal, 'ดูโปรเจกต์นี้หน่อย และคิดว่ามีจุดไหนที่ทำให้ดีกว่านี้ได้ไหม');
+  assert.strictEqual(store.sessions.get(reopened.id).goal, 'สรุปโปรเจกต์นี้ให้หน่อย', 'room A keeps its own conversation');
 
   // 6. Test Sub-Agent Spawning & Workflow Stages
   store.processHookEvent({
-    session_id: snap.sessions[0].id,
+    session_id: roomB.id,
     hook_event_name: 'PreToolUse',
     tool_name: 'Task',
     tool_use_id: 'sub-task-1',
@@ -151,7 +151,7 @@ async function runTests() {
   });
 
   snap = store.getSnapshot();
-  assert.strictEqual(snap.sessions[0].subAgents.length, 1);
+  assert.strictEqual(snap.sessions.find((s) => s.id === roomB.id).subAgents.length, 1);
   assert.strictEqual(snap.metrics.activeSubAgents, 1);
 
   const editInference = inferWorkflowFromTool('Edit', { file_path: 'src/auth.ts' });

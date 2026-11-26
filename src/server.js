@@ -5,18 +5,32 @@ const os = require('os');
 const { StateStore } = require('./state-store');
 const { CommandBridge } = require('./command-bridge');
 const { ConsoleScanner } = require('./console-scanner');
+const { UsageGuard } = require('./usage-guard');
+const {
+  getWorkspaceChangedFiles,
+  getWorkspaceFileDetail,
+  isAutomatedEntrypoint,
+  transcriptEntrypoint,
+  readConversationPage,
+} = require('./transcript-parser');
 const {
   checkHooksStatus,
   installClaudeHooks,
   uninstallClaudeHooks,
+  checkStatuslineStatus,
+  installStatusline,
+  HOOK_ENDPOINT_PATH,
 } = require('./hook-installer');
+const { lookupClaudeSession } = require('./claude-sessions');
 const {
   TOKEN_HEADER,
   loadOrCreateToken,
+  deriveHookToken,
   isAllowedHost,
   isAllowedOrigin,
   tokensEqual,
 } = require('./security');
+const { MAX_ATTACHMENT_BYTES, saveAttachment, pruneAttachments } = require('./attachments');
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -25,11 +39,14 @@ const MIME_TYPES = {
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  '.woff2': 'font/woff2',
 };
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const SSE_THROTTLE_MS = 120;
 const EDITABLE_FIELDS = ['room', 'category', 'goal', 'pinned'];
+const MAX_REORDER_IDS = 1000;
+const MAX_PROMPT_POSITION = 30; // arrow-key positions in a terminal prompt
 
 const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
@@ -76,11 +93,16 @@ function createMissionControlServer(options = {}) {
     ? null
     : new ConsoleScanner(store, { intervalMs: options.scanIntervalMs || 1800 });
   const bridge = new CommandBridge(store, scanner);
+  const usageGuard = new UsageGuard(store, bridge);
+  store.usageGuard = usageGuard;
   const publicDir = path.resolve(__dirname, '..', 'public');
   const sseClients = new Set();
+  // Old composer attachments (two weeks and older) are removed in the background.
+  setImmediate(() => pruneAttachments(store.dataDir));
 
   if (scanner) {
     scanner.start();
+    usageGuard.start();
   }
 
   // Ingest any offline events spooled while server was closed
@@ -179,8 +201,96 @@ function createMissionControlServer(options = {}) {
     });
   }
 
+  /**
+   * Body of a Claude Code HTTP hook. Unlike readJsonBody it never rejects: any answer other
+   * than 2xx makes Claude Code show a warning on that tool call, so a body that is too large
+   * (a screenshot in `tool_response`), malformed or not JSON is read to the end and reported
+   * as null.
+   */
+  function readHookBody(req) {
+    return new Promise((resolve) => {
+      const isJson = /^application\/json\b/i.test(String(req.headers['content-type'] || ''));
+      let raw = '';
+      let size = 0;
+      let skip = !isJson;
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => {
+        if (skip) return;
+        size += Buffer.byteLength(chunk);
+        if (size > MAX_BODY_BYTES) {
+          skip = true;
+          raw = '';
+          return;
+        }
+        raw += chunk;
+      });
+      req.on('end', () => {
+        if (skip) return resolve(null);
+        try {
+          const parsed = JSON.parse(raw);
+          resolve(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null);
+        } catch {
+          resolve(null);
+        }
+      });
+      req.on('error', () => resolve(null));
+    });
+  }
+
+  /**
+   * An HTTP hook carries nothing from the claude process's environment, which is where the hook
+   * script (hooks/claude-hook.js) read these from. The pid comes from Claude Code's session
+   * registry; the terminal ids come from headers Claude Code fills from its own environment.
+   */
+  function enrichHttpHookPayload(payload, headers) {
+    const header = (name) => {
+      const value = headers[name];
+      return typeof value === 'string' && value.trim() ? value.trim() : null;
+    };
+    const known = lookupClaudeSession(payload.session_id, {
+      sessionsDir: options.claudeSessionsDir,
+    });
+    if (known) {
+      if (!payload.claude_pid) payload.claude_pid = known.pid;
+      if (!payload.entrypoint) payload.entrypoint = known.entrypoint;
+    }
+    payload.pane_id = header('x-amc-pane') || header('x-amc-tmux-pane');
+    payload.wt_session = header('x-amc-wt-session');
+  }
+
+  /** What a held prompt is told, and when work resumes. */
+  function holdInfo() {
+    const summary = usageGuard.getUsageSummary();
+    const resumeAt = summary.resetAt
+      ? new Date(summary.resetAt).toLocaleTimeString('th-TH', {
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      : '-';
+    return {
+      resumeAt: summary.resetAt,
+      reason: `Mission Control พักงานไว้: usage เหลือ ${summary.remainingPct}% (ต่ำกว่า ${summary.autoPauseThresholdPct}%) จะทำงานต่ออัตโนมัติราว ${resumeAt} หรือกด "ทำต่อเลย" ใน dashboard`,
+    };
+  }
+
+  // The token written into ~/.claude/settings.json for the HTTP hooks: it opens the hook
+  // endpoint and nothing else.
+  const hookToken = deriveHookToken(token);
+
+  /** Hook status for this server: hooks that post to another instance do not count. */
+  function ownHooksStatus() {
+    const address = server.address();
+    return checkHooksStatus(address ? { port: address.port } : {});
+  }
+
   function isAuthorized(req, parsedUrl) {
     if (tokensEqual(req.headers[TOKEN_HEADER], token)) return true;
+    if (
+      parsedUrl.pathname === HOOK_ENDPOINT_PATH &&
+      tokensEqual(req.headers[TOKEN_HEADER], hookToken)
+    ) {
+      return true;
+    }
     // EventSource cannot set headers, so only the SSE stream accepts the token as a query param.
     return (
       parsedUrl.pathname === '/api/events' &&
@@ -248,15 +358,59 @@ function createMissionControlServer(options = {}) {
       if (req.method === 'GET' && pathname === '/api/state') {
         return sendJson(res, 200, {
           ok: true,
-          hooks: checkHooksStatus(),
+          hooks: ownHooksStatus(),
+          statusline: checkStatuslineStatus(),
           ...store.getSnapshot(),
         });
       }
 
-      // 3. Receive Claude Hook / Agent Telemetry Event
+      // 3. Claude Code HTTP hooks (`type: "http"`): Claude Code posts the event itself, so no
+      // hook process is started. The answer is Claude Code's hook output: {} or a block decision.
+      if (req.method === 'POST' && pathname === HOOK_ENDPOINT_PATH) {
+        const payload = await readHookBody(req);
+        if (!payload) return sendJson(res, 200, {});
+        enrichHttpHookPayload(payload, req.headers);
+        const automated =
+          isAutomatedEntrypoint(payload.entrypoint) ||
+          isAutomatedEntrypoint(transcriptEntrypoint(payload.transcript_path));
+        if (
+          payload.hook_event_name === 'UserPromptSubmit' &&
+          usageGuard.isHolding() &&
+          !automated
+        ) {
+          return sendJson(res, 200, { decision: 'block', reason: holdInfo().reason });
+        }
+        // Claude Code waits for this answer before it runs the tool: answer first, work after.
+        sendJson(res, 200, {});
+        setImmediate(() => {
+          try {
+            const session = store.processHookEvent(payload);
+            if (!session) return;
+            usageGuard.checkAndEnforce().catch(() => {});
+            store.dequeueCommands(session.id);
+          } catch {
+            // One bad event must not take the server down.
+          }
+        });
+        return;
+      }
+
+      // 3b. Hook script (SessionStart, older installs) and `amc run` wrapper events
       if (req.method === 'POST' && pathname === '/api/hook') {
         const payload = await readJsonBody(req);
+        const eventName = payload.hook_event_name || payload.event;
+        // `claude -p` / Agent SDK runs started by scripts and tools are not the dashboard's to
+        // manage: they get no room and are never held (their own tooling decides when to stop).
+        const automated =
+          isAutomatedEntrypoint(payload.entrypoint) ||
+          isAutomatedEntrypoint(transcriptEntrypoint(payload.transcript_path));
+        if (eventName === 'UserPromptSubmit' && usageGuard.isHolding() && !automated) {
+          // The hook script turns this into a {"decision":"block"} answer for Claude Code.
+          return sendJson(res, 200, { ok: true, hold: holdInfo() });
+        }
         const session = store.processHookEvent(payload);
+        if (!session) return sendJson(res, 200, { ok: true, ignored: 'automated' });
+        usageGuard.checkAndEnforce().catch(() => {});
         const pendingCommands = store.dequeueCommands(session.id);
         return sendJson(res, 200, {
           ok: true,
@@ -275,6 +429,105 @@ function createMissionControlServer(options = {}) {
           body.sessionId,
           body
         );
+        return sendJson(res, 200, result);
+      }
+
+      // 3b. Older messages of a room's own session, a page at a time (reading back past the preview)
+      if (req.method === 'GET' && pathname === '/api/session/conversation') {
+        const session = store.sessions.get(parsedUrl.searchParams.get('sessionId') || '');
+        if (!session) return sendJson(res, 404, { ok: false, error: 'Session not found' });
+        const int = (name) => {
+          const raw = parsedUrl.searchParams.get(name);
+          if (raw === null || raw === '') return null;
+          const n = Number(raw);
+          return Number.isSafeInteger(n) && n >= 0 ? n : NaN;
+        };
+        const before = int('before');
+        const since = int('since');
+        const limit = int('limit');
+        if ([before, since, limit].some(Number.isNaN) || (limit !== null && (limit < 1 || limit > 200))) {
+          return sendJson(res, 400, { ok: false, error: 'Invalid paging parameters' });
+        }
+        // Only a Claude transcript under ~/.claude/projects is ever read here.
+        const projectsDir = path.resolve(os.homedir(), '.claude', 'projects') + path.sep;
+        const file = session.transcriptPath ? path.resolve(String(session.transcriptPath)) : null;
+        if (!file || !file.toLowerCase().startsWith(projectsDir.toLowerCase()) || !file.endsWith('.jsonl') || !fs.existsSync(file)) {
+          return sendJson(res, 200, { ok: true, lines: [], from: 0, done: true });
+        }
+        const page = readConversationPage(file, {
+          before: before === null ? undefined : before,
+          since,
+          limit: limit || 40,
+        });
+        return sendJson(res, 200, { ok: true, ...page });
+      }
+
+      // 4a. Attach a file or image to the next message (raw body, one file per request)
+      if (req.method === 'POST' && pathname === '/api/session/attachment') {
+        // Not a CORS-safelisted type, so a browser on another origin must preflight (and is refused).
+        // Refusals below leave the body unread, so the connection is closed rather than reused.
+        const refuse = (status, error) => {
+          res.setHeader('Connection', 'close');
+          req.resume();
+          return sendJson(res, status, { ok: false, error });
+        };
+        if (!/^application\/octet-stream\b/i.test(String(req.headers['content-type'] || ''))) {
+          return refuse(415, 'Content-Type must be application/octet-stream');
+        }
+        const sessionId = parsedUrl.searchParams.get('sessionId') || '';
+        if (!store.sessions.has(sessionId)) {
+          return refuse(404, 'Session not found');
+        }
+        if (Number(req.headers['content-length'] || 0) > MAX_ATTACHMENT_BYTES) {
+          return refuse(413, 'ไฟล์ใหญ่เกิน 20 MB');
+        }
+        try {
+          const saved = await saveAttachment(req, {
+            dataDir: store.dataDir,
+            sessionId,
+            name: parsedUrl.searchParams.get('name') || 'file',
+          });
+          return sendJson(res, 200, { ok: true, ...saved });
+        } catch (err) {
+          const status = err.statusCode || 500;
+          res.setHeader('Connection', 'close');
+          return sendJson(res, status, {
+            ok: false,
+            error: status === 413 ? 'ไฟล์ใหญ่เกิน 20 MB' : status === 400 ? 'ไฟล์ว่าง' : 'บันทึกไฟล์ไม่สำเร็จ',
+          });
+        }
+      }
+
+      // 4c. Empty the terminal's input box (text left unsent there)
+      if (req.method === 'POST' && pathname === '/api/session/clear-input') {
+        const body = await readJsonBody(req);
+        if (!body.sessionId || !store.sessions.has(body.sessionId)) {
+          return sendJson(res, 404, { ok: false, error: 'Session not found' });
+        }
+        return sendJson(res, 200, await bridge.clearTerminalInput(body.sessionId));
+      }
+
+      // 4b. Apply a multi-select answer in one go (ticks collected on the dashboard)
+      if (req.method === 'POST' && pathname === '/api/session/multi-select') {
+        const body = await readJsonBody(req);
+        const pos = (v) => Number.isInteger(v) && v >= 1 && v <= MAX_PROMPT_POSITION;
+        const toggles = body.toggles;
+        if (
+          !body.sessionId ||
+          !Array.isArray(toggles) ||
+          toggles.length > MAX_PROMPT_POSITION ||
+          !toggles.every(pos) ||
+          new Set(toggles).size !== toggles.length ||
+          !pos(body.currentIndex) ||
+          !(body.nextIndex == null || pos(body.nextIndex))
+        ) {
+          return sendJson(res, 400, { ok: false, error: 'Invalid multi-select answer' });
+        }
+        const result = await bridge.applyMultiSelect(body.sessionId, {
+          toggles,
+          currentIndex: body.currentIndex,
+          nextIndex: body.nextIndex || null,
+        });
         return sendJson(res, 200, result);
       }
 
@@ -318,6 +571,14 @@ function createMissionControlServer(options = {}) {
             error: 'Missing sessionId or command',
           });
         }
+        // During a quota hold only approvals go through; new prompts wait for the reset.
+        if (usageGuard.isHolding() && !body.isApproval && !body.force) {
+          return sendJson(res, 423, {
+            ok: false,
+            held: true,
+            error: 'พักงานรอ usage reset อยู่ คำสั่งใหม่ยังไม่ถูกส่ง',
+          });
+        }
         const result = await bridge.dispatchCommand(
           body.sessionId,
           body.command,
@@ -325,6 +586,7 @@ function createMissionControlServer(options = {}) {
             mode: body.mode || 'auto',
             isApproval: Boolean(body.isApproval),
             runHeadless: Boolean(body.runHeadless),
+            clearFirst: Boolean(body.clearFirst),
           }
         );
         return sendJson(res, 200, result);
@@ -417,6 +679,17 @@ function createMissionControlServer(options = {}) {
           store.clearHistoryOnly();
           return sendJson(res, 200, { ok: true });
         }
+        if (body.action === 'reorder') {
+          const order = body.order;
+          if (
+            !Array.isArray(order) ||
+            order.length > MAX_REORDER_IDS ||
+            !order.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 200)
+          ) {
+            return sendJson(res, 400, { ok: false, error: 'order must be a list of room ids' });
+          }
+          return sendJson(res, 200, { ok: true, moved: store.reorderSessions(order) });
+        }
         if (!body.sessionId) {
           return sendJson(res, 400, { ok: false, error: 'Missing sessionId' });
         }
@@ -432,15 +705,202 @@ function createMissionControlServer(options = {}) {
 
       // 12. Check / Install Claude Code Hooks
       if (req.method === 'GET' && pathname === '/api/hooks/status') {
-        return sendJson(res, 200, { ok: true, ...checkHooksStatus() });
+        return sendJson(res, 200, { ok: true, ...ownHooksStatus() });
       }
       if (req.method === 'POST' && pathname === '/api/hooks/install') {
-        const status = installClaudeHooks();
+        // The HTTP hooks must point at this server: its port and its token.
+        const status = installClaudeHooks({ port: server.address().port, token });
         return sendJson(res, 200, { ok: true, ...status });
       }
       if (req.method === 'POST' && pathname === '/api/hooks/uninstall') {
         const status = uninstallClaudeHooks();
         return sendJson(res, 200, { ok: true, ...status });
+      }
+
+      // 13. Web IDE: List Modified / Touched Workspace Files
+      if (req.method === 'GET' && pathname === '/api/session/files') {
+        const sessionId = parsedUrl.searchParams.get('sessionId');
+        const session = sessionId ? store.sessions.get(sessionId) : null;
+        if (!session) {
+          return sendJson(res, 404, { ok: false, error: 'Session not found' });
+        }
+        const files = getWorkspaceChangedFiles(
+          session.cwd,
+          session.modifiedFiles
+        );
+        return sendJson(res, 200, { ok: true, cwd: session.cwd, files });
+      }
+
+      // 14. Web IDE: Read File Content & Unified Git Diff
+      if (req.method === 'GET' && pathname === '/api/session/file-content') {
+        const sessionId = parsedUrl.searchParams.get('sessionId');
+        const relFile = parsedUrl.searchParams.get('file');
+        const session = sessionId ? store.sessions.get(sessionId) : null;
+        if (!session || !relFile) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: 'Missing sessionId or file',
+          });
+        }
+        const detail = getWorkspaceFileDetail(session.cwd, relFile);
+        return sendJson(res, detail.ok ? 200 : 403, detail);
+      }
+
+      // 15. Web IDE: Open File or Workspace in VS Code (`code --goto`)
+      if (req.method === 'POST' && pathname === '/api/session/open-vscode') {
+        const body = await readJsonBody(req);
+        const session = body.sessionId
+          ? store.sessions.get(body.sessionId)
+          : null;
+        if (!session || !session.cwd) {
+          return sendJson(res, 404, { ok: false, error: 'Session not found' });
+        }
+        const baseDir = path.resolve(session.cwd);
+        let targetPath = baseDir;
+        if (body.file && typeof body.file === 'string') {
+          const candidate = path.resolve(baseDir, body.file);
+          if (
+            candidate !== baseDir &&
+            !candidate.startsWith(baseDir + path.sep)
+          ) {
+            return sendJson(res, 403, {
+              ok: false,
+              error: 'Path traversal denied',
+            });
+          }
+          targetPath = candidate;
+        }
+        // A vscode:// link opens through the OS protocol handler, so no shell is involved.
+        const stat = fs.existsSync(targetPath) ? fs.statSync(targetPath) : null;
+        const line = Math.max(1, Math.min(1e6, Math.floor(Number(body.line) || 1)));
+        const uriPath = targetPath
+          .replace(/\\/g, '/')
+          .split('/')
+          .map((seg) => (/^[A-Za-z]:$/.test(seg) ? seg : encodeURIComponent(seg)))
+          .join('/')
+          .replace(/^\/+/, '');
+        const uri =
+          stat && stat.isFile()
+            ? `vscode://file/${uriPath}:${line}:1`
+            : `vscode://file/${uriPath}`;
+        return sendJson(res, 200, {
+          ok: true,
+          targetPath,
+          uri,
+          message: `เปิด ${path.basename(targetPath)} ใน VS Code`,
+        });
+      }
+
+      // 16. Model & Effort Switcher (`/model` and `/effort`)
+      if (req.method === 'POST' && pathname === '/api/session/model-effort') {
+        const body = await readJsonBody(req);
+        const session = body.sessionId
+          ? store.sessions.get(body.sessionId)
+          : null;
+        if (!session) {
+          return sendJson(res, 404, { ok: false, error: 'Session not found' });
+        }
+        // Aliases Claude Code's /model understands, or a full model ID. No spaces are allowed,
+        // so the value can never carry extra input into the terminal.
+        const MODEL_ALIASES = new Set(['default', 'opus', 'sonnet', 'haiku', 'opusplan']);
+        const isAllowedModel = (m) =>
+          MODEL_ALIASES.has(m) || /^claude-[a-z0-9]+(-[a-z0-9]+){1,4}(\[1m\])?$/.test(m);
+        const ALLOWED_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
+        const patch = {};
+        const dispatched = [];
+
+        if (body.model && isAllowedModel(String(body.model).toLowerCase())) {
+          const m = String(body.model).toLowerCase();
+          patch.model = m;
+          const r = await bridge.dispatchCommand(session.id, `/model ${m}`);
+          dispatched.push({ type: 'model', value: m, delivered: r.delivered });
+        }
+        if (
+          body.effort &&
+          ALLOWED_EFFORTS.has(String(body.effort).toLowerCase())
+        ) {
+          const eff = String(body.effort).toLowerCase();
+          patch.effort = eff;
+          const r = await bridge.dispatchCommand(session.id, `/effort ${eff}`);
+          dispatched.push({
+            type: 'effort',
+            value: eff,
+            delivered: r.delivered,
+          });
+        }
+
+        if (dispatched.length === 0) {
+          return sendJson(res, 400, { ok: false, error: 'model หรือ effort ไม่ถูกต้อง' });
+        }
+        // Only remember what actually reached the terminal; the transcript corrects it later.
+        const deliveredPatch = {};
+        for (const d of dispatched) {
+          if (d.delivered) deliveredPatch[d.type] = d.value;
+        }
+        if (Object.keys(deliveredPatch).length > 0) {
+          store.updateSession(session.id, deliveredPatch);
+        }
+
+        return sendJson(res, 200, {
+          ok: true,
+          delivered: dispatched.every((d) => d.delivered),
+          dispatched,
+          session: store.sessions.get(session.id),
+        });
+      }
+
+      // 17. Usage Quota & <8% Auto-Pause Guard Endpoints
+      if (req.method === 'GET' && pathname === '/api/usage') {
+        return sendJson(res, 200, {
+          ok: true,
+          usage: usageGuard.getUsageSummary(),
+        });
+      }
+      if (req.method === 'POST' && pathname === '/api/usage/config') {
+        const body = await readJsonBody(req);
+        if (body.action === 'simulate-low-quota') {
+          return sendJson(res, 200, await usageGuard.simulateLowQuota(6.5));
+        }
+        if (body.action === 'reset-and-resume') {
+          return sendJson(res, 200, await usageGuard.resumeAll());
+        }
+        const summary = await usageGuard.updateConfig(body);
+        return sendJson(res, 200, { ok: true, usage: summary });
+      }
+
+      // 18. Statusline bridge: real plan usage (rate_limits) and model from Claude Code
+      if (req.method === 'POST' && pathname === '/api/usage/observed') {
+        const body = await readJsonBody(req);
+        const accepted = usageGuard.observe(body.rate_limits);
+        const session = store._findMatchingSession({
+          pid: Number(body.claude_pid) || undefined,
+          claudeSessionId: typeof body.session_id === 'string' ? body.session_id : undefined,
+          cwd: body.cwd,
+          matchFolder: true,
+        });
+        if (session) {
+          const modelId =
+            body.model && typeof body.model.id === 'string' ? body.model.id : null;
+          if (modelId && modelId.length < 80) session.model = modelId;
+          const cw = body.context_window;
+          if (cw && Number.isFinite(Number(cw.used_percentage))) {
+            session.liveContext = {
+              usedPct: Math.max(0, Math.min(100, Number(cw.used_percentage))),
+              size: Number(cw.context_window_size) || null,
+              at: new Date().toISOString(),
+            };
+          }
+        }
+        if (accepted || session) {
+          store._emitChange('usage_observed', {});
+          usageGuard.checkAndEnforce().catch(() => {});
+        }
+        return sendJson(res, 200, { ok: true, accepted });
+      }
+      if (req.method === 'POST' && pathname === '/api/statusline/install') {
+        const status = installStatusline();
+        return sendJson(res, status.error ? 500 : 200, { ok: !status.error, ...status });
       }
 
       if (pathname.startsWith('/api/')) {
@@ -481,11 +941,12 @@ function createMissionControlServer(options = {}) {
 
   server.on('close', () => {
     if (scanner) scanner.stop();
+    if (usageGuard) usageGuard.stop();
     if (broadcastTimer) clearTimeout(broadcastTimer);
     store.flush();
   });
 
-  return { server, store, bridge, scanner, token };
+  return { server, store, bridge, scanner, usageGuard, token };
 }
 
 module.exports = { createMissionControlServer };

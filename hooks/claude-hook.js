@@ -46,6 +46,11 @@ process.stdin.on('end', () => {
     pane_id: process.env.WEZTERM_PANE || process.env.TMUX_PANE || null,
     wt_session: process.env.WT_SESSION || null,
     room: process.env.AMC_ROOM || null,
+    // Claude Code exports these to the processes it starts: the PID of the claude process (the
+    // dashboard's room for that terminal) and how it was started ("cli" in a terminal; "sdk-*"
+    // for `claude -p` and the Agent SDK, which get no room of their own).
+    claude_pid: Number(process.env.CLAUDE_PID) || null,
+    entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT || null,
     timestamp: new Date().toISOString(),
   };
 
@@ -65,8 +70,25 @@ process.stdin.on('end', () => {
       timeout: 1200,
     },
     (res) => {
-      res.resume();
-      process.exit(0);
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      res.on('end', () => {
+        // During a usage hold the server asks us to hold new prompts until the window resets.
+        if (enriched.hook_event_name === 'UserPromptSubmit') {
+          try {
+            const reply = JSON.parse(data);
+            if (reply && reply.hold && reply.hold.reason) {
+              process.stdout.write(
+                JSON.stringify({ decision: 'block', reason: String(reply.hold.reason) })
+              );
+            }
+          } catch {}
+        }
+        process.exit(0);
+      });
     }
   );
 

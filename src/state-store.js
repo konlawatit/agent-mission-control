@@ -7,8 +7,21 @@ const {
   parseTranscriptTail,
   summarizeText,
   inferWorkflowFromTool,
+  launchCwdFor,
+  transcriptEntrypoint,
+  isAutomatedEntrypoint,
+  findTranscriptById,
+  findTranscriptsForCwd,
 } = require('./transcript-parser');
 const { parseConsoleScreen } = require('./console-scanner');
+const { sanitizeQuestions, promptFromQuestions, mergeScreenPrompt, sameText } = require('./ask-prompt');
+
+function askStatusLabel(prompt) {
+  const n = Array.isArray(prompt.questions) ? prompt.questions.length : 0;
+  return n > 1
+    ? `รอคุณตอบ ${n} คำถาม`
+    : `รอคุณเลือกตอบ (${(prompt.options || []).length} ตัวเลือก)`;
+}
 
 const STAGES = [
   { index: 0, id: 'plan', label: '1. Plan & Explore' },
@@ -52,6 +65,42 @@ function sanitizeCwd(rawCwd) {
 function normalizeCwdKey(cwd) {
   const clean = sanitizeCwd(cwd);
   return clean ? clean.toLowerCase() : '';
+}
+
+/**
+ * What a Notification hook means: 'attention' (a permission prompt or a question is on screen),
+ * 'idle' ("Claude is waiting for your input" after a turn), or 'info'. Uses Claude Code's
+ * `notification_type` when sent, else the message.
+ */
+function notificationKind(payload) {
+  const type = String(payload.notification_type || '').toLowerCase();
+  if (type) {
+    if (/permission|elicitation/.test(type)) return 'attention';
+    return /idle/.test(type) ? 'idle' : 'info';
+  }
+  const message = String(payload.message || '');
+  if (/waiting for your input/i.test(message)) return 'idle';
+  if (/permission|approv/i.test(message)) return 'attention';
+  return 'info';
+}
+
+function sameDir(a, b) {
+  const ka = normalizeCwdKey(a).replace(/\//g, '\\');
+  const kb = normalizeCwdKey(b).replace(/\//g, '\\');
+  return Boolean(ka) && ka === kb;
+}
+
+/**
+ * Rooms that a `claude -p` / Agent SDK run created for itself (before such runs were told apart):
+ * a room whose own id is a Claude session id whose transcript says it was not started in a terminal.
+ */
+function isAutomatedRoom(session) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(String(session.id || ''))) return false;
+  const own =
+    session.transcriptPath && path.basename(String(session.transcriptPath), '.jsonl') === session.id
+      ? session.transcriptPath
+      : findTranscriptById(session.id);
+  return isAutomatedEntrypoint(transcriptEntrypoint(own));
 }
 
 class StateStore extends EventEmitter {
@@ -105,9 +154,11 @@ class StateStore extends EventEmitter {
             if (s.screenPreview && s.screenPreview.includes('\uFFFD')) {
               s.screenPreview = null;
             }
+            // Rooms an automated `claude -p` / SDK run made for itself are not rooms anyone opened.
+            if (isAutomatedRoom(s)) continue;
             this.sessions.set(s.id, s);
           }
-          this._deduplicateSessionsByCwd();
+          this._deduplicateSessions();
           this._enrichAllFromTranscripts();
           this._saveToDisk();
         }
@@ -122,24 +173,25 @@ class StateStore extends EventEmitter {
    * Merges any sessions sharing the same normalized `cwd` into a single canonical Room,
    * preserving previous interactions inside `primary.taskHistory`.
    */
-  _deduplicateSessionsByCwd() {
-    const byCwd = new Map();
-    const unknownCwdSessions = [];
-
+  /**
+   * Merges rooms that are the same session seen twice (e.g. the scanner's room for a terminal
+   * and a room a hook made before the pid was known, or a resumed session's closed room and its
+   * new terminal). Sharing a folder is not enough: each session in a project keeps its own room.
+   */
+  _deduplicateSessions() {
+    const groups = new Map();
+    const add = (key, s) => {
+      if (!groups.has(key)) groups.set(key, new Set());
+      groups.get(key).add(s);
+    };
     for (const s of Array.from(this.sessions.values())) {
       if (s.cwd) s.cwd = sanitizeCwd(s.cwd);
-      const key = normalizeCwdKey(s.cwd);
-      if (!key) {
-        unknownCwdSessions.push(s);
-        continue;
-      }
-      if (!byCwd.has(key)) {
-        byCwd.set(key, []);
-      }
-      byCwd.get(key).push(s);
+      if (s.claudeSessionId) add(`sid:${s.claudeSessionId}`, s);
+      if (s.pid && s.lifecycle !== 'history') add(`pid:${s.pid}`, s);
     }
 
-    for (const [, group] of byCwd.entries()) {
+    for (const set of groups.values()) {
+      const group = Array.from(set).filter((s) => this.sessions.get(s.id) === s);
       if (group.length <= 1) continue;
 
       // Sort so the most recently updated / active session is primary
@@ -169,6 +221,9 @@ class StateStore extends EventEmitter {
     }
     if (source.pid && !target.pid) {
       target.pid = source.pid;
+    }
+    if (Number.isFinite(source.sortOrder) && !Number.isFinite(target.sortOrder)) {
+      target.sortOrder = source.sortOrder; // keep the room where the user placed it
     }
     // If source had a real goal/tldr and target has a default one, adopt it;
     // otherwise archive source's goal/tldr into target.taskHistory!
@@ -266,13 +321,37 @@ class StateStore extends EventEmitter {
     }
   }
 
+  /**
+   * The transcript this room shows: its own (named by a hook) or, until a hook names it, the
+   * newest one in its folder that no other room is showing. Never several sessions merged.
+   */
+  _transcriptFor(session) {
+    if (session.transcriptPath && fs.existsSync(session.transcriptPath)) return session.transcriptPath;
+    if (!session.cwd) return null;
+    const key = (p) => path.resolve(String(p)).toLowerCase();
+    const taken = new Set();
+    for (const s of this.sessions.values()) {
+      if (s !== session && s.transcriptPath) taken.add(key(s.transcriptPath));
+    }
+    const free = findTranscriptsForCwd(session.cwd).find((t) => !taken.has(key(t.path)));
+    return free ? free.path : null;
+  }
+
   _enrichSessionFromTranscript(session) {
     if (!session) return;
-    const parsed = parseTranscriptTail(session.transcriptPath, session.cwd);
+    const target = this._transcriptFor(session);
+    if (!target) return;
+    const parsed = parseTranscriptTail(target, null);
     if (!parsed) return;
 
     if (parsed.transcriptPath) {
       session.transcriptPath = parsed.transcriptPath;
+    }
+    if (parsed.detectedModel) {
+      session.model = parsed.detectedModel;
+    }
+    if (parsed.tokenUsage) {
+      session.tokenUsage = parsed.tokenUsage;
     }
     if (
       parsed.lastAssistantText &&
@@ -285,6 +364,36 @@ class StateStore extends EventEmitter {
     }
     if (parsed.utf8Preview && !session.interactivePrompt) {
       session.screenPreview = parsed.utf8Preview;
+      // Where that preview starts in the transcript; older messages are paged from here.
+      session.previewFrom = Number.isFinite(parsed.previewFrom) ? parsed.previewFrom : null;
+    }
+    // The open AskUserQuestion, so the screen's garbled copy can be replaced (see ask-prompt).
+    if (parsed.pendingAsk) {
+      session.pendingAsk = parsed.pendingAsk;
+    } else if (
+      session.pendingAsk &&
+      parsed.turnStateAt &&
+      (!session.pendingAsk.at || Date.parse(parsed.turnStateAt) > Date.parse(session.pendingAsk.at))
+    ) {
+      session.pendingAsk = null; // the transcript has moved past it
+    }
+    // When the transcript last moved (a tool ran, a reply, an interrupt): a prompt reported before
+    // that is over.
+    if (parsed.turnStateAt) session.lastTurnStateAt = parsed.turnStateAt;
+    // Messages waiting in Claude's queue, and text it put back into the input box.
+    session.queuedMessages = Array.isArray(parsed.queuedMessages) ? parsed.queuedMessages : [];
+    session.restoredInput = parsed.restoredInput || null;
+    // A Claude session started before the hooks were installed never sends Stop, so a room the
+    // dashboard set to "working" would stay that way. The transcript records when the turn ended.
+    // Only a turn end newer than the last working signal (or the room itself) counts.
+    const workingSince = session.workingSignalAt || session.createdAt;
+    if (
+      session.status === 'working' &&
+      parsed.turnState === 'done' &&
+      parsed.turnStateAt &&
+      (!workingSince || Date.parse(parsed.turnStateAt) > Date.parse(workingSince))
+    ) {
+      this._finishTurn(session, parsed.turnStateAt, parsed.lastAssistantFullText);
     }
     if (Array.isArray(parsed.turnHistory) && parsed.turnHistory.length > 0) {
       // Populate internal room history from all turns in this project's transcripts!
@@ -371,34 +480,41 @@ class StateStore extends EventEmitter {
    * IMPORTANT: Always match by normalized `cwd` FIRST!
    * That way, 1 project folder = 1 Room Card, even across multiple turns or new Claude session UUIDs!
    */
-  _findMatchingSession({ sessionId, pid, cwd }) {
-    if (cwd) {
-      const norm = normalizeCwdKey(cwd);
-      if (norm) {
-        for (const s of this.sessions.values()) {
-          if (normalizeCwdKey(s.cwd) === norm) {
-            return s;
-          }
-        }
-      }
-    }
+  /**
+   * A room is one Claude session in one terminal, not one folder: several sessions can run in
+   * the same project and each gets its own room. Identity, strongest first: the room id, the
+   * claude process (pid), the Claude session id. A folder alone (`matchFolder`) only identifies
+   * a room when exactly one open room there is still unclaimed, i.e. not tied to another
+   * process or session (a room opened from the dashboard before its terminal was seen, or a
+   * terminal whose hooks have not reported yet).
+   */
+  _findMatchingSession({ sessionId, pid, claudeSessionId, cwd, matchFolder = false }) {
+    const rooms = Array.from(this.sessions.values());
     if (sessionId && this.sessions.has(String(sessionId))) {
       return this.sessions.get(String(sessionId));
     }
     if (pid) {
-      for (const s of this.sessions.values()) {
-        if (s.pid && Number(s.pid) === Number(pid)) {
-          return s;
-        }
-      }
+      const byPid =
+        rooms.find((s) => s.lifecycle !== 'history' && Number(s.pid) === Number(pid)) ||
+        rooms.find((s) => s.pid && Number(s.pid) === Number(pid));
+      if (byPid) return byPid;
     }
-    if (pid && !cwd) {
-      const liveSessions = Array.from(this.sessions.values()).filter(
-        (s) => s.lifecycle === 'live'
+    const sid =
+      claudeSessionId || (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(String(sessionId || '')) ? String(sessionId) : null);
+    if (sid) {
+      const bySid = rooms.find((s) => s.claudeSessionId === sid);
+      if (bySid) return bySid;
+    }
+    if (matchFolder && cwd) {
+      const key = normalizeCwdKey(cwd);
+      const unclaimed = rooms.filter(
+        (s) =>
+          s.lifecycle !== 'history' &&
+          normalizeCwdKey(s.cwd) === key &&
+          (!pid || !s.pid) &&
+          (!sid || !s.claudeSessionId)
       );
-      if (liveSessions.length === 1) {
-        return liveSessions[0];
-      }
+      if (unclaimed.length === 1) return unclaimed[0];
     }
     return null;
   }
@@ -408,9 +524,12 @@ class StateStore extends EventEmitter {
     const existing = this._findMatchingSession({
       sessionId,
       pid: defaults.pid,
+      claudeSessionId: defaults.claudeSessionId,
       cwd: cleanCwd || undefined,
+      matchFolder: Boolean(defaults.matchFolder),
     });
     if (existing) {
+      if (defaults.pid && !existing.pid) existing.pid = defaults.pid;
       return existing;
     }
 
@@ -430,6 +549,7 @@ class StateStore extends EventEmitter {
       category: defaults.category ? sanitizeCwd(defaults.category) : category,
       tags: Array.isArray(defaults.tags) ? defaults.tags : [category],
       pinned: Boolean(defaults.pinned),
+      sortOrder: null, // manual position set by dragging in the dashboard; null = not placed yet
       lifecycle: defaults.lifecycle || 'live',
       isProcessAlive: true,
       cli: defaults.cli || 'claude-code',
@@ -465,6 +585,21 @@ class StateStore extends EventEmitter {
       taskHistory: Array.isArray(defaults.taskHistory)
         ? defaults.taskHistory
         : [],
+      model: defaults.model || 'opus',
+      effort: defaults.effort || 'high',
+      tokenUsage: defaults.tokenUsage || {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreateTokens: 0,
+        cacheReadTokens: 0,
+        thinkingTokens: 0,
+        totalTokens: 0,
+        contextTokens: 0,
+        contextWindowPct: 0,
+        estimatedCostUsd: 0,
+        messageCount: 0,
+      },
+      savedCheckpoint: defaults.savedCheckpoint || null,
       transcriptPath: defaults.transcriptPath || null,
       openCount: 1,
       createdAt: new Date().toISOString(),
@@ -494,7 +629,7 @@ class StateStore extends EventEmitter {
       if (!item || !item.pid || !item.screen) continue;
       const numericPid = Number(item.pid);
 
-      const parsed = parseConsoleScreen(item.screen);
+      const parsed = parseConsoleScreen(item.screen, { cursorRow: item.cursorRow, cursorCol: item.cursorCol });
       if (!parsed) continue;
 
       // Authoritative OS-level PEB `item.cwd` takes precedence over screen-scraped `parsed.cwd`!
@@ -517,6 +652,8 @@ class StateStore extends EventEmitter {
         .filter(Boolean)
         .join(' ');
 
+      // One room per terminal: a new claude process in a folder that already has a room gets
+      // its own, unless that room is still unclaimed (opened from the dashboard, no pid yet).
       const session = this.getOrCreateSession(`claude-pid-${numericPid}`, {
         pid: numericPid,
         cwd: cwd || undefined,
@@ -524,9 +661,12 @@ class StateStore extends EventEmitter {
         project: cwd ? project : 'Terminal Session',
         category: cwd ? category : 'CLI',
         cli: cliLabel,
+        matchFolder: true,
       });
 
       const prevStateSig = JSON.stringify({
+        input: session.terminalInput,
+        queued: session.queuedMessages,
         lifecycle: session.lifecycle,
         status: session.status,
         pid: session.pid,
@@ -578,16 +718,50 @@ class StateStore extends EventEmitter {
       }
 
       if (parsed.interactivePrompt) {
-        session.interactivePrompt = parsed.interactivePrompt;
+        // Claude's own question text replaces the screen's (Thai arrives garbled from the console).
+        const prompt = mergeScreenPrompt(parsed.interactivePrompt, session.pendingAsk);
+        // A permission prompt: its options read fine from the screen, but the command shown with
+        // it garbles Thai; use the hook's exact copy instead of any garbled line.
+        const perm = session.permissionDetail;
+        if (prompt.source !== 'claude' && perm && session.hookPromptAt) {
+          const clean = (prompt.context || []).filter((l) => !l.includes('�') && !perm.text.includes(l.trim()));
+          prompt.context = [perm.text, ...clean].slice(0, 5);
+          if (prompt.question.includes('�')) prompt.question = `อนุญาตให้ ${perm.tool} ทำงานนี้หรือไม่?`;
+        }
+        session.interactivePrompt = prompt;
+        session.promptOnScreen = true;
         session.status = 'needs_input';
-        session.statusLabel = `รอคุณเลือกตอบ (${parsed.interactivePrompt.options.length} ตัวเลือก)`;
-        session.pendingAction = parsed.interactivePrompt.question;
-        session.tldr = `⚠️ ${parsed.interactivePrompt.question} — คลิกเลือกตัวเลือก (${parsed.interactivePrompt.options
+        session.statusLabel = askStatusLabel(prompt);
+        session.pendingAction = prompt.question;
+        session.tldr = `⚠️ ${prompt.question} — คลิกเลือกตัวเลือก (${prompt.options
           .map((o) => `${o.number}. ${o.label}`)
           .join(' / ')}) จากด้านล่างได้เลย`;
+      } else if (session.pendingAsk) {
+        // The transcript says Claude is still waiting on its questions even though this screen
+        // layout wasn't recognised: keep the room waiting, with the terminal's position unknown.
+        session.interactivePrompt = {
+          ...promptFromQuestions(session.pendingAsk.questions),
+          activeQuestion: -1,
+          currentIndex: 0,
+          options: [],
+        };
+        session.status = 'needs_input';
+        session.statusLabel = askStatusLabel(session.interactivePrompt);
+        session.pendingAction = session.pendingAsk.questions[0].question;
+      } else if (
+        session.hookPromptAt &&
+        !session.promptOnScreen &&
+        !(session.lastTurnStateAt && Date.parse(session.lastTurnStateAt) > Date.parse(session.hookPromptAt))
+      ) {
+        // A hook reported a permission prompt this screen hasn't shown (not drawn yet, or a
+        // layout the parser doesn't know). Clearing it here made the card flash and vanish; it
+        // stays until it has been seen and gone, or the transcript moves past it.
       } else if (session.interactivePrompt) {
         session.interactivePrompt = null;
         session.pendingAction = null;
+        session.hookPromptAt = null;
+        session.promptOnScreen = false;
+        session.permissionDetail = null;
         if (session.status === 'needs_input') {
           session.status = 'idle';
           session.statusLabel = 'พร้อมรับคำสั่ง';
@@ -595,7 +769,23 @@ class StateStore extends EventEmitter {
         }
       }
 
+      // What is sitting unsent in the terminal's input box (null = empty or not on screen).
+      if (parsed.inputText !== null && parsed.inputText !== undefined) {
+        if (!parsed.inputText) {
+          session.terminalInput = null;
+        } else {
+          // The screen garbles Thai; when it is text we know (typed by the dashboard, or put back
+          // from Claude's queue), keep the exact copy too.
+          const known = [session.restoredInput && session.restoredInput.text, session.lastTypedText].filter(Boolean);
+          const exact = known.find((k) => sameText(parsed.inputText, k)) || null;
+          session.terminalInput = { text: parsed.inputText.slice(0, 4000), exact: exact ? exact.slice(0, 4000) : null };
+        }
+      }
+      session.terminalBusy = Boolean(parsed.busy);
+
       const nextStateSig = JSON.stringify({
+        input: session.terminalInput,
+        queued: session.queuedMessages,
         lifecycle: session.lifecycle,
         status: session.status,
         pid: session.pid,
@@ -612,7 +802,7 @@ class StateStore extends EventEmitter {
       }
     }
 
-    this._deduplicateSessionsByCwd();
+    this._deduplicateSessions();
 
     for (const session of this.sessions.values()) {
       if (
@@ -647,38 +837,85 @@ class StateStore extends EventEmitter {
     }
   }
 
+  /**
+   * The room a hook event belongs to, or null when it belongs to none (an automated session).
+   *
+   * Order: the claude process itself (CLAUDE_PID, the scanner's room for that terminal), then
+   * the room already bound to this Claude session, then the folder the session was STARTED in
+   * (from its transcript folder). The hook's `cwd` follows Bash `cd`, so matching on it attached
+   * a session that had cd'ed into a worktree to that worktree's room.
+   */
+  _roomForHook(payload, { rawSessionId, isUuid, roomCwd, automated }) {
+    const rooms = Array.from(this.sessions.values());
+    if (automated) {
+      // `claude -p` / the SDK: only a room that is already this session's (the dashboard's own
+      // background run) takes its events; a room that such a run created itself is dropped.
+      const owner = isUuid && rooms.find((s) => s.claudeSessionId === rawSessionId && s.id !== rawSessionId);
+      if (!owner && isUuid && this.sessions.has(rawSessionId)) {
+        this.sessions.delete(rawSessionId);
+        this._emitChange('session_removed', { sessionId: rawSessionId });
+      }
+      return owner || null;
+    }
+    const claudePid = Number(payload.claude_pid);
+    if (Number.isInteger(claudePid) && claudePid > 0) {
+      const byPid = rooms.find((s) => s.lifecycle !== 'history' && Number(s.pid) === claudePid);
+      if (byPid) return byPid;
+    }
+    if (isUuid) {
+      const bound = rooms.find(
+        (s) => (s.claudeSessionId === rawSessionId || s.id === rawSessionId) && (!roomCwd || sameDir(s.cwd, roomCwd))
+      );
+      if (bound) return bound;
+    }
+    return undefined; // fall back to getOrCreateSession by folder
+  }
+
   processHookEvent(payload = {}) {
     const rawSessionId = payload.session_id || payload.sessionId || null;
     const isUuid =
       rawSessionId && /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(String(rawSessionId));
     const cleanCwd = sanitizeCwd(payload.cwd);
+    // The folder the session was started in; the hook's own cwd moves with Bash `cd`.
+    const roomCwd = launchCwdFor(cleanCwd, payload.transcript_path) || cleanCwd;
+    const automated =
+      isAutomatedEntrypoint(payload.entrypoint) ||
+      isAutomatedEntrypoint(transcriptEntrypoint(payload.transcript_path));
 
     const lookupId =
       rawSessionId ||
       payload.room_id ||
       (payload.pid ? `claude-pid-${payload.pid}` : null) ||
-      `cwd-${Buffer.from(String(cleanCwd || 'default')).toString('hex').slice(0, 10)}`;
+      `cwd-${Buffer.from(String(roomCwd || 'default')).toString('hex').slice(0, 10)}`;
 
-    const session = this.getOrCreateSession(lookupId, {
-      cwd: cleanCwd,
-      room: payload.room,
-      claudeSessionId: isUuid ? String(rawSessionId) : null,
-      cli:
-        payload.cli ||
-        (payload.pane_id ? `claude (pane #${payload.pane_id})` : 'claude-code'),
-      paneId: payload.pane_id || null,
-      wtSession: payload.wt_session || null,
-      pid: payload.pid || null,
-    });
+    const matched = this._roomForHook(payload, { rawSessionId, isUuid, roomCwd, automated });
+    if (matched === null) return null; // an automated session nobody owns: no room
+    const session =
+      matched ||
+      this.getOrCreateSession(lookupId, {
+        cwd: roomCwd,
+        room: payload.room,
+        claudeSessionId: isUuid ? String(rawSessionId) : null,
+        cli:
+          payload.cli ||
+          (payload.pane_id ? `claude (pane #${payload.pane_id})` : 'claude-code'),
+        paneId: payload.pane_id || null,
+        wtSession: payload.wt_session || null,
+        pid: payload.pid || Number(payload.claude_pid) || null,
+        // Without a pid, a session claims the one open room in its folder that no session owns yet.
+        matchFolder: true,
+      });
 
     const now = new Date().toISOString();
     session.updatedAt = now;
     if (isUuid) {
       session.claudeSessionId = String(rawSessionId);
     }
-    if (cleanCwd) {
-      session.cwd = cleanCwd;
-      const meta = this._inferProjectMeta(cleanCwd);
+    // A room keeps the folder it was opened in; only a room without one (or a placeholder
+    // "Claude Tab" from the scanner) takes it from the event.
+    if (roomCwd && (!session.cwd || String(session.room || '').startsWith('Claude Tab'))) {
+      session.cwd = roomCwd;
+      const meta = this._inferProjectMeta(roomCwd);
       session.project = meta.project;
       session.category = meta.category;
       if (!session.customNamed) {
@@ -692,6 +929,7 @@ class StateStore extends EventEmitter {
     if (payload.pane_id) session.paneId = payload.pane_id;
     if (payload.wt_session) session.wtSession = payload.wt_session;
     if (payload.pid && !session.pid) session.pid = payload.pid;
+    if (Number(payload.claude_pid) > 0 && !session.pid) session.pid = Number(payload.claude_pid);
     if (payload.transcript_path)
       session.transcriptPath = payload.transcript_path;
     if (typeof payload.wrapper_connected === 'boolean') {
@@ -740,30 +978,37 @@ class StateStore extends EventEmitter {
         payload.message ||
         'รับคำสั่งใหม่จากผู้ใช้';
       const newGoal = summarizeText(promptText, 160);
+      // Claude Code also submits its own messages as prompts (<task-notification> when a
+      // background task finishes, <system-reminder>, …): the room works on, but its goal stays
+      // what the person asked.
+      const injected = /^\s*</.test(String(promptText));
 
-      // Archive previous completed/active interaction into internal taskHistory before starting the new turn!
-      if (
-        session.goal &&
-        !DEFAULT_GOALS.has(session.goal) &&
-        session.goal !== newGoal
-      ) {
-        this._archiveTurnIntoHistory(session, {
-          goal: session.goal,
-          tldr: session.tldr,
-          timestamp: now,
-          sessionId: session.claudeSessionId || session.id,
-        });
+      if (injected) {
+        session.status = 'working';
+        session.statusLabel = 'กำลังทำงาน';
+        session.currentTool = 'Thinking...';
+      } else {
+        // Archive previous completed/active interaction into internal taskHistory before starting the new turn!
+        if (session.goal && !DEFAULT_GOALS.has(session.goal) && session.goal !== newGoal) {
+          this._archiveTurnIntoHistory(session, {
+            goal: session.goal,
+            tldr: session.tldr,
+            timestamp: now,
+            sessionId: session.claudeSessionId || session.id,
+          });
+        }
+
+        session.goal = newGoal;
+        session.status = 'working';
+        session.statusLabel = 'กำลังวางแผน & ทำงาน';
+        session.pendingAction = null;
+        session.interactivePrompt = null;
+        session.pendingAsk = null;
+        session.stageIndex = 0;
+        session.currentTool = 'Thinking...';
+        session.tldr = `รับคำสั่งใหม่: "${summarizeText(promptText, 120)}" — กำลังวิเคราะห์และวางแผนขั้นตอน`;
+        pushTimeline(`คำสั่งใหม่: ${summarizeText(promptText, 90)}`, 'Prompt', 'primary');
       }
-
-      session.goal = newGoal;
-      session.status = 'working';
-      session.statusLabel = 'กำลังวางแผน & ทำงาน';
-      session.pendingAction = null;
-      session.interactivePrompt = null;
-      session.stageIndex = 0;
-      session.currentTool = 'Thinking...';
-      session.tldr = `รับคำสั่งใหม่: "${summarizeText(promptText, 120)}" — กำลังวิเคราะห์และวางแผนขั้นตอน`;
-      pushTimeline(`คำสั่งใหม่: ${summarizeText(promptText, 90)}`, 'Prompt', 'primary');
     } else if (hookEvent === 'PreToolUse') {
       const inferred = inferWorkflowFromTool(toolName, toolInput);
       session.status = 'working';
@@ -787,31 +1032,7 @@ class StateStore extends EventEmitter {
         toolName === 'AskUserQuestion' ||
         (Array.isArray(toolInput.questions) && toolInput.questions.length > 0)
       ) {
-        const qObj = Array.isArray(toolInput.questions)
-          ? toolInput.questions[0]
-          : toolInput;
-        const opts = Array.isArray(qObj.options) ? qObj.options : [];
-        if (opts.length > 0) {
-          session.status = 'needs_input';
-          session.statusLabel = `รอคุณเลือกตอบ (${opts.length} ตัวเลือก)`;
-          session.pendingAction =
-            qObj.question || 'Claude ต้องการให้คุณเลือกคำตอบ';
-          session.interactivePrompt = {
-            question: qObj.question || 'กรุณาเลือกแนวทางที่ต้องการ:',
-            context: qObj.header ? [qObj.header] : [],
-            currentIndex: 1,
-            options: opts.map((o, idx) => ({
-              index: idx + 1,
-              number: String(idx + 1),
-              label:
-                typeof o === 'string'
-                  ? o
-                  : `${o.label || o.title || ''}${o.description ? ' — ' + o.description : ''}`,
-              active: idx === 0,
-            })),
-            footer: 'คลิกปุ่มตัวเลือกด้านล่างเพื่อส่งคำตอบเข้า Terminal ทันที',
-          };
-        }
+        this._openAsk(session, toolInput, payload.tool_use_id, now);
       }
 
       if (inferred.isSubAgent) {
@@ -858,6 +1079,7 @@ class StateStore extends EventEmitter {
     } else if (hookEvent === 'PostToolUse') {
       session.pendingAction = null;
       session.interactivePrompt = null;
+      if (toolName === 'AskUserQuestion') session.pendingAsk = null;
       if (toolName === 'Task' || toolName === 'Agent') {
         const subId = payload.tool_use_id;
         const target =
@@ -886,9 +1108,24 @@ class StateStore extends EventEmitter {
       }
       pushTimeline('Sub-Agent ทำงานเสร็จสิ้น 1 ตัว', 'SubagentStop', 'success');
     } else if (
+      (hookEvent === 'PermissionRequest' || hookEvent === 'Notification') &&
+      (toolName === 'AskUserQuestion' || session.pendingAsk)
+    ) {
+      // AskUserQuestion also goes through the permission flow ("Claude needs your permission").
+      // It is a question, not an approval: show the questions, never Yes/No.
+      if (!session.pendingAsk) this._openAsk(session, toolInput, payload.tool_use_id, now);
+      session.status = 'needs_input';
+    } else if (hookEvent === 'Notification' && notificationKind(payload) !== 'attention') {
+      // "Claude is waiting for your input" comes ~60 s after a turn ends: the room is idle, not
+      // asking anything. Treating it as a question flashed a fake approval card into "รอคุณ".
+      pushTimeline(summarizeText(payload.message || 'Claude รอคำสั่งถัดไป', 90), 'Notification', 'info');
+    } else if (
       hookEvent === 'PermissionRequest' ||
       hookEvent === 'Notification'
     ) {
+      // Kept until the prompt shows and goes on screen, or the transcript moves past it (see
+      // ingestConsoleScan): the first scan can run before the terminal has drawn the prompt.
+      session.hookPromptAt = now;
       const cmdDetail =
         (toolInput && (toolInput.command || toolInput.file_path)) ||
         payload.message ||
@@ -896,6 +1133,8 @@ class StateStore extends EventEmitter {
         (toolName
           ? `ขอสิทธิ์รัน ${toolName}`
           : 'Claude กำลังรอให้คุณเลือกคำตอบหรือกดยืนยัน');
+      // The exact command; the screen's copy garbles Thai (see ingestConsoleScan).
+      if (toolName) session.permissionDetail = { tool: String(toolName).slice(0, 80), text: String(cmdDetail).slice(0, 2000) };
 
       session.status = 'needs_input';
       session.statusLabel = 'รอคุณเลือกตอบ / Approve';
@@ -932,31 +1171,7 @@ class StateStore extends EventEmitter {
       }
       pushTimeline(session.tldr, 'Needs Choice', 'warning');
     } else if (hookEvent === 'Stop') {
-      session.status = 'done';
-      session.statusLabel = 'เสร็จสิ้น (รอบคำสั่ง)';
-      session.pendingAction = null;
-      session.interactivePrompt = null;
-      session.stageIndex = 3;
-      session.currentTool = 'Ready';
-      for (const sub of session.subAgents) {
-        if (sub.state === 'working') {
-          sub.state = 'done';
-          sub.tool = 'Completed';
-        }
-      }
-      if (payload.summary || payload.last_assistant_message) {
-        session.tldr = summarizeText(
-          payload.summary || payload.last_assistant_message,
-          220
-        );
-      }
-      this._archiveTurnIntoHistory(session, {
-        goal: session.goal,
-        tldr: session.tldr,
-        timestamp: now,
-        sessionId: session.claudeSessionId || session.id,
-      });
-      pushTimeline('ทำงานครบรอบคำสั่งแล้ว พร้อมรับคำสั่งถัดไป', 'Done', 'success');
+      this._finishTurn(session, now, payload.summary || payload.last_assistant_message);
     } else if (hookEvent === 'SessionEnd') {
       session.lifecycle = 'history';
       session.isProcessAlive = false;
@@ -974,11 +1189,74 @@ class StateStore extends EventEmitter {
       );
     }
 
+    // Any of these means a permission prompt reported earlier has been answered or abandoned.
+    if (['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionEnd'].includes(hookEvent)) {
+      session.hookPromptAt = null;
+      session.promptOnScreen = false;
+      session.permissionDetail = null;
+    }
+
+    // The last moment anything said this room is working; a transcript turn end after it means done.
+    if (session.status === 'working') {
+      session.workingSignalAt = now;
+    }
+
     this._enrichSessionFromTranscript(session);
-    this._deduplicateSessionsByCwd();
+    this._deduplicateSessions();
 
     this._emitChange('hook_event', { sessionId: session.id, hookEvent });
     return session;
+  }
+
+  /** Claude asked AskUserQuestion: show every question, exactly as written; the screen adds the cursor. */
+  _openAsk(session, toolInput, toolUseId, at) {
+    const questions = sanitizeQuestions(toolInput && toolInput.questions);
+    if (!questions) return;
+    session.pendingAsk = { id: String(toolUseId || ''), questions, at };
+    session.interactivePrompt = promptFromQuestions(questions);
+    session.status = 'needs_input';
+    session.statusLabel = askStatusLabel(session.interactivePrompt);
+    session.pendingAction = questions[0].question || 'Claude ต้องการให้คุณเลือกคำตอบ';
+    session.tldr = `⚠️ Claude ถามคุณ${questions.length > 1 ? ` ${questions.length} ข้อ` : ''}: ${questions[0].question}`;
+  }
+
+  /** A turn is over: from the Stop hook, or from the transcript when no hook reports it. */
+  _finishTurn(session, at, summary = null) {
+    session.status = 'done';
+    session.statusLabel = 'เสร็จสิ้น (รอบคำสั่ง)';
+    session.pendingAction = null;
+    session.interactivePrompt = null;
+    session.stageIndex = 3;
+    session.currentTool = 'Ready';
+    session.workingSignalAt = null;
+    session.pendingAsk = null;
+    session.hookPromptAt = null;
+    session.promptOnScreen = false;
+    session.permissionDetail = null;
+    for (const sub of session.subAgents) {
+      if (sub.state === 'working') {
+        sub.state = 'done';
+        sub.tool = 'Completed';
+      }
+    }
+    if (summary) {
+      session.tldr = summarizeText(summary, 220);
+    }
+    this._archiveTurnIntoHistory(session, {
+      goal: session.goal,
+      tldr: session.tldr,
+      timestamp: at,
+      sessionId: session.claudeSessionId || session.id,
+    });
+    session.recentEvents.unshift({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: at,
+      event: 'Stop',
+      title: 'ทำงานครบรอบคำสั่งแล้ว พร้อมรับคำสั่งถัดไป',
+      badge: 'Done',
+      level: 'success',
+    });
+    if (session.recentEvents.length > 30) session.recentEvents.length = 30;
   }
 
   enqueueCommand(sessionId, commandText) {
@@ -1009,6 +1287,26 @@ class StateStore extends EventEmitter {
     Object.assign(session, patch, { updatedAt: new Date().toISOString() });
     this._emitChange('session_updated', { sessionId });
     return session;
+  }
+
+  /**
+   * Manual room order from the dashboard: each known id takes its position in `ids`.
+   * The UI sorts by status first and uses this order inside each status group.
+   */
+  reorderSessions(ids) {
+    let position = 0;
+    let moved = 0;
+    for (const id of ids) {
+      const session = this.sessions.get(id);
+      if (!session) continue;
+      if (session.sortOrder !== position) {
+        session.sortOrder = position;
+        moved += 1;
+      }
+      position += 1;
+    }
+    if (moved) this._emitChange('sessions_reordered', { moved });
+    return moved;
   }
 
   archiveOrRemoveSession(sessionId, permanent = false) {
@@ -1094,11 +1392,24 @@ class StateStore extends EventEmitter {
         (sum, s) => sum + (Array.isArray(s.subAgents) ? s.subAgents.length : 0),
         0
       ),
+      totalTokens: list.reduce(
+        (sum, s) => sum + Number((s.tokenUsage && s.tokenUsage.totalTokens) || 0),
+        0
+      ),
+      totalCostUsd:
+        Math.round(
+          list.reduce(
+            (sum, s) =>
+              sum + Number((s.tokenUsage && s.tokenUsage.estimatedCostUsd) || 0),
+            0
+          ) * 10000
+        ) / 10000,
     };
 
     return {
       stages: STAGES,
       metrics,
+      usageGuard: this.usageGuard ? this.usageGuard.getUsageSummary() : null,
       projects,
       categories,
       sessions: list,

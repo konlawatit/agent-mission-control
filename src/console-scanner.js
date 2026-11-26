@@ -2,6 +2,7 @@ const { execFile, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { modelIdFromText } = require('./transcript-parser');
 
 const BRIDGE_SCRIPT = path.resolve(__dirname, 'win-console-bridge.ps1');
 
@@ -97,6 +98,42 @@ function splitCheckbox(label) {
   return { label: m[3], checked: !(mark === ' ' || mark === '☐' || mark === '◯') };
 }
 
+// The first line of Claude Code's start-up banner: the logo with "Claude Code v2.1.332" beside it
+// (or the boxed "✻ Welcome to Claude Code!" of older versions). Only the logo makes it the banner;
+// a reply that mentions "Claude Code v2.1" is not.
+const BANNER_RE = /[▐▛▜▌▝▘▗▖▙▟█].*Claude Code v\d|✻ Welcome to Claude Code/;
+// The model line under the logo: "Opus 5.5 · API Usage Billing", "Sonnet 5.5 · Claude Max".
+const BANNER_MODEL_RE = /\b(?:Opus|Sonnet|Haiku|Fable|Mythos)\s+\d+(?:\.\d+)?/i;
+// What /model prints when it is done: "⎿  Set model to Sonnet 5.5", "⎿  Kept model as Opus 5.5".
+const MODEL_SET_RE = /⎿\s+(?:Set model to|Kept model as)\s+(.+)/i;
+// The working spinner above the input box: "✶ Cogitating… (5s · ↓ 120 tokens)". A finished turn
+// leaves "✻ Worked for 5s", without the ellipsis.
+const SPINNER_RE = /^\s*[·✢✳✶✻✽*]\s+\S[^…]{0,60}…/;
+
+/** Index of the last start-up banner on screen (where this Claude session's output begins), or -1. */
+function findBanner(lines) {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!BANNER_RE.test(lines[i])) continue;
+    // The boxed banner starts at the box's top edge, one line up.
+    return i > 0 && /^\s*╭─/.test(lines[i - 1]) ? i - 1 : i;
+  }
+  return -1;
+}
+
+/**
+ * Whether Claude is in the middle of a turn: "esc to interrupt" in the footer, or the spinner
+ * just above the input box.
+ */
+function isBusyScreen(lines) {
+  if (lines.slice(-6).some((l) => /esc to interrupt/i.test(l))) return true;
+  const rules = [];
+  lines.forEach((l, i) => {
+    if (/^\s*[─━]{20,}\s*$/.test(l)) rules.push(i);
+  });
+  const boxTop = rules.length >= 2 ? rules[rules.length - 2] : lines.length;
+  return lines.slice(Math.max(0, boxTop - 12), boxTop).some((l) => SPINNER_RE.test(l));
+}
+
 function parseConsoleScreen(rawScreen, cursor = {}) {
   if (!rawScreen || typeof rawScreen !== 'string') {
     return null;
@@ -116,15 +153,30 @@ function parseConsoleScreen(rawScreen, cursor = {}) {
   let detectedVersion = null;
   let detectedModel = null;
 
+  // A new session's screen still holds the shell history above the banner (`dir`, `PS C:\…>
+  // claude`): what Claude printed starts at the banner, which also names the model and folder.
+  const bannerIdx = findBanner(lines);
+  if (bannerIdx >= 0) {
+    lines.slice(bannerIdx, bannerIdx + 8).forEach((line, i) => {
+      const ver = line.match(/Claude Code\s+(v[\d.]+)/i);
+      if (ver && !detectedVersion) detectedVersion = ver[1];
+      // The model sits beside the logo (its first three lines), never further down.
+      const model = i < 3 && !detectedModel && line.match(BANNER_MODEL_RE);
+      if (model) detectedModel = modelIdFromText(model[0]);
+      if (!detectedCwd) detectedCwd = extractValidDirectory(line);
+    });
+  }
+  // A /model switch shown after the banner is newer than it.
+  for (const line of lines.slice(Math.max(0, bannerIdx))) {
+    const set = line.match(MODEL_SET_RE);
+    if (set && modelIdFromText(set[1])) detectedModel = modelIdFromText(set[1]);
+  }
+
   for (let i = 0; i < Math.min(lines.length, 20); i++) {
     const line = lines[i];
-    const verMatch = line.match(/Claude Code\s+(v[\d\.]+)/i);
+    const verMatch = !detectedVersion && line.match(/Claude Code\s+(v[\d\.]+)/i);
     if (verMatch) {
       detectedVersion = verMatch[1];
-    }
-    const modelMatch = line.match(/(Opus|Sonnet|Haiku)\s+[\d\.]+[^│\r\n]*/i);
-    if (modelMatch) {
-      detectedModel = modelMatch[0].trim();
     }
     if (!detectedCwd) {
       const validDir = extractValidDirectory(line);
@@ -259,16 +311,18 @@ function parseConsoleScreen(rawScreen, cursor = {}) {
     if (nextItem) interactivePrompt.nextIndex = nextItem.index;
   }
 
-  const previewLines = lines.slice(-18).join('\n');
+  // The last 18 lines, starting no earlier than the banner (nothing of the shell above it).
+  const previewLines = lines.slice(Math.max(bannerIdx, lines.length - 18, 0)).join('\n');
 
   return {
     cwd: detectedCwd,
     version: detectedVersion,
+    // A model id ("claude-sonnet-5-5") when the banner or a /model switch is on screen, else null.
     model: detectedModel,
     interactivePrompt,
     // Only meaningful when no prompt dialog is up.
     inputText: interactivePrompt ? null : parseInputBox(lines, cursor),
-    busy: lines.slice(-6).some((l) => /esc to interrupt/i.test(l)),
+    busy: isBusyScreen(lines),
     screenPreview: previewLines,
   };
 }

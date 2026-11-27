@@ -47,6 +47,145 @@
       .replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
   }
 
+  /** Inline Markdown on already-escaped text: `code`, **bold**, and http(s) links (new tab). */
+  function inlineMd(escaped) {
+    const codes = [];
+    let out = escaped.replace(/`([^`]+)`/g, (_, c) => {
+      codes.push(`<code class="md-code">${c}</code>`);
+      return `\u0000${codes.length - 1}\u0000`;
+    });
+    out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a class="md-link" href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    out = out.replace(/(^|[\s(])(https?:\/\/[^\s)<]+)/g, '$1<a class="md-link" href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+    return out.replace(/\u0000(\d+)\u0000/g, (_, i) => codes[Number(i)] || '');
+  }
+
+  /**
+   * A Claude reply as the chat shows it, line by line: fenced code, tables, headings, lists,
+   * quotes and rules; everything else a paragraph per line. Escapes before it formats.
+   */
+  function replyHtml(text) {
+    const out = [];
+    let code = null;
+    let table = [];
+    const flushTable = () => {
+      if (table.length === 1) out.push(`<p>${inlineMd(esc(table[0]))}</p>`);
+      else if (table.length) {
+        const rows = table
+          .map((row, r) => {
+            const cells = row.replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+            if (r === 1 && cells.every((c) => /^:?-+:?$/.test(c))) return '';
+            const tag = r === 0 ? 'th' : 'td';
+            return `<tr>${cells.map((c) => `<${tag}>${inlineMd(esc(c))}</${tag}>`).join('')}</tr>`;
+          })
+          .join('');
+        out.push(`<div class="md-table-wrap"><table>${rows}</table></div>`);
+      }
+      table = [];
+    };
+    for (const line of String(text).replace(/\r\n/g, '\n').split('\n')) {
+      const t = line.trim();
+      if (t.startsWith('```')) {
+        flushTable();
+        if (code) {
+          out.push(`<pre class="md-pre"><code>${esc(code.join('\n'))}</code></pre>`);
+          code = null;
+        } else code = [];
+        continue;
+      }
+      if (code) {
+        code.push(line);
+        continue;
+      }
+      if (/^\|.+\|$/.test(t)) {
+        table.push(t);
+        continue;
+      }
+      flushTable();
+      if (!t) continue;
+      if (/^([-*_]{3,}|[─━═]{6,})$/.test(t)) {
+        out.push('<hr />');
+        continue;
+      }
+      const h = t.match(/^#{1,4}\s+(.+)$/);
+      if (h) {
+        out.push(`<p class="md-h">${inlineMd(esc(h[1]))}</p>`);
+        continue;
+      }
+      const li = line.match(/^(\s*)([-*•·]|\d+[.)])\s+(.+)$/);
+      if (li) {
+        const indent = Math.min(36, Math.floor(li[1].length / 2) * 12);
+        const mark = /\d/.test(li[2]) ? esc(li[2]) : '•';
+        out.push(`<div class="md-li" style="margin-left:${indent}px"><span class="md-li-mark">${mark}</span><div>${inlineMd(esc(li[3]))}</div></div>`);
+        continue;
+      }
+      if (t.startsWith('> ')) {
+        out.push(`<p class="md-quote">${inlineMd(esc(t.slice(2)))}</p>`);
+        continue;
+      }
+      out.push(`<p>${inlineMd(esc(t))}</p>`);
+    }
+    flushTable();
+    if (code && code.length) out.push(`<pre class="md-pre"><code>${esc(code.join('\n'))}</code></pre>`);
+    return out.join('');
+  }
+
+  // Every entry of a transcript preview starts with one of these (see displayLinesFor on the server).
+  const ENTRY_START = /^(🧑 คุณ:|⏳ รอส่ง:|🤖 Claude:|⏹|🔧\s*\[Tool:)/;
+  const CLAUDE_MARK = '🤖 Claude:';
+  const VERDICT_LINE = /^[ \t>*_`-]*QUEST-VERDICT\b[^\n]*$/gim;
+
+  /**
+   * The room's newest Claude reply in full, from the transcript preview the snapshot already
+   * carries: the last run of Claude entries, unless a prompt of yours came after it (that turn
+   * has no reply yet). The quest verdict line is for the runner, so it is left out.
+   */
+  function latestReply(s) {
+    if (!s || s.previewSource !== 'transcript' || typeof s.screenPreview !== 'string') return '';
+    const entries = [];
+    for (const line of s.screenPreview.replace(/\r\n/g, '\n').split('\n')) {
+      const t = line.trim();
+      if (ENTRY_START.test(t)) {
+        const claude = t.startsWith(CLAUDE_MARK);
+        entries.push({ claude, user: t.startsWith('🧑 คุณ:'), lines: [claude ? t.slice(CLAUDE_MARK.length) : line] });
+      } else if (entries.length) entries[entries.length - 1].lines.push(line);
+    }
+    let last = entries.length - 1;
+    while (last >= 0 && !entries[last].claude && !entries[last].user) last -= 1;
+    if (last < 0 || !entries[last].claude) return '';
+    let first = last;
+    while (first > 0 && entries[first - 1].claude) first -= 1;
+    const text = entries
+      .slice(first, last + 1)
+      .map((e) => e.lines.join('\n').trim())
+      .filter(Boolean)
+      .join('\n\n');
+    return text.replace(VERDICT_LINE, '').trim() || text;
+  }
+
+  /** Whether the TL;DR is only the start of the reply (the server's 220-character summary of it). */
+  function tldrCoveredBy(tldr, reply) {
+    const flat = (x) => textOf(x).replace(/```[\s\S]*?```/g, '[โค้ด/คำสั่ง]').replace(/\s+/g, ' ').trim();
+    const head = flat(tldr).replace(/(…|\.\.\.)$/, '').slice(0, 60);
+    return Boolean(head) && flat(reply).startsWith(head);
+  }
+
+  const replySig = (text) => `${text.length}:${hashString(text)}`;
+
+  /** Shows the expand button only when the collapsed reply is cut off. */
+  function fitReply(root) {
+    const box = root && root.querySelector('.reply');
+    const btn = root && root.querySelector('#reply-toggle');
+    if (!box || !btn) return;
+    if (box.classList.contains('is-open')) {
+      btn.hidden = false;
+      return;
+    }
+    const cut = box.scrollHeight > box.clientHeight + 2;
+    box.classList.toggle('is-clamped', cut);
+    btn.hidden = !cut;
+  }
+
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const textOf = (v) => (typeof v === 'string' ? v : v === null || v === undefined ? '' : String(v));
 
@@ -114,6 +253,8 @@
     send: '<path d="M5 12h13M12.5 6l6 6-6 6"/>',
     chevronLeft: '<path d="m14.5 6-6 6 6 6"/>',
     chevronRight: '<path d="m9.5 6 6 6-6 6"/>',
+    chevronDown: '<path d="m6 9.5 6 6 6-6"/>',
+    chevronUp: '<path d="m6 14.5 6-6 6 6"/>',
     spark: '<path d="M12 3.5c.6 4.3 2.2 5.9 6.5 6.5-4.3.6-5.9 2.2-6.5 6.5-.6-4.3-2.2-5.9-6.5-6.5 4.3-.6 5.9-2.2 6.5-6.5z"/><path d="M18.5 16v4M16.5 18h4"/>',
     play: '<path d="M8 5.5v13l10-6.5z"/>',
     stop: '<rect x="6.5" y="6.5" width="11" height="11" rx="1.5"/>',
@@ -455,6 +596,7 @@
     usageGuard: null,
     pendingFocus: null, // { id, questId, until, fromHash }
     busy: new Set(),
+    replyOpen: new Map(), // hero id -> signature of the reply shown in full (a new reply starts collapsed)
   };
 
   /** Live heroes by session id. Insertion order is stable, so battle slots and spots stay put. */
@@ -2249,15 +2391,30 @@
     const q = h.view.quest;
     const pill = statusPill(h);
     const tool = textOf(s.currentTool);
+    const reply = latestReply(s);
+    // The TL;DR still says what is happening right now (a tool, a question); once it is only the
+    // start of the reply below, the reply says it in full.
+    const showTldr = textOf(s.tldr).trim() && !(reply && tldrCoveredBy(s.tldr, reply));
+    const open = Boolean(reply) && state.replyOpen.get(h.id) === replySig(reply);
+    const replyBlock = reply
+      ? `<div class="reply-wrap">
+          <div class="reply-label">${icon('spark', 12)}<span>ข้อความล่าสุดจาก Claude</span></div>
+          <div id="hero-reply" class="reply selectable${open ? ' is-open' : ''}">${replyHtml(reply)}</div>
+          <button type="button" id="reply-toggle" class="link-btn reply-toggle" data-act="reply-toggle" data-id="${esc(h.id)}" aria-controls="hero-reply" aria-expanded="${open}" hidden>${
+            open ? `${icon('chevronUp', 14)}<span>ย่อข้อความ</span>` : `${icon('chevronDown', 14)}<span>ดูข้อความทั้งหมด</span>`
+          }</button>
+        </div>`
+      : '';
     return `
       <div class="card">
         <div class="row row-between">
           <span class="pill ${pill.cls}">${esc(pill.label)}</span>
           ${tool && tool !== 'Idle' ? `<span class="mono" style="font-size:11px;color:#94a3b8" title="${esc(tool)}">${esc(truncate(tool, 40))}</span>` : ''}
         </div>
-        <div class="card-title pixel">${q ? 'เป้าหมายเควสต์' : 'งานล่าสุด'} &amp; TL;DR</div>
+        <div class="card-title pixel">${q ? 'เป้าหมายเควสต์' : 'งานล่าสุด'}</div>
         <div class="goal selectable">${esc(q ? q.goal : s.goal)}</div>
-        <div class="tldr selectable">${miniMd(s.tldr)}</div>
+        ${showTldr ? `<div class="tldr selectable">${miniMd(s.tldr)}</div>` : ''}
+        ${replyBlock}
       </div>
       ${q ? questCardHtml(h) : stageCardHtml(h)}
       <div class="card card-cyan">
@@ -2388,6 +2545,7 @@
     el.innerHTML = drawerHtml(h);
     el.classList.add('open');
     el.setAttribute('aria-hidden', 'false');
+    fitReply(el);
 
     const msg = $('#cmd-input', el);
     if (msg) msg.value = drafts.msg.get(h.id) || '';
@@ -2849,6 +3007,20 @@
       state.drawerTab = el.getAttribute('data-tab') || 'overview';
       renderDrawer(true);
     },
+    'reply-toggle': (el, id) => {
+      const h = heroes.get(id);
+      const reply = h ? latestReply(h.session) : '';
+      if (!reply) return;
+      playSfx('click');
+      const sig = replySig(reply);
+      const opening = state.replyOpen.get(id) !== sig;
+      if (opening) state.replyOpen.set(id, sig);
+      else state.replyOpen.delete(id);
+      renderDrawer(true);
+      // Folding a long reply can leave the view far below it: bring its button back into sight.
+      const btn = document.getElementById('reply-toggle');
+      if (btn && !opening) btn.scrollIntoView({ block: 'nearest' });
+    },
     'next-waiting': () => nextWaiting(),
     'choose-option': (el, id) => chooseOption(id, el.getAttribute('data-index')),
     approve: (el, id) => approve(id),
@@ -2989,6 +3161,7 @@
 
   window.addEventListener('resize', () => {
     resizeCanvas();
+    fitReply($('#drawer'));
     const sel = state.selectedId && heroes.get(state.selectedId);
     if (sel && sel.scene === state.currentScene) focusCamera(sel);
     else resetCamera();

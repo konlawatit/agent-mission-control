@@ -255,6 +255,9 @@ toast). What changes:
 - **Progress**: quest → phase progress (`phaseIndex / phaseCount`, loop shown); otherwise stage.
   While working an indeterminate shimmer moves, no fake percentage.
 - **Inspector drawer** for the selected hero: name, class, cwd/branch, status label, goal, TL;DR,
+  the newest Claude reply in full (taken from the snapshot's transcript `screenPreview`, verdict
+  line removed, folded past 8 lines with a "ดูข้อความทั้งหมด" toggle; the TL;DR is hidden when it is
+  only the start of that reply, and no reply is shown when a newer prompt has none yet),
   quest timeline (phases with current one marked, loop n/max, state + reason, last log lines),
   current tool, sub-agents, modified files, and actions:
   - pending permission/choice: buttons from `session.interactivePrompt.options` →
